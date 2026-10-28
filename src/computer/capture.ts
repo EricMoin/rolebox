@@ -8,16 +8,14 @@
  * model, and plain text (`[image: image/png, N bytes]` plus the saved path) for
  * a transcript — never base64 in the text.
  *
- * A capture is in device pixels, while input is asked for in screen
- * coordinates, so a PNG that states its own density is also reported as
- * `metadata.pixel_scale`, and one whose pixels are not screen points says so in
- * the text.
+ * Native capture geometry and the PNG dimensions define the image-to-screen
+ * mapping, including a separate ratio for each axis on mixed-scale desktops.
  */
 
 import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { ToolResult } from "../platform/types.ts";
-import type { ComputerCaptureRequest } from "../platform/system/types.ts";
+import type { ComputerCaptureGeometry, ComputerCaptureRequest } from "../platform/system/types.ts";
 import { hasPngSignature, readPngResolution, readPngSize } from "./png.ts";
 
 /** The worktree-relative directory every capture is written under. */
@@ -118,16 +116,16 @@ function screenshotFailure(driver: string, platform: string, message: string): T
 /**
  * Read a written capture and build the screenshot tool's result.
  *
- * The geometry in `metadata` is the PNG's own IHDR values and the byte count is
- * the file's, so a helper that wrote a different size than requested cannot
- * make the tool report a picture it did not take. The density the file states,
- * when it states a usable one, is `metadata.pixel_scale`.
+ * Raster dimensions come from the PNG, while the captured bounds come from
+ * the native helper's verified snapshot. Callers without a snapshot retain
+ * the legacy density fallback; the screenshot tool always supplies geometry.
  */
 export function captureResult(
   path: string,
   platform: string,
   driver: string,
   target?: Omit<ComputerCaptureRequest, "path">,
+  geometry?: ComputerCaptureGeometry,
 ): ToolResult {
   let bytes: Buffer;
   try {
@@ -154,7 +152,10 @@ export function captureResult(
       `the ${driver} command wrote ${path}, but ${reason}; nothing was returned as an image.`,
     );
   }
-  const scale = platform === "darwin" ? readPixelScale(bytes) : 1;
+  const scaleX = geometry === undefined ? undefined : size.width / geometry.bounds.w;
+  const scaleY = geometry === undefined ? undefined : size.height / geometry.bounds.h;
+  const scale = geometry === undefined ? platform === "darwin" ? readPixelScale(bytes) : 1
+    : Math.abs(scaleX! - scaleY!) < 1e-9 ? scaleX! : null;
   const output = [`[image: image/png, ${bytes.byteLength} bytes]`, path];
   if (scale !== null && scale > 1) output.push(pixelScaleNote(size.width, size.height, scale));
   const metadata: Record<string, unknown> = {
@@ -168,17 +169,24 @@ export function captureResult(
   };
   if (scale !== null) metadata.pixel_scale = scale;
   if (target !== undefined) {
-    const origin = target.region !== undefined
+    const origin = geometry !== undefined ? { x: geometry.bounds.x, y: geometry.bounds.y } : target.region !== undefined
       ? { x: Math.round(target.region.x), y: Math.round(target.region.y) }
       : target.windowId === undefined && target.display === undefined ? { x: 0, y: 0 } : null;
     metadata.origin = origin;
     metadata.coordinate_space = "screen";
+    if (geometry !== undefined) {
+      metadata.screen_bounds = geometry.bounds;
+      metadata.displays = geometry.displays;
+      metadata.pixel_scale_x = scaleX;
+      metadata.pixel_scale_y = scaleY;
+      output.push(`Screen coordinates = (${origin!.x}, ${origin!.y}) + image coordinates / (${scaleX}, ${scaleY}). The per-axis scales describe this image; display UI scaling is separate.`);
+    }
     metadata.target = target.windowId !== undefined ? { window_id: target.windowId }
       : target.region !== undefined ? { region: target.region }
         : target.display !== undefined ? { display: target.display } : { default: true };
     if (origin === null) output.push("The screen origin of this window/display capture is unknown. Locate its screen bounds before converting image coordinates to absolute input coordinates.");
-    else if (target.region !== undefined) output.push(`Screen coordinates = origin (${origin.x}, ${origin.y}) + image coordinates / pixel_scale. Do not use image coordinates directly.`);
-    if (scale === null) output.push("The image does not declare a reliable pixel_scale. Establish its scale before converting image coordinates to screen coordinates.");
+    else if (geometry === undefined && target.region !== undefined) output.push(`Screen coordinates = origin (${origin.x}, ${origin.y}) + image coordinates / pixel_scale. Do not use image coordinates directly.`);
+    if (scale === null && geometry === undefined) output.push("The image does not declare a reliable pixel_scale. Establish its scale before converting image coordinates to screen coordinates.");
   }
   return {
     title: `Image: ${path}`,

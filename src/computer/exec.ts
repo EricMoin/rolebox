@@ -31,8 +31,8 @@ const MAX_DETAIL_CHARS = 400;
 
 /** What one executed plan produced. */
 export type ComputerRunResult =
-  | { readonly ok: true; readonly output: string }
-  | { readonly ok: false; readonly error: string; readonly permission?: ComputerPermission };
+  | { readonly ok: true; readonly output: string; readonly stdout: string }
+  | { readonly ok: false; readonly error: string; readonly permission?: ComputerPermission; readonly inputNotStarted?: boolean };
 
 /** One plan run's bounds. */
 export interface ComputerRunOptions {
@@ -111,7 +111,7 @@ export async function runComputerPlan(
   } catch (error) {
     result = { ok: false, error: `Error: the ${plan.driver} command could not run: ${error instanceof Error ? error.message : String(error)}` };
   }
-  if (!result.ok && started && plan.cleanupPlan !== undefined) {
+  if (!result.ok && !result.inputNotStarted && started && plan.cleanupPlan !== undefined) {
     const { cleanupPlan: _nested, ...cleanupPlan } = plan.cleanupPlan;
     const cleanup = await runComputerPlan(cleanupPlan, { env: options.env, cwd: options.cwd, timeoutMs: 2000 });
     if (!cleanup.ok) return { ...result, error: `${result.error} Mouse release could not be confirmed: ${cleanup.error}` };
@@ -147,6 +147,7 @@ async function runComputerCommand(
 
   return await new Promise<ComputerRunResult>(resolve => {
     const chunks: Buffer[] = [];
+    const stdout: Buffer[] = [];
     let bytes = 0;
     let stopped: "timeout" | "abort" | "output" | null = null;
     let settled = false;
@@ -183,7 +184,10 @@ async function runComputerCommand(
       }
       chunks.push(chunk);
     };
-    child.stdout?.on("data", onData);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      onData(chunk);
+      if (stopped === null) stdout.push(chunk);
+    });
     child.stderr?.on("data", onData);
 
     const timer = setTimeout(() => stop("timeout"), timeoutMs);
@@ -225,7 +229,9 @@ async function runComputerCommand(
         return;
       }
       if (code !== 0) {
-        const detail = firstLine(output);
+        const guardMarker = signal === null ? plan.inputGuardFailureMarker : undefined;
+        const guardLine = guardMarker === undefined ? undefined : output.split(/\r?\n/).find(line => line.includes(guardMarker));
+        const detail = firstLine(guardLine === undefined ? output : guardLine.replace(`${guardMarker}: `, ""));
         const permission = signal === null ? deniedComputerPermission(output) : undefined;
         const outcome = signal === null ? `exited with status ${code}` : `was terminated by signal ${signal}`;
         resolve({
@@ -233,10 +239,11 @@ async function runComputerCommand(
           error: `Error: the ${plan.driver} command ${outcome}${detail.length === 0 ? "." : `: ${detail}`}` +
             (permission !== undefined && plan.permissionHint !== undefined ? ` ${plan.permissionHint}` : ""),
           ...(permission === undefined ? {} : { permission }),
+          ...(guardLine === undefined ? {} : { inputNotStarted: true }),
         });
         return;
       }
-      resolve({ ok: true, output: output.trim() });
+      resolve({ ok: true, output: output.trim(), stdout: Buffer.concat(stdout).toString("utf8").trim() });
     });
   });
 }

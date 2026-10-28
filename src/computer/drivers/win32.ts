@@ -1,15 +1,14 @@
 /**
  * Windows computer-use driver — PowerShell, one script per plan.
  *
- * Capture is System.Drawing: `Screen.PrimaryScreen.Bounds` by default,
- * `Screen.AllScreens[n].Bounds` for one display, an explicit
- * rectangle for a region, and a `GetWindowRect` P/Invoke for one window.
+ * Capture is System.Drawing: native monitor bounds by default or display index,
+ * an explicit rectangle for a region, and `GetWindowRect` for one window.
  * `Graphics.CopyFromScreen` writes straight into a bitmap saved as PNG.
  *
  * Input is `System.Windows.Forms`: `Cursor`/`SetCursorPos` + `mouse_event` for
  * pointer moves and clicks, `SendKeys.SendWait` for text and key presses, and
- * `Get-Process` for the window listing (a window id here is the process's
- * `MainWindowHandle`).
+ * `EnumWindows` for the window listing (each top-level window has its own
+ * HWND, including multiple windows owned by the same process).
  *
  * PowerShell is not part of every Windows install rolebox runs on, and UIPI
  * still blocks synthetic input aimed at an elevated window, so the plan names
@@ -21,6 +20,7 @@
  */
 
 import type {
+  ComputerCaptureGuard,
   ComputerCaptureRequest,
   ComputerInputRequest,
   ComputerPlan,
@@ -89,14 +89,71 @@ const WINDOW_API = [
   "'@",
 ].join("\n");
 
+const WINDOW_LIST_API = [
+  "Add-Type @'",
+  "using System;",
+  "using System.Collections.Generic;",
+  "using System.Runtime.InteropServices;",
+  "using System.Text;",
+  "public class RoleboxWindowList {",
+  "  private delegate bool EnumWindowsProc(IntPtr handle, IntPtr data);",
+  '  [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr data);',
+  '  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);',
+  '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr handle, StringBuilder text, int capacity);',
+  '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);',
+  "  public static IntPtr[] VisibleWindows() {",
+  "    var windows = new List<IntPtr>();",
+  "    if (!EnumWindows(delegate(IntPtr handle, IntPtr data) {",
+  "      if (IsWindowVisible(handle)) windows.Add(handle);",
+  "      return true;",
+  '    }, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "could not enumerate desktop windows");',
+  "    return windows.ToArray();",
+  "  }",
+  "}",
+  "'@",
+].join("\n");
+
+// Use AllScreens' enumeration order without its cache when checking topology twice.
 const DISPLAY_API = [
   "Add-Type @'",
   "using System;",
+  "using System.Collections.Generic;",
   "using System.Runtime.InteropServices;",
   "public struct RoleboxMonitorRect { public int Left; public int Top; public int Right; public int Bottom; }",
+  "[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]",
+  "public struct RoleboxMonitorInfo {",
+  "  public int Size; public RoleboxMonitorRect Monitor; public RoleboxMonitorRect Work; public uint Flags;",
+  "  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Device;",
+  "}",
+  "public class RoleboxDisplay {",
+  "  public int id; public int x; public int y; public int width; public int height;",
+  "  public double scale; public bool primary; public string name;",
+  "}",
   "public class RoleboxDisplayApi {",
-  '  [DllImport("user32.dll")] public static extern IntPtr MonitorFromRect(ref RoleboxMonitorRect rect, uint flags);',
-  '  [DllImport("shcore.dll")] public static extern int GetScaleFactorForMonitor(IntPtr monitor, out int scale);',
+  "  private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data);",
+  '  [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorEnumProc callback, IntPtr data);',
+  '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref RoleboxMonitorInfo info);',
+  '  [DllImport("shcore.dll")] private static extern int GetScaleFactorForMonitor(IntPtr monitor, out int scale);',
+  "  public static RoleboxDisplay[] Snapshot() {",
+  "    var monitors = new List<IntPtr>();",
+  "    if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data) {",
+  "      monitors.Add(monitor); return true;",
+  '    }, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "could not enumerate displays");',
+  "    var displays = new List<RoleboxDisplay>();",
+  "    foreach (var monitor in monitors) {",
+  "      var info = new RoleboxMonitorInfo(); info.Size = Marshal.SizeOf(typeof(RoleboxMonitorInfo));",
+  '      if (!GetMonitorInfo(monitor, ref info)) throw new InvalidOperationException("could not read monitor bounds");',
+  "      int scale;",
+  '      if (GetScaleFactorForMonitor(monitor, out scale) != 0 || scale <= 0) throw new InvalidOperationException("could not read monitor scale");',
+  "      var bounds = info.Monitor;",
+  '      if (bounds.Right <= bounds.Left || bounds.Bottom <= bounds.Top) throw new InvalidOperationException("display has empty bounds");',
+  "      displays.Add(new RoleboxDisplay { id = displays.Count, x = bounds.Left, y = bounds.Top,",
+  "        width = bounds.Right - bounds.Left, height = bounds.Bottom - bounds.Top,",
+  "        scale = scale / 100.0, primary = (info.Flags & 1) != 0, name = info.Device });",
+  "    }",
+  '    if (displays.Count == 0) throw new InvalidOperationException("no displays are available");',
+  "    return displays.ToArray();",
+  "  }",
   "}",
   "'@",
 ].join("\n");
@@ -242,18 +299,100 @@ function powerShellPlan(script: string): ComputerPlan {
   };
 }
 
-function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
-  if (request.display !== undefined && (!Number.isInteger(request.display) || request.display < 0)) {
+const GEOMETRY_CHANGED = "screenshot geometry changed; take a fresh screenshot";
+const INPUT_GUARD_FAILURE_MARKER = "ROLEBOX_SCREENSHOT_STALE";
+
+function pointerPlan(script: string, guard: ComputerCaptureGuard | undefined): ComputerPlan {
+  return { ...powerShellPlan(script), ...(guard === undefined ? {} : { inputGuardFailureMarker: INPUT_GUARD_FAILURE_MARKER }) };
+}
+
+type CaptureTarget = Omit<ComputerCaptureRequest, "path">;
+
+function captureTargetRefusal(target: CaptureTarget): string | undefined {
+  if (target.display !== undefined && (!Number.isInteger(target.display) || target.display < 0)) {
     return "a Windows display must be a non-negative index from computer_displays.";
   }
-  if (request.windowId !== undefined && request.region !== undefined) {
-    return "a Windows capture takes one window or one region, not both; pass window_id or region.";
+  if ([target.windowId, target.region, target.display].filter(value => value !== undefined).length > 1) {
+    return "a Windows capture takes one window, region or display, not both; pass only one target.";
   }
-  if (request.windowId !== undefined && request.display !== undefined) {
-    return "a single-window capture does not select a display; pass window_id or display.";
+  if (target.windowId !== undefined && !usableWindowId(target.windowId)) {
+    return "a window id must be a positive whole number (Windows window ids come from computer_windows).";
   }
+  if (target.region !== undefined && wholeRegion(target.region) === null) return REGION_REFUSAL;
+}
+
+function geometryStatements(target: CaptureTarget, windowApiInstalled = false): string[] {
+  let bounds: string[];
+  if (target.windowId !== undefined) {
+    bounds = [
+      "$rect = New-Object RoleboxRect",
+      `if (-not [RoleboxWindowApi]::GetWindowRect([IntPtr]${target.windowId}, [ref]$rect)) { throw 'window ${target.windowId} does not exist' }`,
+      "$bounds = [ordered]@{ x = $rect.Left; y = $rect.Top; w = $rect.Right - $rect.Left; h = $rect.Bottom - $rect.Top }",
+    ];
+  } else if (target.region !== undefined) {
+    const region = wholeRegion(target.region)!;
+    bounds = [`$bounds = [ordered]@{ x = ${region.x}; y = ${region.y}; w = ${region.w}; h = ${region.h} }`];
+  } else {
+    bounds = target.display === undefined ? [
+      "$primary = @($displays | Where-Object { $_.primary })",
+      "if ($primary.Count -ne 1) { throw 'could not identify the primary display' }",
+      "$display = $primary[0]",
+    ] : [
+      `if (${target.display} -ge $displays.Count) { throw 'display ${target.display} does not exist' }`,
+      `$display = $displays[${target.display}]`,
+    ];
+    bounds.push("$bounds = [ordered]@{ x = $display.x; y = $display.y; w = $display.width; h = $display.height }");
+  }
+  return [
+    DISPLAY_API,
+    ...(target.windowId !== undefined && !windowApiInstalled ? [WINDOW_API] : []),
+    "function Get-RoleboxGeometry {",
+    "  $displays = @([RoleboxDisplayApi]::Snapshot())",
+    ...bounds,
+    "  if ($bounds.w -le 0 -or $bounds.h -le 0) { throw 'capture target has empty bounds' }",
+    "  return [PSCustomObject]@{ bounds = [PSCustomObject]$bounds; displays = $displays }",
+    "}",
+    "function Assert-RoleboxGeometry($expected, $actual) {",
+    "  foreach ($field in @('x', 'y', 'w', 'h')) {",
+    `    if ($expected.bounds.$field -ne $actual.bounds.$field) { throw '${GEOMETRY_CHANGED}' }`,
+    "  }",
+    `  if ($expected.displays.Count -ne $actual.displays.Count) { throw '${GEOMETRY_CHANGED}' }`,
+    "  for ($index = 0; $index -lt $expected.displays.Count; $index++) {",
+    "    foreach ($field in @('id', 'x', 'y', 'width', 'height', 'scale', 'primary', 'name')) {",
+    `      if ($expected.displays[$index].$field -cne $actual.displays[$index].$field) { throw '${GEOMETRY_CHANGED}' }`,
+    "    }",
+    "  }",
+    "}",
+  ];
+}
+
+function captureGuardStatements(guard: ComputerCaptureGuard | undefined, windowApiInstalled: boolean): string[] {
+  if (guard === undefined) return [];
+  return [
+    ...geometryStatements(guard.target, windowApiInstalled),
+    `$expectedGeometry = ConvertFrom-Json -InputObject ${powerShellQuote(JSON.stringify(guard.geometry))}`,
+    "try {",
+    "  $currentGeometry = Get-RoleboxGeometry",
+    "  Assert-RoleboxGeometry $expectedGeometry $currentGeometry",
+    `} catch { throw '${INPUT_GUARD_FAILURE_MARKER}: ${GEOMETRY_CHANGED}' }`,
+  ];
+}
+
+function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
+  const refusal = captureTargetRefusal(request);
+  if (refusal !== undefined) return refusal;
   const path = powerShellQuote(request.path);
-  const save = [
+  return powerShellPlan([
+    "$ErrorActionPreference = 'Stop'",
+    DPI_API,
+    "Add-Type -AssemblyName System.Drawing",
+    ...geometryStatements(request),
+    "$beforeGeometry = Get-RoleboxGeometry",
+    "$sourceX = $beforeGeometry.bounds.x",
+    "$sourceY = $beforeGeometry.bounds.y",
+    "$width = $beforeGeometry.bounds.w",
+    "$height = $beforeGeometry.bounds.h",
+    "$bitmap = New-Object System.Drawing.Bitmap($width, $height)",
     "try {",
     "  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
     "  try {",
@@ -261,111 +400,50 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
     `    $bitmap.Save(${path}, [System.Drawing.Imaging.ImageFormat]::Png)`,
     "  } finally { $graphics.Dispose() }",
     "} finally { $bitmap.Dispose() }",
-  ];
-
-  if (request.windowId !== undefined) {
-    if (!usableWindowId(request.windowId)) {
-      return "a window id must be a positive whole number (Windows window ids come from computer_windows).";
-    }
-    return powerShellPlan(
-      [
-        "$ErrorActionPreference = 'Stop'",
-        DPI_API,
-        "Add-Type -AssemblyName System.Drawing",
-        WINDOW_API,
-        "$rect = New-Object RoleboxRect",
-        `if (-not [RoleboxWindowApi]::GetWindowRect([IntPtr]${request.windowId}, [ref]$rect)) { Write-Error 'window ${request.windowId} does not exist'; exit 3 }`,
-        "$width = $rect.Right - $rect.Left",
-        "$height = $rect.Bottom - $rect.Top",
-        `if ($width -le 0 -or $height -le 0) { Write-Error 'window ${request.windowId} has an empty rectangle'; exit 3 }`,
-        "$sourceX = $rect.Left",
-        "$sourceY = $rect.Top",
-        "$bitmap = New-Object System.Drawing.Bitmap($width, $height)",
-        ...save,
-      ].join("\n"),
-    );
-  }
-
-  let source: string[];
-  if (request.region !== undefined) {
-    const region = wholeRegion(request.region);
-    if (region === null) return REGION_REFUSAL;
-    source = [
-      "$sourceX = " + region.x,
-      "$sourceY = " + region.y,
-      "$width = " + region.w,
-      "$height = " + region.h,
-    ];
-  } else if (request.display !== undefined) {
-    source = [
-      "$screens = [System.Windows.Forms.Screen]::AllScreens",
-      `if (${request.display} -ge $screens.Count) { Write-Error 'display ${request.display} does not exist; this session has ' + $screens.Count + ' display(s)'; exit 3 }`,
-      `$bounds = $screens[${request.display}].Bounds`,
-      "$sourceX = $bounds.X",
-      "$sourceY = $bounds.Y",
-      "$width = $bounds.Width",
-      "$height = $bounds.Height",
-    ];
-  } else {
-    source = [
-      "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
-      "$sourceX = $bounds.X",
-      "$sourceY = $bounds.Y",
-      "$width = $bounds.Width",
-      "$height = $bounds.Height",
-    ];
-  }
-  return powerShellPlan(
-    [
-      "$ErrorActionPreference = 'Stop'",
-      DPI_API,
-      "Add-Type -AssemblyName System.Drawing",
-      "Add-Type -AssemblyName System.Windows.Forms",
-      ...source,
-      "$bitmap = New-Object System.Drawing.Bitmap($width, $height)",
-      ...save,
-    ].join("\n"),
-  );
+    "try {",
+    "  $afterGeometry = Get-RoleboxGeometry",
+    "  Assert-RoleboxGeometry $beforeGeometry $afterGeometry",
+    `} catch { throw '${GEOMETRY_CHANGED}' }`,
+    "ConvertTo-Json -InputObject $beforeGeometry -Depth 6 -Compress",
+  ].join("\n"));
 }
 
-/** Why one window cannot be the target of an input gesture through SendKeys. */
-function windowTargetingRefusal(action: string): string {
-  return `SendKeys and mouse_event send ${action} to the focused window, not to a named one; bring the window to the foreground and call computer_${action} again without window_id.`;
+function focusStatements(windowId: number | undefined): string[] {
+  if (windowId === undefined) return [];
+  return [
+    WINDOW_API,
+    `$handle = [IntPtr]${windowId}`,
+    "if (-not [RoleboxWindowApi]::IsWindow($handle)) { throw 'window does not exist' }",
+    "if ([RoleboxWindowApi]::IsIconic($handle)) { [void][RoleboxWindowApi]::ShowWindowAsync($handle, 9) }",
+    "[void][RoleboxWindowApi]::SetForegroundWindow($handle)",
+    "for ($attempt = 0; $attempt -lt 20 -and [RoleboxWindowApi]::GetForegroundWindow() -ne $handle; $attempt++) { Start-Sleep -Milliseconds 50 }",
+    "if ([RoleboxWindowApi]::GetForegroundWindow() -ne $handle) { throw 'Windows refused foreground activation; select the target window manually and retry' }",
+  ];
 }
 
 function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
+  if ("windowId" in request && request.windowId !== undefined && !usableWindowId(request.windowId)) {
+    return "a window id must be a positive whole number.";
+  }
+  const captureGuard = "captureGuard" in request ? request.captureGuard : undefined;
+  if (captureGuard !== undefined) {
+    const refusal = captureTargetRefusal(captureGuard.target);
+    if (refusal !== undefined) return refusal;
+  }
   switch (request.action) {
     case "displays": {
       return powerShellPlan([
         "$ErrorActionPreference = 'Stop'",
         DPI_API,
-        "Add-Type -AssemblyName System.Windows.Forms",
         DISPLAY_API,
-        "$screens = [System.Windows.Forms.Screen]::AllScreens",
-        "$displays = @(for ($index = 0; $index -lt $screens.Count; $index++) {",
-        "  $screen = $screens[$index]",
-        "  $bounds = $screen.Bounds",
-        "  $rect = New-Object RoleboxMonitorRect",
-        "  $rect.Left = $bounds.Left; $rect.Top = $bounds.Top; $rect.Right = $bounds.Right; $rect.Bottom = $bounds.Bottom",
-        "  $monitor = [RoleboxDisplayApi]::MonitorFromRect([ref]$rect, 0)",
-        "  $scale = 100",
-        "  if ($monitor -eq [IntPtr]::Zero -or [RoleboxDisplayApi]::GetScaleFactorForMonitor($monitor, [ref]$scale) -ne 0) { throw 'could not read monitor scale' }",
-        "  [PSCustomObject]@{ id = $index; x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height; scale = $scale / 100.0; primary = $screen.Primary }",
-        "})",
+        "$displays = @([RoleboxDisplayApi]::Snapshot())",
         "ConvertTo-Json -InputObject $displays -Compress",
       ].join("\n"));
     }
     case "focus": {
-      if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
       return powerShellPlan([
         "$ErrorActionPreference = 'Stop'",
-        WINDOW_API,
-        `$handle = [IntPtr]${request.windowId}`,
-        "if (-not [RoleboxWindowApi]::IsWindow($handle)) { throw 'window does not exist' }",
-        "if ([RoleboxWindowApi]::IsIconic($handle)) { [void][RoleboxWindowApi]::ShowWindowAsync($handle, 9) }",
-        "[void][RoleboxWindowApi]::SetForegroundWindow($handle)",
-        "for ($attempt = 0; $attempt -lt 20 -and [RoleboxWindowApi]::GetForegroundWindow() -ne $handle; $attempt++) { Start-Sleep -Milliseconds 50 }",
-        "if ([RoleboxWindowApi]::GetForegroundWindow() -ne $handle) { throw 'Windows refused foreground activation; select the target window manually and retry' }",
+        ...focusStatements(request.windowId),
       ].join("\n"));
     }
     case "scroll": {
@@ -379,13 +457,15 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       }
       const horizontal = request.direction === "left" || request.direction === "right";
       const delta = request.amount * 120 * (request.direction === "down" || request.direction === "left" ? -1 : 1);
-      return powerShellPlan([
+      return pointerPlan([
         "$ErrorActionPreference = 'Stop'",
         DPI_API,
         MOUSE_API,
+        ...focusStatements(request.windowId),
+        ...captureGuardStatements(request.captureGuard, request.windowId !== undefined),
         ...movement,
         `[RoleboxMouse]::mouse_event(${horizontal ? "0x01000" : "0x0800"}, 0, 0, ${delta}, [UIntPtr]::Zero)`,
-      ].join("\n"));
+      ].join("\n"), request.captureGuard);
     }
     case "drag": {
       const points = [request.fromX, request.fromY, request.toX, request.toY];
@@ -393,10 +473,12 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       if (!Number.isInteger(request.durationMs) || request.durationMs < 100 || request.durationMs > 5000) return "drag duration must be an integer from 100 to 5000 milliseconds.";
       const [fromX, fromY, toX, toY] = points.map(Math.round);
       const steps = Math.min(100, Math.ceil(request.durationMs / 20));
-      const drag = powerShellPlan([
+      const drag = pointerPlan([
         "$ErrorActionPreference = 'Stop'",
         DPI_API,
         MOUSE_API,
+        ...focusStatements(request.windowId),
+        ...captureGuardStatements(request.captureGuard, request.windowId !== undefined),
         `if (-not [RoleboxMouse]::SetCursorPos(${fromX}, ${fromY})) { throw 'could not move the pointer to the drag origin' }`,
         "try {",
         "  [RoleboxMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)",
@@ -409,7 +491,7 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
         "} finally {",
         "  [RoleboxMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)",
         "}",
-      ].join("\n"));
+      ].join("\n"), request.captureGuard);
       return {
         ...drag,
         cleanupPlan: powerShellPlan([
@@ -422,17 +504,26 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       const app = request.app === undefined || request.app.trim().length === 0 ? null : request.app.trim();
       const filter =
         app === null
-          ? "$_.MainWindowHandle -ne 0"
-          : `$_.MainWindowHandle -ne 0 -and ($_.ProcessName -like ${powerShellQuote(`*${app}*`)} -or $_.MainWindowTitle -like ${powerShellQuote(`*${app}*`)})`;
+          ? "$true"
+          : `$ownerName -like ${powerShellQuote(`*${app}*`)} -or $title -like ${powerShellQuote(`*${app}*`)}`;
       return powerShellPlan(
         [
           "$ErrorActionPreference = 'Stop'",
-          `Get-Process | Where-Object { ${filter} } | ForEach-Object { @($_.MainWindowHandle, $_.ProcessName, $_.MainWindowTitle) -join ([char]9) }`,
+          WINDOW_LIST_API,
+          "foreach ($handle in [RoleboxWindowList]::VisibleWindows()) {",
+          "  $ownerId = [uint32]0",
+          "  [void][RoleboxWindowList]::GetWindowThreadProcessId($handle, [ref]$ownerId)",
+          "  $owner = Get-Process -Id $ownerId -ErrorAction SilentlyContinue",
+          "  $ownerName = if ($null -eq $owner) { '' } else { $owner.ProcessName }",
+          "  $titleBuffer = New-Object System.Text.StringBuilder(32768)",
+          "  [void][RoleboxWindowList]::GetWindowText($handle, $titleBuffer, $titleBuffer.Capacity)",
+          "  $title = $titleBuffer.ToString()",
+          `  if (${filter}) { @($handle.ToInt64(), $ownerName, $title) -join ([char]9) }`,
+          "}",
         ].join("\n"),
       );
     }
     case "click": {
-      if (request.windowId !== undefined) return windowTargetingRefusal("click");
       const x = Math.round(request.x);
       const y = Math.round(request.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return "click coordinates must be finite numbers.";
@@ -443,51 +534,55 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
         `[RoleboxMouse]::mouse_event(${flags.up}, 0, 0, 0, [UIntPtr]::Zero)`,
       ];
       const clicks = request.clicks === 2 ? [...press, "Start-Sleep -Milliseconds 40", ...press] : press;
-      return powerShellPlan(
+      return pointerPlan(
         [
           "$ErrorActionPreference = 'Stop'",
           DPI_API,
           MOUSE_API,
+          ...focusStatements(request.windowId),
+          ...captureGuardStatements(request.captureGuard, request.windowId !== undefined),
           `if (-not [RoleboxMouse]::SetCursorPos(${x}, ${y})) { Write-Error 'could not move the pointer to ${x},${y}'; exit 3 }`,
           "Start-Sleep -Milliseconds 40",
           ...clicks,
         ].join("\n"),
+        request.captureGuard,
       );
     }
     case "move": {
-      // The move request carries no window: a pointer position is a screen
-      // position, and every driver here moves the real cursor.
       const x = Math.round(request.x);
       const y = Math.round(request.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return "pointer coordinates must be finite numbers.";
-      return powerShellPlan(
+      return pointerPlan(
         [
           "$ErrorActionPreference = 'Stop'",
           DPI_API,
           MOUSE_API,
+          ...focusStatements(request.windowId),
+          ...captureGuardStatements(request.captureGuard, request.windowId !== undefined),
           `if (-not [RoleboxMouse]::SetCursorPos(${x}, ${y})) { Write-Error 'could not move the pointer to ${x},${y}'; exit 3 }`,
         ].join("\n"),
+        request.captureGuard,
       );
     }
     case "type": {
-      if (request.windowId !== undefined) return windowTargetingRefusal("type");
       if (request.text.length === 0) return "computer_type needs non-empty text.";
       return powerShellPlan(
         [
           "$ErrorActionPreference = 'Stop'",
           "Add-Type -AssemblyName System.Windows.Forms",
+          ...focusStatements(request.windowId),
           `[System.Windows.Forms.SendKeys]::SendWait(${powerShellQuote(escapeSendKeys(request.text))})`,
         ].join("\n"),
       );
     }
     case "key": {
-      if (request.windowId !== undefined) return windowTargetingRefusal("key");
       const stroke = keyStroke(request.keys);
       if ("refusal" in stroke) return stroke.refusal;
       return powerShellPlan(
         [
           "$ErrorActionPreference = 'Stop'",
           "Add-Type -AssemblyName System.Windows.Forms",
+          ...focusStatements(request.windowId),
           `[System.Windows.Forms.SendKeys]::SendWait(${powerShellQuote(stroke.stroke)})`,
         ].join("\n"),
       );

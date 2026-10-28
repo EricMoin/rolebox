@@ -72,8 +72,10 @@ and the operating system's own permission checks still apply.
    restart it when required, and probe again. Screen Recording is separate;
    inspect the separate screen-capture verdict, then inspect the image from `computer_screenshot`.
 3. Discover the target with `computer_windows` and `computer_displays`. Focus a
-   selected window with `computer_focus`, then take a fresh screenshot.
-4. Choose coordinates from the screenshot using its scale and screen origin.
+   selected window with `computer_focus`, then take a fresh screenshot. Pass
+   its `window_id` on each input call when working with multiple windows.
+4. Pass its `screenshot_id` to a pointer tool and choose coordinates in image
+   pixels. The tool maps them to the desktop and verifies the captured geometry.
    Use `dry_run: true` to inspect a command without executing it when useful.
 5. Perform one action and inspect a fresh screenshot to verify the result.
    Scrolling, focus changes and dragging can invalidate earlier coordinates.
@@ -99,18 +101,43 @@ terminating the host cannot guarantee release.
 | `computer_displays` | None | Return JSON display IDs, bounds, scale and primary flag |
 | `computer_screenshot` | `window_id?`, `region?`, `display?`, `path?` | Capture a PNG and return an image attachment |
 | `computer_focus` | `window_id` | Bring the selected window forward and verify focus, or report refusal |
-| `computer_click` | `x`, `y`, `button?`, `clicks?`, `window_id?` | Click at absolute screen coordinates; button defaults to left, clicks to 1 |
-| `computer_move` | `x`, `y` | Move the pointer without clicking |
-| `computer_type` | `text`, `window_id?` | Type into the focused or supported target window |
+| `computer_click` | `x`, `y`, `button?`, `clicks?`, `window_id?`, `screenshot_id?` | Click at screen coordinates, or image pixels with `screenshot_id`; button defaults to left, clicks to 1 |
+| `computer_move` | `x`, `y`, `window_id?`, `screenshot_id?` | Move the pointer without clicking |
+| `computer_type` | `text`, `window_id?` | Type into the focused window, optionally selecting it first |
 | `computer_key` | `keys`, `window_id?` | Press modifiers followed by one final key |
-| `computer_scroll` | `direction`, `amount?`, `x?`, `y?` | Scroll up/down/left/right by 1–100 wheel ticks, default 3; optional pointer position requires both coordinates |
-| `computer_drag` | `from_x`, `from_y`, `to_x`, `to_y`, `duration_ms?` | Left-button drag between absolute coordinates over 100–5000 ms, default 500 ms |
+| `computer_scroll` | `direction`, `amount?`, `x?`, `y?`, `window_id?`, `screenshot_id?` | Scroll up/down/left/right by 1–100 wheel ticks, default 3; position requires both coordinates and is required with `screenshot_id` |
+| `computer_drag` | `from_x`, `from_y`, `to_x`, `to_y`, `duration_ms?`, `window_id?`, `screenshot_id?` | Left-button drag between screen coordinates, or image pixels with `screenshot_id`, over 100–5000 ms, default 500 ms |
 
 `computer_click.button` is `left`, `right` or `middle`; `clicks` is 1 or 2.
 `computer_key.keys` is an array such as `["cmd", "shift", "t"]` or
-`["Return"]`. Exactly one non-modifier key comes last. `window_id` on click,
-type and key is X11-only; macOS and Windows reject it, so focus first there.
+`["Return"]`. Exactly one non-modifier key comes last.
 The receiving application decides how far one scroll tick moves content.
+
+### Multiple windows
+
+All six input tools accept `window_id` on macOS, Windows and Linux X11. Use
+an ID returned by `computer_windows`; each call brings that window forward and
+verifies focus before sending input. Focus and input share one helper command
+and one desktop queue slot. A missing, ambiguous or refused target stops the
+operation. No window selection is remembered: omitting `window_id` preserves
+the current-focus behavior, so repeat the ID on each targeted call.
+
+```json
+{"window_id": 42, "text": "First window"}
+```
+
+Pass this object to `computer_type`, then use another observed window ID to
+type into a second window. Windows discovery includes multiple visible
+top-level windows belonging to the same process.
+
+Targeting changes foreground focus; it does not provide background input.
+Without `screenshot_id`, pointer coordinates remain absolute screen coordinates
+on every platform, including X11, and are not constrained to the window. Use fresh
+screen coordinates inside that window for pointer actions. Scrolling without
+`x` and `y` uses the current pointer position, which may be outside the target;
+supply both coordinates to select where to scroll. Other applications, people
+or host processes can still change focus during an operation. Inspect the
+resulting UI before continuing.
 
 ### Dry runs
 
@@ -137,27 +164,74 @@ coordinate metadata. Images above 32 MiB are refused; capture a smaller region.
 A screenshot accepts one target: a window, a region (`{x, y, w, h}` in screen
 coordinates), or a display. Consult `computer_displays` for valid display IDs:
 macOS IDs start at 1; Windows and X11 IDs start at 0. An untargeted capture covers
-one display. X11 display entries describe X screens, which have separate
-coordinate spaces; they are not a list of RandR monitors. Capturing another X
-screen does not switch input to it: input uses the host's `DISPLAY` screen. To
-control another X screen, start the host with `DISPLAY` pointing to that screen.
+the primary display (X11 falls back to the first monitor if none is marked
+primary). X11 enumerates RandR monitors on the current `DISPLAY` screen; it
+does not switch to another X screen. Refresh display IDs after reconnecting or
+rearranging monitors. macOS capture uses the selected display's actual bounds,
+so its selection does not depend on an unrelated screenshot command's numbering.
 
-Image pixels and input coordinates can differ. When both `pixel_scale` and the
-screen `origin` are known, convert a pixel position with:
+Every successful tool capture returns `screen_bounds: {x, y, w, h}`, `origin`,
+`pixel_scale_x`, `pixel_scale_y`, `displays` and `screenshot_id`. The per-axis
+scales are the actual PNG dimensions divided by the captured screen extent.
+`pixel_scale` is also present when both axes have the same ratio. PNG density
+is not used to guess this mapping. Negative screen origins and fractional
+ratios are supported. To convert manually:
 
 ```text
-screen_x = origin.x + image_x / pixel_scale
-screen_y = origin.y + image_y / pixel_scale
+screen_x = origin.x + image_x / pixel_scale_x
+screen_y = origin.y + image_y / pixel_scale_y
 ```
 
 For example, pixel `(100, 60)` in a 2× capture of a region beginning at
 `(300, 200)` corresponds to screen point `(350, 230)`.
 
-Region captures report their origin. Window and explicitly selected display
-captures currently report `origin: null`: establish their screen bounds before
-clicking; dividing by scale alone is insufficient. A macOS PNG with no reliable
-density has no known `pixel_scale`, so establish the scale before conversion.
-A macOS window capture omits its shadow to keep the image aligned with its frame.
+Prefer passing `screenshot_id` and the image pixel coordinates directly:
+
+```json
+{"screenshot_id":"<id returned by computer_screenshot>","x":100,"y":60}
+```
+
+Use this object with `computer_click` or `computer_move`. `computer_drag` maps
+both endpoints from the same image. `computer_scroll` requires `x` and `y`
+when using a screenshot. A window screenshot automatically selects its captured
+window; an explicit `window_id` must match it. A display or region screenshot
+cannot be combined with `window_id`; capture the window first for that workflow.
+Points outside the image or in gaps between monitors are refused. Converted
+positions are rounded to screen units within the capture's bounds.
+
+Screenshot IDs belong to the current session, workspace and host platform.
+They expire after ten minutes; the host retains at most 64 snapshots, and a
+host restart clears them. They hold geometry, not permission grants.
+
+### Mixed scaling and moving windows
+
+macOS input uses global screen points. Region/display captures take each
+monitor's intersecting rectangle separately and composite those images onto a
+uniform canvas, including regions spanning 1× and 2× displays. Window captures
+preserve their native raster without shadow padding; the returned per-axis
+ratios map that raster to the captured window bounds. Windows uses DPI-aware desktop
+pixels for capture and input, so a monitor's 150% UI scale must not be applied
+again to screenshot coordinates. X11 uses root-screen pixels; its reported
+scale is 1, independently of application toolkit scaling.
+
+Capture samples window bounds and display identities, positions, sizes and
+scales before and after taking the image. A detected change fails the capture.
+With `screenshot_id`, pointer input checks those facts again after focusing and
+before sending input. Moving/resizing a captured window, moving it to another
+monitor, changing monitor scaling, reconnecting a display or changing display
+order rejects the old screenshot and requires a new one. After recapturing,
+the new origin and raster scale are used automatically. Old UI coordinates are
+never silently rebased after a layout change.
+
+This check does not lock the desktop or detect every content change, such as a
+scroll within an unchanged window. Another process can still intervene after
+the check or during a drag; observe the result and use a fresh image.
+
+macOS window capture omits its shadow. Windows window capture copies the visible
+window rectangle; X11 captures the visible client area, excluding decorations.
+Both include covering windows, so focus first and inspect the image. X11
+refuses targets extending outside the current root screen; a region may span
+multiple monitors and the gaps between them.
 
 ### Image transport per host
 
@@ -176,12 +250,13 @@ not establish that the model received pixels.
 
 | Platform | Driver requirements and limits |
 | --- | --- |
-| macOS | Built-in `screencapture` and JXA/AppleScript. Quartz sends mouse gestures and Unicode text; System Events handles focus and keyboard shortcuts. Screen Recording, Accessibility and System Events Automation grants belong to the application launching the host. Focus refuses ambiguous window matches. |
-| Linux X11 | `xdotool` for input/focus, ImageMagick `import` or `scrot` for capture, and `xdpyinfo`/`awk` for display discovery. Window-manager support affects focus. |
+| macOS | Built-in `screencapture` via JXA with ImageIO validation and geometry checks. Window captures omit shadows; display/region captures composite monitor tiles at a uniform scale. Quartz sends mouse gestures and Unicode text; System Events handles focus and keyboard shortcuts. Screen Recording, Accessibility and System Events Automation grants belong to the application launching the host. Focus refuses ambiguous window matches. |
+| Linux X11 | `xdotool` for input/focus, ImageMagick `import` or `scrot` for capture, and `xrandr` with RandR 1.5 monitor support plus `awk` for geometry. Window-manager support affects focus. |
 | Windows | PowerShell with desktop .NET APIs and an interactive desktop session. The OS may refuse foreground activation or input into higher-privilege applications. |
 | Wayland / other systems | Explicit refusal; no fallback pretending to provide desktop control. |
 
-`computer_windows` returns tab-separated window IDs and labels. Its `app` filter
+`computer_windows` returns tab-separated window IDs and labels, with one entry
+per visible window rather than one per application. Its `app` filter
 matches owner names on macOS, window titles on X11, and process names or titles
 on Windows. Missing OS permission can withhold macOS window titles even though
 IDs remain available. Input-permission success does not imply Screen Recording
@@ -208,9 +283,11 @@ contents. Native OS tests are skipped unless explicitly enabled:
 npm test -- tests/computer/
 ```
 
-For the additional real permission and main-display screenshot checks on an
-already authorized macOS host, opt in with `ROLEBOX_CUA_NATIVE_TESTS=1`.
-These checks do not request permissions:
+For real permission and screenshot checks on an already authorized macOS host,
+opt in with `ROLEBOX_CUA_NATIVE_TESTS=1`. The capture tests include the primary
+display, a secondary display when connected, and a small spanning region when
+adjacent monitors have different scales. These checks do not request permissions
+or send desktop input:
 
 ```sh
 ROLEBOX_CUA_NATIVE_TESTS=1 npm test -- tests/computer/tools.test.ts tests/computer/capture-darwin.test.ts
@@ -219,7 +296,13 @@ ROLEBOX_CUA_NATIVE_TESTS=1 npm test -- tests/computer/tools.test.ts tests/comput
 Use the smoke runner below for the complete temporary-window verification.
 This opt-in test uses a temporary native application with two windows and records
 button, text, scroll and drag events. It exercises the real `computer_*` tools,
-including window screenshots and focus, and stops at the first failed assertion.
+including window screenshots, a click mapped through `screenshot_id`, and focus,
+and stops at the first failed assertion. With `--commands`, it also verifies
+secondary-window clicks, scrolling at the current pointer position, moving the
+fixture across displays, stale screenshot rejection, fresh region mapping and
+display-gap rejection. It restores the fixture position afterward. Physical
+mixed-scale capture is explicitly skipped unless connected displays have
+different backing scales; the normal tests cover synthetic 1×/2× composition.
 Run both terminals from the repository root. In the first terminal, compile and
 start a fresh fixture:
 
@@ -227,7 +310,7 @@ start a fresh fixture:
 cua_tmp="$(mktemp -d /tmp/rolebox-cua.XXXXXX)"
 swiftc tests/computer/fixtures/macos-cua-app.swift -o "$cua_tmp/macos-cua-app"
 printf 'Fixture directory: %s\n' "$cua_tmp"
-"$cua_tmp/macos-cua-app" "Rolebox CUA smoke test" "$cua_tmp/state.json"
+"$cua_tmp/macos-cua-app" "Rolebox CUA smoke test" "$cua_tmp/state.json" "$cua_tmp/command.json"
 ```
 
 Keep that process running. In a second terminal, replace the placeholder with
@@ -235,7 +318,7 @@ the absolute directory printed above, then explicitly opt in to desktop input:
 
 ```sh
 cua_tmp=/absolute/path/printed/by/the/first/terminal
-node --import tsx scripts/computer-macos-smoke.ts --run --state "$cua_tmp/state.json" --output "$cua_tmp/results"
+node --import tsx scripts/computer-macos-smoke.ts --run --state "$cua_tmp/state.json" --output "$cua_tmp/results" --commands "$cua_tmp/command.json"
 ```
 
 The runner requires granted Accessibility and Screen Recording permissions;

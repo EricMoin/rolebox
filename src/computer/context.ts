@@ -31,15 +31,16 @@ export function buildComputerContext(options: ComputerContextOptions): string {
   }
   if (tools.has("computer_windows")) instructions.push("Use computer_windows to identify the target application's current window IDs.");
   if (tools.has("computer_displays")) instructions.push("Use computer_displays to identify the display and its screen bounds when working across displays.");
-  if (tools.has("computer_focus")) instructions.push("Use computer_focus with an observed window ID before sending input to that window; a focus failure must be resolved before proceeding.");
+  if (tools.has("computer_focus")) instructions.push("Use computer_focus with an observed window ID to bring that window forward for observation; a focus failure must be resolved before proceeding.");
 
   const inputs = INPUT_TOOLS.filter(name => tools.has(name));
   if (tools.has("computer_screenshot")) {
-    instructions.push("Use computer_screenshot to observe the current target before choosing coordinates, and again after focusing or an action to verify the visible result. Convert image pixels to screen coordinates using metadata.pixel_scale and metadata.origin; if origin is unknown, locate the target before clicking. Do not reuse stale coordinates after the UI changes.");
+    instructions.push("Use computer_screenshot to observe the current target before choosing coordinates, and again after focusing or an action to verify the visible result. Its screenshot_id lets pointer input use image pixels with automatic mapping; it selects the captured window and checks geometry again before input. A window move/resize or display layout/scale change requires a fresh screenshot. Manual mapping uses metadata.origin and metadata.pixel_scale_x / metadata.pixel_scale_y, not display UI scale. Do not reuse stale coordinates after the UI changes.");
   } else if (inputs.length > 0) {
     instructions.push("Obtain current visual evidence through another permitted observation capability before choosing screen coordinates. Do not guess positions or claim a result was visually checked without observing it.");
   }
   if (inputs.length > 0) {
+    instructions.push("When working with multiple windows, pass the observed window_id on each input call to focus and verify that target before input in the same queued operation, or use screenshot_id on pointer input to select the captured window. Omitting both uses the current desktop focus; no target is remembered between calls. Pointer coordinates remain absolute screen coordinates unless screenshot_id is supplied. Scrolling with screenshot_id needs both image coordinates; otherwise omitted coordinates use the current pointer position. Targeting brings the window forward and does not deliver background input or prevent external focus changes.");
     instructions.push(`Use ${inputs.join(", ")} for small, deliberate actions. Check the resulting UI before continuing; an input command completing does not prove the requested application change occurred.`);
   }
   instructions.push("Do not change configuration, tool grants, or OS privacy settings to authorize yourself. Surface an unavailable capability or a denied permission and follow the permitted recovery path; do not claim success for a failed operation or dry_run.");

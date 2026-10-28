@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ComputerOperationQueue } from "../../src/computer/queue.ts";
@@ -8,7 +8,7 @@ import { captureResult, ensureCaptureDirectory } from "../../src/computer/captur
 import { createComputerTools } from "../../src/computer/tools.ts";
 import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";
-import type { ComputerPlan } from "../../src/platform/system/types.ts";
+import type { ComputerInputRequest, ComputerPlan } from "../../src/platform/system/types.ts";
 import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
 const directories: string[] = [];
@@ -73,6 +73,15 @@ describe("desktop operation queue", () => {
 });
 
 describe("bounded command execution", () => {
+  it("keeps stdout structured while retaining stderr for diagnostics", async () => {
+    const result = await runComputerPlan(command("process.stderr.write('helper warning\\n'); process.stdout.write('{\"bounds\":42}')"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.stdout).toBe('{"bounds":42}');
+      expect(result.output).toContain("helper warning");
+    }
+  });
+
   it.skipIf(process.platform === "win32")("identifies a native helper terminated by a signal", async () => {
     const result = await runComputerPlan(command("process.kill(process.pid, 'SIGKILL')"));
     expect(result.ok).toBe(false);
@@ -103,6 +112,22 @@ describe("bounded command execution", () => {
     expect(existsSync(path)).toBe(false);
   });
 
+  it("does not release the mouse when a geometry guard refused before input", async () => {
+    const path = join(temporaryDirectory(), "unexpected-release");
+    const cleanupPlan = command(`require('node:fs').writeFileSync(${JSON.stringify(path)}, '')`);
+    const guarded = { ...command("process.stderr.write('helper warning\\nROLEBOX_SCREENSHOT_STALE: screenshot geometry changed; take a fresh screenshot'); process.exit(3)"),
+      inputGuardFailureMarker: "ROLEBOX_SCREENSHOT_STALE", cleanupPlan };
+    const result = await runComputerPlan(guarded);
+    expect(result).toMatchObject({ ok: false, inputNotStarted: true });
+    if (!result.ok) {
+      expect(result.error).toContain("screenshot geometry changed; take a fresh screenshot");
+      expect(result.error).not.toContain("ROLEBOX_SCREENSHOT_STALE");
+    }
+    expect(existsSync(path)).toBe(false);
+    await runComputerPlan({ ...guarded, ...command("process.stderr.write('input failed'); process.exit(3)") });
+    expect(existsSync(path)).toBe(true);
+  });
+
   it("reports release failures and bounds helper output", async () => {
     const result = await runComputerPlan({ ...command("process.exit(1)"), cleanupPlan: command("process.exit(2)") });
     expect(result.ok).toBe(false);
@@ -114,6 +139,78 @@ describe("bounded command execution", () => {
 });
 
 describe("desktop tool contract", () => {
+  const inputs = {
+    computer_click: { x: -30, y: 20 },
+    computer_move: { x: 30, y: 20 },
+    computer_type: { text: "example" },
+    computer_key: { keys: ["Return"] },
+    computer_scroll: { direction: "down", x: 30, y: 20 },
+    computer_drag: { from_x: 30, from_y: 20, to_x: 40, to_y: 50 },
+  };
+
+  for (const platform of ["darwin", "linux", "win32"] as const) {
+    it(`accepts an explicit window on every input tool on ${platform}`, async () => {
+      setPlatformForTest(platform);
+      const tools = createComputerTools();
+      const ctx = context();
+      for (const [name, args] of Object.entries(inputs)) {
+        const result = await tools[name].execute({ ...args, window_id: 4242, dry_run: true }, ctx) as any;
+        expect(result.metadata).toMatchObject({ dry_run: true, window_id: 4242 });
+        const report = JSON.parse(result.output);
+        expect(report.script).toContain("4242");
+        const invalid = await tools[name].execute({ ...args, window_id: 0, dry_run: true }, ctx) as any;
+        expect(invalid.output).toContain(`invalid ${name} arguments: window_id`);
+      }
+      expect(existsSync(join(ctx.worktree, ".rolebox"))).toBe(false);
+    });
+  }
+
+  it("forwards each input target without retaining a previous selection", async () => {
+    setPlatformForTest("darwin");
+    const received: ComputerInputRequest[] = [];
+    darwinComputerUse.inputPlan = request => { received.push(request); return command(""); };
+    const tools = createComputerTools();
+    const ctx = context();
+    for (const [name, args] of Object.entries(inputs)) {
+      for (const window_id of [42, 43, undefined]) {
+        const result = await tools[name].execute({ ...args, window_id }, ctx) as any;
+        expect(result.metadata.window_id).toBe(window_id);
+        expect(received.at(-1)).toMatchObject({ action: name.slice("computer_".length), windowId: window_id });
+      }
+    }
+  });
+
+  it("keeps concurrent window focus and input plans in separate queue slots", async () => {
+    setPlatformForTest("darwin");
+    const ctx = context();
+    const path = join(ctx.worktree, "events.jsonl");
+    darwinComputerUse.inputPlan = request => {
+      if (request.action !== "type") throw new Error("unexpected fixture action");
+      return command(`
+        const fs = require('node:fs');
+        const append = event => fs.appendFileSync(${JSON.stringify(path)}, JSON.stringify(event) + '\\n');
+        append(['focus', ${request.windowId}]);
+        setTimeout(() => append(['input', ${request.windowId}]), 30);
+      `);
+    };
+    const tool = createComputerTools().computer_type;
+    const results = await Promise.all([42, 43].map(window_id => tool.execute({ window_id, text: "example" }, ctx)));
+    expect(results.every(result => typeof result !== "string" && !result.output.startsWith("Error:"))).toBe(true);
+    expect(readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line))).toEqual([
+      ["focus", 42], ["input", 42], ["focus", 43], ["input", 43],
+    ]);
+  });
+
+  it("reports the requested window when targeted input fails", async () => {
+    setPlatformForTest("darwin");
+    darwinComputerUse.inputPlan = () => command("process.stderr.write('window does not exist'); process.exit(3)");
+    const result = await createComputerTools().computer_type.execute({ window_id: 42, text: "example" }, context()) as any;
+    expect(result.output).toContain("Error:");
+    expect(result.output).toContain("window does not exist");
+    expect(result.metadata.window_id).toBe(42);
+    expect(result.output).not.toContain("Typed");
+  });
+
   it("retains release failure diagnostics when the tool deadline expires", async () => {
     setPlatformForTest("darwin");
     darwinComputerUse.inputPlan = () => ({ ...command("setTimeout(() => {}, 10000)"), cleanupPlan: command("process.exit(7)") });
@@ -208,7 +305,10 @@ describe("capture coordinates and files", () => {
     png.writeUInt32BE(13, 8); png.write("IHDR", 12);
     png.writeUInt32BE(20, 16); png.writeUInt32BE(10, 20);
     darwinComputerUse.capturePermissionProbe = () => command("process.stdout.write('granted')");
-    darwinComputerUse.capturePlan = request => command(`require('node:fs').writeFileSync(${JSON.stringify(request.path)}, Buffer.from('${png.toString("base64")}', 'base64'))`);
+    const geometry = { bounds: { x: 0, y: 0, w: 20, h: 10 }, displays: [
+      { id: 1, x: 0, y: 0, width: 20, height: 10, scale: 2, primary: true },
+    ] };
+    darwinComputerUse.capturePlan = request => command(`require('node:fs').writeFileSync(${JSON.stringify(request.path)}, Buffer.from('${png.toString("base64")}', 'base64')); process.stdout.write(${JSON.stringify(JSON.stringify(geometry))})`);
     const before = statSync(ctx.worktree).mode;
     const result = await createComputerTools().computer_screenshot.execute({ path: "custom.png" }, ctx) as any;
     expect(result.attachments).toHaveLength(1);
@@ -216,7 +316,7 @@ describe("capture coordinates and files", () => {
     if (process.platform !== "win32") expect(statSync(join(ctx.worktree, "custom.png")).mode & 0o777).toBe(0o600);
   });
 
-  it("reports crop origins and refuses to invent a window origin", () => {
+  it("does not invent window geometry for legacy callers without a snapshot", () => {
     const path = join(temporaryDirectory(), "capture.png");
     const png = Buffer.alloc(33);
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);

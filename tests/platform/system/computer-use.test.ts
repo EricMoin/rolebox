@@ -82,7 +82,7 @@ describe("descriptor computer-use facts", () => {
       ? windowsFacts.capturePlan({ path: "C:\\x.png" }, {})
       : "");
 
-    expect(darwinPlan.argv[0]).toBe("/usr/sbin/screencapture");
+    expect(darwinPlan.argv[0]).toBe("/usr/bin/osascript");
     expect(linuxPlan.argv[0]).toBe("/bin/sh");
     expect(windowsPlan.argv[0]).toBe("powershell");
 
@@ -92,7 +92,7 @@ describe("descriptor computer-use facts", () => {
     const darwinStill = descriptor("darwin").computerUse;
     expect(planOf(darwinStill.supported
       ? darwinStill.capturePlan({ path: "/tmp/x.png" }, {})
-      : "").argv[0]).toBe("/usr/sbin/screencapture");
+      : "").argv[0]).toBe("/usr/bin/osascript");
     const active = getSystem().computerUse;
     expect(planOf(active.supported
       ? active.capturePlan({ path: "/tmp/x.png" }, { XDG_SESSION_TYPE: "x11" })

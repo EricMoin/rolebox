@@ -87,6 +87,27 @@ export interface ComputerRegion {
   readonly h: number;
 }
 
+export interface ComputerDisplay {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly scale: number;
+  readonly primary: boolean;
+  readonly name?: string;
+}
+
+export interface ComputerCaptureGeometry {
+  readonly bounds: ComputerRegion;
+  readonly displays: readonly ComputerDisplay[];
+}
+
+export interface ComputerCaptureGuard {
+  readonly target: Omit<ComputerCaptureRequest, "path">;
+  readonly geometry: ComputerCaptureGeometry;
+}
+
 /** Where one screenshot is written, and what it must cover. */
 export interface ComputerCaptureRequest {
   /** Absolute path the capture helper writes the PNG to. */
@@ -96,10 +117,8 @@ export interface ComputerCaptureRequest {
   /** One rectangle of the screen, in absolute screen coordinates. */
   readonly region?: ComputerRegion;
   /**
-   * The OS's OWN display identifier — macOS `-D 1` is the main display, X11
-   * screen index (0 is the first), Windows indexes `Screen.AllScreens`. It is passed
-   * through, never renumbered, so a caller can name the display the same way
-   * the OS does.
+   * The identifier from computer_displays on the current desktop. Display
+   * ordering may change after a topology change; refresh discovery then.
    */
   readonly display?: number;
 }
@@ -115,6 +134,8 @@ export type ComputerInputRequest =
       readonly amount: number;
       readonly x?: number;
       readonly y?: number;
+      readonly windowId?: number;
+      readonly captureGuard?: ComputerCaptureGuard;
     }
   | {
       readonly action: "drag";
@@ -123,6 +144,8 @@ export type ComputerInputRequest =
       readonly toX: number;
       readonly toY: number;
       readonly durationMs: number;
+      readonly windowId?: number;
+      readonly captureGuard?: ComputerCaptureGuard;
     }
   | {
       readonly action: "click";
@@ -131,8 +154,9 @@ export type ComputerInputRequest =
       readonly button: "left" | "right" | "middle";
       readonly clicks: 1 | 2;
       readonly windowId?: number;
+      readonly captureGuard?: ComputerCaptureGuard;
     }
-  | { readonly action: "move"; readonly x: number; readonly y: number }
+  | { readonly action: "move"; readonly x: number; readonly y: number; readonly windowId?: number; readonly captureGuard?: ComputerCaptureGuard }
   | { readonly action: "type"; readonly text: string; readonly windowId?: number }
   | { readonly action: "key"; readonly keys: readonly string[]; readonly windowId?: number };
 
@@ -164,6 +188,8 @@ export interface ComputerPlan {
   readonly permissionHint?: string;
   /** Best-effort release after an interrupted gesture; never repeats the gesture. */
   readonly cleanupPlan?: ComputerPlan;
+  /** Emitted only when a guarded input plan refuses before sending any input. */
+  readonly inputGuardFailureMarker?: string;
 }
 
 /**

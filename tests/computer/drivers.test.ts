@@ -35,30 +35,25 @@ function refusalOf(built: ComputerPlanOrRefusal): string {
 // ── darwin ───────────────────────────────────────────────────────────────────
 
 describe("darwin computer-use plans", () => {
-  it("captures the whole screen cursor-free with screencapture", () => {
+  it("captures the primary display with a mapped screencapture plan", () => {
     const plan = planOf(darwinComputerUse.capturePlan(CAPTURE, {}));
-    expect(plan.argv).toEqual(["/usr/sbin/screencapture", "-x", CAPTURE.path]);
+    expect(plan.argv.slice(0, 4)).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e"]);
     expect(plan.driver).toBe("screencapture");
-    expect(plan.requires).toEqual(["/usr/sbin/screencapture"]);
-    expect(plan.script).toBeUndefined();
+    expect(plan.requires).toEqual(["/usr/bin/osascript", "/usr/sbin/screencapture"]);
+    expect(plan.script).toContain("/usr/sbin/screencapture");
+    expect(plan.script).toContain("CGImageSourceCreateImageAtIndex");
+    expect(plan.script).not.toContain("SCScreenshotManager");
     expect(plan.permissionHint).toContain("Screen Recording");
   });
 
-  it("captures one window, one region or one display with the OS's own flags", () => {
-    // -o: the image is the window frame itself, not the frame plus its shadow.
-    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, windowId: 12345 }, {})).argv).toEqual([
-      "/usr/sbin/screencapture", "-x", "-o", "-l", "12345", CAPTURE.path,
-    ]);
-    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 10, y: 20, w: 300, h: 200 } }, {})).argv).toEqual([
-      "/usr/sbin/screencapture", "-x", "-R", "10,20,300,200", CAPTURE.path,
-    ]);
-    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 1 }, {})).argv).toEqual([
-      "/usr/sbin/screencapture", "-x", "-D", "1", CAPTURE.path,
-    ]);
+  it("captures a window, region or display with explicit target geometry", () => {
+    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, windowId: 12345 }, {})).script).toContain('var target = {"windowId":12345}');
+    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 10, y: 20, w: 300, h: 200 } }, {})).script).toContain('"region":{"x":10,"y":20,"w":300,"h":200}');
+    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 1 }, {})).script).toContain('var target = {"display":1}');
   });
 
   it("rounds a region to whole pixels and refuses a degenerate one", () => {
-    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 10.4, y: 20.6, w: 300.2, h: 200.7 } }, {})).argv).toContain("10,21,300,201");
+    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 10.4, y: 20.6, w: 300.2, h: 200.7 } }, {})).script).toContain('"region":{"x":10,"y":21,"w":300,"h":201}');
     expect(refusalOf(darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 0, y: 0, w: 0, h: 10 } }, {}))).toContain("at least one pixel");
   });
 
@@ -70,17 +65,15 @@ describe("darwin computer-use plans", () => {
   });
 
   it("refuses a region together with a display, and a display macOS does not number", () => {
-    // screencapture ignores -D when -R is given, so accepting both would
-    // silently capture a different display than the one that was asked for.
     const both = refusalOf(
       darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 0, y: 0, w: 5, h: 5 }, display: 2 }, {}),
     );
     expect(both).toContain("global screen coordinates");
-    expect(both).toContain("ignores -D when -R is given");
+    expect(both).toContain("pass region or display, not both");
 
     // macOS counts displays from 1; 0 is not a display it will accept.
     expect(refusalOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 0 }, {}))).toContain("counts displays from 1");
-    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 1 }, {})).argv).toContain("-D");
+    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 1 }, {})).script).toContain('"display":1');
   });
 
   it("clicks and moves through native Quartz events without external helpers", () => {
@@ -109,15 +102,15 @@ describe("darwin computer-use plans", () => {
     expect(move.requires).toEqual(["/usr/bin/osascript"]);
   });
 
-  it("refuses a window-targeted gesture, naming the frontmost-window rule", () => {
+  it("plans window-targeted gestures with verified focus", () => {
     for (const request of [
       { action: "click", x: 1, y: 2, button: "left", clicks: 1, windowId: 9 },
       { action: "type", text: "hi", windowId: 9 },
       { action: "key", keys: ["Return"], windowId: 9 },
     ] satisfies ComputerInputRequest[]) {
-      const refusal = refusalOf(darwinComputerUse.inputPlan(request, {}));
-      expect(refusal).toContain("frontmost application");
-      expect(refusal).toContain(`computer_${request.action}`);
+      const plan = planOf(darwinComputerUse.inputPlan(request, {}));
+      expect(plan.script).toContain("targetId = 9");
+      expect(plan.script).toContain("AXFocusedWindow");
     }
   });
 
@@ -227,21 +220,23 @@ describe("linux computer-use plans", () => {
     const plan = planOf(linuxComputerUse.capturePlan(CAPTURE, LINUX_ENV));
     expect(plan.argv[0]).toBe("/bin/sh");
     expect(plan.driver).toBe("import");
-    expect(plan.script).toContain("import -window root '/tmp/rolebox-shot.png'");
+    expect(plan.script).toContain("import -window root -crop");
+    expect(plan.script).toContain("'/tmp/rolebox-shot.png'");
     expect(plan.script).toContain("scrot -o");
     expect(plan.script).toContain("exit 127");
-    expect(plan.requires).toEqual(["/bin/sh"]);
+    expect(plan.requires).toEqual(["/bin/sh", "xrandr", "awk"]);
   });
 
-  it("crops a region, addresses one window, and selects a display by prefixing DISPLAY", () => {
+  it("crops exact region, window or monitor bounds on the current X11 screen", () => {
     const region = planOf(linuxComputerUse.capturePlan({ ...CAPTURE, region: { x: 10, y: 20, w: 300, h: 200 } }, LINUX_ENV));
-    expect(region.script).toContain("import -window root -crop 300x200+10+20 +repage");
+    expect(region.script).toContain("rectangle='10 20 300 200'");
     const window = planOf(linuxComputerUse.capturePlan({ ...CAPTURE, windowId: 42 }, LINUX_ENV));
-    expect(window.script).toContain("import -window 42");
-    // The window branch has no scrot fallback: scrot cannot address a window.
-    expect(window.script).not.toContain("scrot -o");
+    expect(window.script).toContain("xdotool getwindowgeometry --shell 42");
+    expect(window.script).toContain("scrot -o -a");
     const display = planOf(linuxComputerUse.capturePlan({ ...CAPTURE, display: 1 }, LINUX_ENV));
-    expect(display.script).toContain("env DISPLAY=':0.1' import -window root");
+    expect(display.script).toContain("xrandr --listactivemonitors");
+    expect(display.script).toContain("-v wanted=1");
+    expect(display.script).not.toContain("env DISPLAY=");
   });
 
   it("refuses a Wayland session for capture and for input", () => {
@@ -257,9 +252,10 @@ describe("linux computer-use plans", () => {
     expect(click.argv).toEqual(["xdotool", "mousemove", "--sync", "--", "100", "200", "click", "1"]);
 
     const doubleRight = planOf(linuxComputerUse.inputPlan({ action: "click", x: 100, y: 200, button: "right", clicks: 2, windowId: 42 }, LINUX_ENV));
-    expect(doubleRight.argv).toEqual([
+    expect(doubleRight.script).toContain("xdotool windowactivate --sync 42");
+    expect(doubleRight.argv.slice(4)).toEqual([
       "xdotool", "mousemove", "--sync", "--", "100", "200",
-      "click", "--window", "42", "--repeat", "2", "--delay", "100", "3",
+      "click", "--repeat", "2", "--delay", "100", "3",
     ]);
 
     const move = planOf(linuxComputerUse.inputPlan({ action: "move", x: 1, y: 2 }, LINUX_ENV));
@@ -308,18 +304,17 @@ describe("win32 computer-use plans", () => {
     expect(plan.argv[0]).toBe("powershell");
     expect(plan.argv).toContain("-STA");
     expect(plan.requires).toEqual(["powershell"]);
-    expect(plan.script).toContain("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds");
+    expect(plan.script).toContain("Where-Object { $_.primary }");
     expect(plan.script).toContain("$bitmap.Save('C:\\Users\\o''brien\\shot.png'");
     expect(plan.script).toContain("CopyFromScreen");
   });
 
   it("captures one display, one region or one window", () => {
     const display = planOf(win32ComputerUse.capturePlan({ ...CAPTURE, display: 2 }, {}));
-    expect(display.script).toContain("[System.Windows.Forms.Screen]::AllScreens");
-    expect(display.script).toContain("$screens[2].Bounds");
+    expect(display.script).toContain("EnumDisplayMonitors");
+    expect(display.script).toContain("$display = $displays[2]");
     const region = planOf(win32ComputerUse.capturePlan({ ...CAPTURE, region: { x: 10, y: 20, w: 300, h: 200 } }, {}));
-    expect(region.script).toContain("$width = 300");
-    expect(region.script).toContain("$sourceY = 20");
+    expect(region.script).toContain("x = 10; y = 20; w = 300; h = 200");
     const window = planOf(win32ComputerUse.capturePlan({ ...CAPTURE, windowId: 66000 }, {}));
     expect(window.script).toContain("GetWindowRect");
     expect(window.script).toContain("[IntPtr]66000");
@@ -338,7 +333,9 @@ describe("win32 computer-use plans", () => {
     expect(middle.script).toContain("mouse_event(0x0020");
     const move = planOf(win32ComputerUse.inputPlan({ action: "move", x: 7, y: 8 }, {}));
     expect(move.script).toContain("SetCursorPos(7, 8)");
-    expect(refusalOf(win32ComputerUse.inputPlan({ action: "click", x: 1, y: 2, button: "left", clicks: 1, windowId: 5 }, {}))).toContain("focused window");
+    const targeted = planOf(win32ComputerUse.inputPlan({ action: "click", x: 1, y: 2, button: "left", clicks: 1, windowId: 5 }, {}));
+    expect(targeted.script).toContain("[IntPtr]5");
+    expect(targeted.script).toContain("GetForegroundWindow()");
   });
 
   it("types and presses keys through SendKeys with its syntax escaped", () => {
@@ -351,12 +348,13 @@ describe("win32 computer-use plans", () => {
     expect(refusalOf(win32ComputerUse.inputPlan({ action: "key", keys: ["ctrl", "Nope"] }, {}))).toContain("no key named");
   });
 
-  it("lists windows from Get-Process MainWindowHandle", () => {
+  it("lists each visible top-level window, including multiple windows per process", () => {
     const plan = planOf(win32ComputerUse.inputPlan({ action: "windows" }, {}));
     expect(plan.script).toContain("Get-Process");
-    expect(plan.script).toContain("MainWindowHandle");
+    expect(plan.script).toContain("EnumWindows");
+    expect(plan.script).not.toContain("MainWindowHandle");
     const filtered = planOf(win32ComputerUse.inputPlan({ action: "windows", app: "note" }, {}));
-    expect(filtered.script).toContain("ProcessName -like '*note*'");
+    expect(filtered.script).toContain("$ownerName -like '*note*'");
   });
 
   it("probes whether the session is interactive", () => {
@@ -383,7 +381,7 @@ describe("plan builders", () => {
   });
 
   it("declare the helpers they call, so the executor can refuse a missing one", () => {
-    expect(darwinComputerUse.requiredBinaries).toEqual(["/usr/sbin/screencapture", "/usr/bin/osascript"]);
+    expect(darwinComputerUse.requiredBinaries).toEqual(["/usr/bin/osascript", "/usr/sbin/screencapture"]);
     expect(linuxComputerUse.requiredBinaries).toContain("xdotool");
     expect(win32ComputerUse.requiredBinaries).toEqual(["powershell"]);
     for (const facts of [darwinComputerUse, linuxComputerUse, win32ComputerUse]) {

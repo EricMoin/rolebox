@@ -61,8 +61,8 @@ describe("macOS desktop discovery", () => {
       CGDisplayBounds: (id: number) => screens.find(screen => screen.id === id)!.bounds,
     } });
     expect(JSON.parse(String(result))).toEqual([
-      { id: 1, x: 0, y: 0, width: 1512, height: 982, scale: 2, primary: true },
-      { id: 2, x: -1920, y: -100, width: 1920, height: 1080, scale: 1, primary: false },
+      { id: 1, x: 0, y: 0, width: 1512, height: 982, scale: 2, primary: true, name: "42" },
+      { id: 2, x: -1920, y: -100, width: 1920, height: 1080, scale: 1, primary: false, name: "91" },
     ]);
     expect(plan({ action: "displays" }).permissionHint).toBeUndefined();
   });
@@ -147,7 +147,7 @@ describe("macOS native pointer events", () => {
   });
 
   it("requires only helpers shipped with macOS", () => {
-    expect(darwinComputerUse.requiredBinaries).toEqual(["/usr/sbin/screencapture", "/usr/bin/osascript"]);
+    expect(darwinComputerUse.requiredBinaries).toEqual(["/usr/bin/osascript", "/usr/sbin/screencapture"]);
   });
 
   it("rejects invalid click or movement requests", () => {
@@ -386,32 +386,39 @@ describe("macOS scroll and drag events", () => {
   });
 });
 
-function focusEnvironment(options: { duplicateCG?: boolean; duplicateAX?: boolean; focusWrong?: boolean; missing?: boolean } = {}) {
+function focusEnvironment(options: { duplicateCG?: boolean; duplicateAX?: boolean; focusWrong?: boolean; missing?: boolean; sibling?: boolean } = {}) {
   const actions: string[] = [];
   const bounds = { X: 20, Y: 30, Width: 400, Height: 300 };
   function windowInfo(id: number) {
     const data: Record<string, unknown> = {
-      kCGWindowNumber: id, kCGWindowLayer: 0, kCGWindowOwnerPID: 55, kCGWindowBounds: bounds, kCGWindowName: "Target",
+      kCGWindowNumber: id, kCGWindowLayer: 0, kCGWindowOwnerPID: 55,
+      kCGWindowBounds: options.sibling && id === 10 ? { ...bounds, X: 500 } : bounds, kCGWindowName: "Target",
     };
     return { objectForKey: (key: string) => key === "kCGWindowBounds" ? data[key] : { js: data[key] } };
   }
   const target = {
     position: () => [20, 30], size: () => [400, 300], name: () => "Target",
-    attributes: { byName: (name: string) => ({ set value(_value: boolean) { actions.push(name); } }) },
+    attributes: { byName: (name: string) => ({ set value(_value: boolean) { actions.push(name); focusedWindow = target; } }) },
     actions: { byName: (name: string) => ({ perform: () => actions.push(name) }) },
+  };
+  let focusedWindow = target;
+  const sibling = {
+    ...target,
+    position: () => [500, 30],
+    attributes: { byName: (name: string) => ({ set value(_value: boolean) { actions.push(name); focusedWindow = sibling; } }) },
   };
   let frontmost = false;
   const process = {
     get frontmost(): (() => boolean) | boolean { return () => frontmost; },
     set frontmost(value: boolean | (() => boolean)) { frontmost = value === true; actions.push("activate"); },
-    windows: () => options.duplicateAX ? [target, target] : [target],
+    windows: () => options.duplicateAX ? [target, target] : options.sibling ? [target, sibling] : [target],
     attributes: { byName: (name: string) => ({ value: () => {
       expect(name).toBe("AXFocusedWindow");
-      return options.focusWrong ? { ...target, position: () => [200, 300] } : target;
+      return options.focusWrong ? { ...target, position: () => [200, 300] } : focusedWindow;
     } }) },
   };
-  const windows = options.missing ? [] : options.duplicateCG ? [windowInfo(9), windowInfo(10)] : [windowInfo(9)];
-  return { actions, globals: {
+  const windows = options.missing ? [] : options.duplicateCG || options.sibling ? [windowInfo(9), windowInfo(10)] : [windowInfo(9)];
+  return { actions, focusedPosition: () => focusedWindow.position(), globals: {
     $: { AXIsProcessTrusted: () => true, CGWindowListCopyWindowInfo: () => ({ count: String(windows.length), objectAtIndex: (i: number) => windows[i] }) },
     Application: () => ({ processes: { whose: ({ unixId }: { unixId: number }) => {
       expect(unixId).toBe(55);
@@ -444,5 +451,107 @@ describe("macOS exact window focus", () => {
     for (const windowId of [0, -1, 1.5, NaN, Infinity]) {
       expect(darwinComputerUse.inputPlan({ action: "focus", windowId }, {})).toContain("positive whole number");
     }
+  });
+});
+
+describe("macOS window-targeted input", () => {
+  const requests: ComputerInputRequest[] = [
+    { action: "click", x: 40, y: 50, button: "left", clicks: 1, windowId: 9 },
+    { action: "move", x: -20, y: 50, windowId: 9 },
+    { action: "type", text: "hello", windowId: 9 },
+    { action: "key", keys: ["cmd", "shift", "t"], windowId: 9 },
+    { action: "scroll", direction: "down", amount: 2, x: 40, y: 50, windowId: 9 },
+    { action: "drag", fromX: 40, fromY: 50, toX: 80, toY: 90, durationMs: 100, windowId: 9 },
+  ];
+
+  function environment(options: Parameters<typeof focusEnvironment>[0] = {}) {
+    const focus = focusEnvironment(options);
+    const { api } = nativeEvents();
+    const inputs: unknown[] = [];
+    const application = focus.globals.Application;
+    const globals = {
+      ...focus.globals,
+      ObjC: { import() {}, bindFunction() {}, castRefToObject: (value: unknown) => value, deepUnwrap: (value: unknown) => value },
+      $: Object.assign((text: string) => ({ dataUsingEncoding: () => ({ length: text.length * 2, bytes: text }) }), api, focus.globals.$, {
+        CGEventSetIntegerValueField() {},
+        CGEventCreateKeyboardEvent: (_source: unknown, key: number, down: boolean) => ({ key, down }),
+        CGEventSetFlags() {},
+        CGEventKeyboardSetUnicodeString: (event: Record<string, unknown>, _length: number, text: string) => { event.text = text; },
+        CGEventPost: (_tap: unknown, event: unknown) => {
+          expect(focus.actions).toEqual(["activate", "AXMain", "AXRaise"]);
+          inputs.push(event);
+        },
+      }),
+      Application: () => ({
+        ...application(),
+        keystroke: (key: string, modifiers: unknown) => {
+          expect(focus.actions).toEqual(["activate", "AXMain", "AXRaise"]);
+          inputs.push({ key, modifiers });
+        },
+        keyCode: (code: number, modifiers: unknown) => inputs.push({ code, modifiers }),
+      }),
+    };
+    return { inputs, globals, actions: focus.actions };
+  }
+
+  it.each(requests)("focuses and verifies the requested window before $action input", request => {
+    const { inputs, globals, actions } = environment();
+    execute(request, globals);
+    expect(actions).toEqual(["activate", "AXMain", "AXRaise"]);
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(plan(request).permissionHint).toContain("Automation");
+  });
+
+  it.each(requests)("sends no $action input when the requested window is missing, ambiguous or refused", request => {
+    for (const options of [{ missing: true }, { duplicateCG: true }, { duplicateAX: true }, { focusWrong: true }]) {
+      const { inputs, globals } = environment(options);
+      expect(() => execute(request, globals)).toThrow();
+      expect(inputs).toEqual([]);
+    }
+  });
+
+  it("preserves native key codes and modifiers in a targeted shortcut", () => {
+    const { inputs, globals } = environment();
+    execute({ action: "key", keys: ["ctrl", "Return"], windowId: 9 }, globals);
+    expect(inputs).toEqual([{ code: 36, modifiers: { using: ["control down"] } }]);
+  });
+
+  it("quotes a targeted character without interpreting it as script", () => {
+    const { inputs, globals } = environment();
+    execute({ action: "key", keys: ["cmd", '"'], windowId: 9 }, globals);
+    expect(inputs).toEqual([{ key: '"', modifiers: { using: ["command down"] } }]);
+  });
+
+  it("switches between two windows with the same owner and title before delivering input", () => {
+    const focus = focusEnvironment({ sibling: true });
+    const received: Array<{ key: string; position: number[] }> = [];
+    const globals = {
+      ...focus.globals,
+      Application: () => ({
+        ...focus.globals.Application(),
+        keystroke: (key: string) => received.push({ key, position: focus.focusedPosition() }),
+      }),
+    };
+    execute({ action: "key", keys: ["a"], windowId: 9 }, globals);
+    execute({ action: "key", keys: ["b"], windowId: 10 }, globals);
+    execute({ action: "key", keys: ["c"], windowId: 9 }, globals);
+    expect(received).toEqual([
+      { key: "a", position: [20, 30] },
+      { key: "b", position: [500, 30] },
+      { key: "c", position: [20, 30] },
+    ]);
+  });
+
+  it.each(requests)("refuses invalid window IDs before planning $action", request => {
+    for (const windowId of [0, -1, 1.5, NaN, Infinity]) {
+      expect(darwinComputerUse.inputPlan({ ...request, windowId } as ComputerInputRequest, {})).toContain("positive whole number");
+    }
+  });
+
+  it("keeps drag cancellation cleanup independent of target focus", () => {
+    const cleanup = plan(requests[5]).cleanupPlan!;
+    expect(cleanup.script).toContain("kCGEventLeftMouseUp");
+    expect(cleanup.script).not.toContain("AXRaise");
+    expect(cleanup.script).not.toContain("kCGEventLeftMouseDown");
   });
 });

@@ -16,9 +16,14 @@ describe("computer workflow context", () => {
     expect(context).toContain("## Computer use workflow");
     expect(context).toContain("before choosing coordinates");
     expect(context).toContain("again after focusing or an action");
-    expect(context).toContain("metadata.pixel_scale and metadata.origin");
+    expect(context).toContain("metadata.origin and metadata.pixel_scale_x / metadata.pixel_scale_y");
+    expect(context).toContain("display layout/scale change requires a fresh screenshot");
     expect(context).toContain("Do not reuse stale coordinates");
     expect(context).toContain("small, deliberate actions");
+    expect(context).toContain("pass the observed window_id on each input call");
+    expect(context).toContain("same queued operation");
+    expect(context).toContain("no target is remembered between calls");
+    expect(context).toContain("Pointer coordinates remain absolute screen coordinates");
     expect(context).toContain("does not prove the requested application change occurred");
     expect(context).toContain("Do not change configuration, tool grants, or OS privacy settings to authorize yourself");
   });

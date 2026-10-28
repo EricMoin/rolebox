@@ -1,24 +1,13 @@
 /**
- * macOS computer-use driver — pure plan builders over the two helpers macOS
- * already ships.
+ * macOS computer-use driver — pure plans executed through the built-in osascript.
+ * screencapture captures windows or global screen rectangles with geometry
+ * verified before and after capture. A display is selected by its current bounds.
  *
- * Capture is `/usr/sbin/screencapture`, whose own flags choose the target:
- * `-l <windowid>` captures exactly one window (always with `-o`, so the image is
- * the window's own frame — without it the drop shadow is included and image pixel
- * (0,0) is not the window's top-left), `-R x,y,w,h` one rectangle,
- * `-D <display>` one display, and no target flag ONE display — the main one,
- * never a stitched image of every screen. `-R` is in global screen coordinates
- * and therefore already selects its own display: screencapture ignores `-D` when
- * `-R` is given, so the two are refused together. `-x` suppresses the shutter
- * sound; screencapture leaves the pointer OUT unless `-C` is passed, so every
- * plan here is cursor-free.
- *
- * A capture and the input that follows it are in different coordinate spaces,
- * and this file must not blur them: the image is in DEVICE PIXELS at the captured
- * screen's backing scale — 3024x1964 for a 1512x982-point 2x display — while
- * every plan below is in SCREEN POINTS, as used by Quartz mouse events.
- * A pixel coordinate read off a capture is
- * therefore divided by the capture's own scale before anything here may click it.
+ * A capture and the input that follows it are in different coordinate spaces:
+ * images use raster pixels, while input uses screen points. Window captures
+ * omit shadows and preserve the native raster. Rectangle captures compose
+ * individual display intersections into a canvas sized to the logical extent.
+ * Screenshot geometry and raster dimensions define the conversion to screen points.
  *
  * Key combinations use `/usr/bin/osascript` driving System Events through
  * `keystroke` and `key code`. macOS grants that only to a process the user has
@@ -28,7 +17,7 @@
  *
  * Window enumeration is the one command here that does not touch System Events:
  * it runs `osascript -l JavaScript` against the window server's own list, so the
- * ids it prints are the real CGWindowIDs `screencapture -l` accepts and it needs
+ * ids it prints are the native CGWindowIDs used by capture and focus and it needs
  * no Accessibility grant. A window title macOS withholds prints as an empty
  * column.
  *
@@ -43,14 +32,15 @@
 
 import type {
   ComputerCaptureRequest,
+  ComputerCaptureGuard,
   ComputerInputRequest,
   ComputerPlan,
   ComputerPlanOrRefusal,
   SupportedComputerUse,
 } from "../../platform/system/types.ts";
 import { REGION_REFUSAL, usableWindowId, wholeRegion } from "./shared.ts";
+import { DARWIN_GEOMETRY_SCRIPT, darwinCaptureGuardScript, darwinCaptureScript } from "./darwin-geometry.ts";
 
-const SCREENCAPTURE = "/usr/sbin/screencapture";
 const OSASCRIPT = "/usr/bin/osascript";
 
 /** Remediation for a reported macOS privacy denial. */
@@ -58,7 +48,7 @@ const INPUT_PERMISSION_HINT =
   "macOS gives input control only to a process the user has trusted with Accessibility (System Settings > Privacy & Security > Accessibility) to synthesize input and with Automation for System Events (System Settings > Privacy & Security > Automation) to script it. Approve the application launching the host and restart it if required. Automation remains a separate grant; computer_permissions cannot grant it automatically.";
 
 const SCREEN_RECORDING_HINT =
-  "macOS needs Screen Recording permission for screencapture to include window contents (System Settings > Privacy & Security > Screen Recording); without it the PNG contains only the desktop wallpaper.";
+  "macOS needs Screen Recording permission for native screenshots (System Settings > Privacy & Security > Screen Recording); grant it to the application launching the host and restart it if required.";
 
 const QUARTZ_PERMISSION_HINT =
   "macOS needs Accessibility permission for input events (System Settings > Privacy & Security > Accessibility); grant it to the process that launched the host and restart that process.";
@@ -122,7 +112,7 @@ const KEY_CODES: Record<string, number> = {
   f12: 111,
 };
 
-type KeyPress = { readonly statement: string } | { readonly refusal: string };
+type KeyPress = { readonly statement: string; readonly javaScript: string } | { readonly refusal: string };
 
 /**
  * Turn one key list into the System Events statement that presses it.
@@ -147,13 +137,20 @@ function keyPress(keys: readonly string[]): KeyPress {
     modifiers.push(modifier);
   }
   const using = modifiers.length > 0 ? ` using {${modifiers.join(", ")}}` : "";
+  const options = modifiers.length > 0 ? `, {using: ${JSON.stringify(modifiers)}}` : "";
   const lower = final.toLowerCase();
   const code = KEY_CODES[lower];
-  if (code !== undefined) return { statement: `key code ${code}${using}` };
+  if (code !== undefined) return {
+    statement: `key code ${code}${using}`,
+    javaScript: `Application('System Events').keyCode(${code}${options});`,
+  };
   if (MODIFIERS[lower] !== undefined) {
     return { refusal: `"${final}" is a modifier and cannot be the key of a press; put modifiers first and end with a normal key.` };
   }
-  if (final.length === 1) return { statement: `keystroke "${escapeAppleScript(final)}"${using}` };
+  if (final.length === 1) return {
+    statement: `keystroke "${escapeAppleScript(final)}"${using}`,
+    javaScript: `Application('System Events').keystroke(${JSON.stringify(final)}${options});`,
+  };
   return {
     refusal: `macOS has no key named "${final}"; pass a single character or one of ${Object.keys(KEY_CODES).join(", ")}.`,
   };
@@ -185,18 +182,8 @@ function javaScriptPlan(script: string, permissionHint?: string): ComputerPlan {
 
 function displayListingPlan(): ComputerPlan {
   return javaScriptPlan([
-    "ObjC.import('AppKit');",
-    "ObjC.import('CoreGraphics');",
-    "var screens = $.NSScreen.screens;",
-    "if (Number(screens.count) === 0) throw new Error('no displays are available in this desktop session');",
-    "var out = [];",
-    "for (var i = 0; i < Number(screens.count); i++) {",
-    "  var screen = screens.objectAtIndex(i);",
-    "  var display = Number(screen.deviceDescription.objectForKey('NSScreenNumber').js);",
-    "  var bounds = $.CGDisplayBounds(display);",
-    "  out.push({id: i + 1, x: bounds.origin.x, y: bounds.origin.y, width: bounds.size.width, height: bounds.size.height, scale: Number(screen.backingScaleFactor), primary: i === 0});",
-    "}",
-    "JSON.stringify(out);",
+    DARWIN_GEOMETRY_SCRIPT,
+    "JSON.stringify(computerDisplays());",
   ].join("\n"));
 }
 
@@ -279,7 +266,6 @@ function mouseReleasePlan(button: string, up: string): ComputerPlan {
 }
 
 function clickPlan(request: Extract<ComputerInputRequest, { action: "click" }>): ComputerPlanOrRefusal {
-  if (request.windowId !== undefined) return windowTargetingRefusal("click");
   const x = Math.round(request.x);
   const y = Math.round(request.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return "click coordinates must be finite numbers.";
@@ -423,44 +409,51 @@ function typePlan(text: string): ComputerPlanOrRefusal {
   ].join("\n"), QUARTZ_PERMISSION_HINT);
 }
 
-/** Why one window cannot be the target of an input gesture on macOS. */
-function windowTargetingRefusal(action: string): string {
-  return `macOS sends ${action} to the frontmost application, not to a named window; activate the window first with computer_focus and call computer_${action} again without window_id.`;
+function windowInputPlan(windowId: number | undefined, input: ComputerPlanOrRefusal, guard?: ComputerCaptureGuard): ComputerPlanOrRefusal {
+  if (typeof input === "string" || (windowId === undefined && guard === undefined)) return input;
+  const scripts: string[] = [];
+  if (windowId !== undefined) {
+    const focus = focusPlan(windowId);
+    if (typeof focus === "string") return focus;
+    scripts.push(`(function () {\n${focus.script}\n})();`);
+  }
+  if (guard !== undefined) scripts.push(`(function () {\n${darwinCaptureGuardScript(guard)}\n})();`);
+  scripts.push(input.script!);
+  const combined = javaScriptPlan(scripts.join("\n"), windowId === undefined ? input.permissionHint : INPUT_PERMISSION_HINT);
+  return {
+    ...combined,
+    ...(guard === undefined ? {} : { inputGuardFailureMarker: "ROLEBOX_SCREENSHOT_STALE" }),
+    ...(input.cleanupPlan === undefined ? {} : { cleanupPlan: input.cleanupPlan }),
+  };
 }
 
 function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
   if (request.windowId !== undefined && request.region !== undefined) {
-    return "screencapture takes one window (-l) or one region (-R), not both; pass window_id or region.";
+    return "a screenshot takes one window or one region, not both; pass window_id or region.";
   }
   if (request.windowId !== undefined && request.display !== undefined) {
     return "a single-window capture does not select a display; pass window_id or display.";
   }
   if (request.region !== undefined && request.display !== undefined) {
-    return "screencapture ignores -D when -R is given: a region is expressed in global screen coordinates and therefore already selects its own display, so pass region or display, not both.";
+    return "a region is expressed in global screen coordinates and already selects its own displays, so pass region or display, not both.";
   }
-  if (request.display !== undefined && request.display < 1) {
+  if (request.display !== undefined && (!Number.isInteger(request.display) || request.display < 1)) {
     return "macOS counts displays from 1 (1 is the main display, 2 the next), so pass a display of 1 or more.";
   }
-  const args = ["-x"];
+  let target = request;
   if (request.windowId !== undefined) {
     if (!usableWindowId(request.windowId)) {
       return "a window id must be a positive whole number (macOS window numbers come from computer_windows).";
     }
-    // -o drops the window shadow, so the image is exactly the window's frame.
-    args.push("-o", "-l", String(request.windowId));
   } else if (request.region !== undefined) {
     const region = wholeRegion(request.region);
     if (region === null) return REGION_REFUSAL;
-    args.push("-R", `${region.x},${region.y},${region.w},${region.h}`);
+    target = { ...request, region };
   }
-  if (request.display !== undefined) args.push("-D", String(request.display));
-  args.push(request.path);
   return {
-    argv: [SCREENCAPTURE, ...args],
-    windowsVerbatimArguments: false,
-    requires: [SCREENCAPTURE],
+    ...javaScriptPlan(darwinCaptureScript(target), SCREEN_RECORDING_HINT),
     driver: "screencapture",
-    permissionHint: SCREEN_RECORDING_HINT,
+    requires: [OSASCRIPT, "/usr/sbin/screencapture"],
   };
 }
 
@@ -468,7 +461,7 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
  * The JXA script that lists one line per visible window: window number, the
  * owning process and the title, tab-separated.
  *
- * The window number is the CGWindowID `screencapture -l` takes, and the window
+ * The window number is the CGWindowID used by capture and focus, and the window
  * server's own list (`CGWindowListCopyWindowInfo`) is the only place macOS
  * exposes it: System Events' window attributes carry no `AXWindowNumber` on
  * current macOS at all, so reading the id through AppleScript left every window
@@ -540,22 +533,19 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
   switch (request.action) {
     case "displays": return displayListingPlan();
     case "focus": return focusPlan(request.windowId);
-    case "scroll": return scrollPlan(request);
-    case "drag": return dragPlan(request);
+    case "scroll": return windowInputPlan(request.windowId, scrollPlan(request), request.captureGuard);
+    case "drag": return windowInputPlan(request.windowId, dragPlan(request), request.captureGuard);
     case "windows": {
       const app = request.app === undefined || request.app.trim().length === 0 ? null : request.app.trim();
       return windowListingPlan(app);
     }
-    case "click": return clickPlan(request);
-    case "move": return movePlan(request);
-    case "type": {
-      if (request.windowId !== undefined) return windowTargetingRefusal("type");
-      return typePlan(request.text);
-    }
+    case "click": return windowInputPlan(request.windowId, clickPlan(request), request.captureGuard);
+    case "move": return windowInputPlan(request.windowId, movePlan(request), request.captureGuard);
+    case "type": return windowInputPlan(request.windowId, typePlan(request.text));
     case "key": {
-      if (request.windowId !== undefined) return windowTargetingRefusal("key");
       const press = keyPress(request.keys);
       if ("refusal" in press) return press.refusal;
+      if (request.windowId !== undefined) return windowInputPlan(request.windowId, javaScriptPlan(press.javaScript));
       return osascriptPlan(`tell application "System Events" to ${press.statement}`);
     }
   }
@@ -663,9 +653,9 @@ function permissionPromptPlan(): ComputerPlan {
 /** The macOS computer-use facts, declared once for the darwin descriptor. */
 export const darwinComputerUse: SupportedComputerUse = {
   supported: true,
-  requiredBinaries: [SCREENCAPTURE, OSASCRIPT],
+  requiredBinaries: [OSASCRIPT, "/usr/sbin/screencapture"],
   installHint:
-    "macOS ships screencapture and osascript at their absolute paths; no third-party pointer helper is required.",
+    "macOS ships osascript and screencapture; native screenshots require Screen Recording permission.",
   capturePlan(request) {
     return capturePlan(request);
   },

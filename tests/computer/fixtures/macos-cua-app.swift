@@ -85,16 +85,27 @@ final class DragProbe: NSView {
 }
 
 final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDelegate {
+    struct MoveCommand: Decodable {
+        let id: String
+        let action: String
+        let window: String
+        let x: Double
+        let y: Double
+    }
+
     let title: String
     let stateURL: URL
+    let commandURL: URL?
     var primary: NSWindow!
     var secondary: NSWindow!
     var button: NSButton!
+    var secondaryButton: NSButton!
     var input: InputProbe!
     var inputScroll: NSScrollView!
     var scroll: ScrollProbe!
     var drag: DragProbe!
     var clicks = 0
+    var secondaryClicks = 0
     var textChanges = 0
     var focusChanges = 0
     var timer: Timer?
@@ -102,10 +113,13 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
     var sequence = 0
     var ready = false
     var closed = false
+    var lastCommandData: Data?
+    var commandAck: [String: Any]?
 
-    init(title: String, stateURL: URL) {
+    init(title: String, stateURL: URL, commandURL: URL? = nil) {
         self.title = title
         self.stateURL = stateURL
+        self.commandURL = commandURL
     }
 
     func label(_ value: String, frame: NSRect, parent: NSView) {
@@ -181,6 +195,10 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
         secondary.isReleasedWhenClosed = false
         label("Secondary focus target", frame: NSRect(x: 24, y: 90, width: 260, height: 28),
               parent: secondary.contentView!)
+        secondaryButton = NSButton(title: "Secondary clicks: 0", target: self, action: #selector(clickSecondary))
+        secondaryButton.frame = NSRect(x: 24, y: 40, width: 252, height: 36)
+        secondaryButton.bezelStyle = .rounded
+        secondary.contentView!.addSubview(secondaryButton)
         secondary.orderFront(nil)
         primary.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -193,7 +211,10 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
             signalSources.append(source)
         }
         ready = true
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.writeState() }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.pollCommand()
+            self?.writeState()
+        }
         writeState()
         print("{\"ready\":true,\"pid\":\(ProcessInfo.processInfo.processIdentifier),\"windowId\":\(primary.windowNumber)}")
         fflush(stdout)
@@ -203,6 +224,43 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
         clicks += 1
         button.title = "Click counter: \(clicks)"
         writeState()
+    }
+
+    @objc func clickSecondary() {
+        secondaryClicks += 1
+        secondaryButton.title = "Secondary clicks: \(secondaryClicks)"
+        writeState()
+    }
+
+    func pollCommand() {
+        guard !closed, let commandURL,
+              let data = try? Data(contentsOf: commandURL), data != lastCommandData else { return }
+        lastCommandData = data
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let id = object?["id"] as? String
+        do {
+            let command = try JSONDecoder().decode(MoveCommand.self, from: data)
+            guard !command.id.isEmpty, command.action == "move", command.x.isFinite, command.y.isFinite else {
+                commandAck = ["id": command.id, "ok": false, "error": "Expected a nonempty id, move action, and finite x/y."]
+                return
+            }
+            let window: NSWindow
+            switch command.window {
+            case "primary": window = primary
+            case "secondary": window = secondary
+            default:
+                commandAck = ["id": command.id, "ok": false, "error": "The target must be primary or secondary."]
+                return
+            }
+            guard window.isVisible, let screen = NSScreen.screens.first else {
+                commandAck = ["id": command.id, "ok": false, "error": "The fixture window or primary screen is unavailable."]
+                return
+            }
+            window.setFrameOrigin(NSPoint(x: command.x, y: screen.frame.maxY - command.y - window.frame.height))
+            commandAck = ["id": command.id, "ok": true]
+        } catch {
+            commandAck = ["id": id as Any? ?? NSNull(), "ok": false, "error": "Invalid move command: \(error.localizedDescription)"]
+        }
     }
 
     func textDidChange(_ notification: Notification) {
@@ -248,7 +306,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
     func writeState() {
         guard ready else { return }
         sequence += 1
-        let state: [String: Any] = [
+        var state: [String: Any] = [
             "ready": true, "closed": closed, "pid": ProcessInfo.processInfo.processIdentifier,
             "sequence": sequence, "updatedAtMs": Int64(Date().timeIntervalSince1970 * 1000),
             "active": NSApplication.shared.isActive,
@@ -258,6 +316,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
             "coordinateSpace": "global-screen-points-top-left",
             "primary": windowState(primary), "secondary": windowState(secondary),
             "button": ["rect": screenRect(button), "clicks": clicks],
+            "secondaryButton": ["rect": screenRect(secondaryButton), "clicks": secondaryClicks],
             "input": ["rect": screenRect(inputScroll), "value": input.string, "changes": textChanges,
                       "mouseDowns": input.mouseDowns, "focused": primary.firstResponder === input],
             "scroll": ["rect": screenRect(scroll), "offsetX": scroll.contentView.bounds.origin.x,
@@ -267,6 +326,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
                      "target": screenRect(drag, localRect: drag.target), "downs": drag.downs,
                      "moves": drag.moves, "ups": drag.ups, "dragging": drag.dragging]
         ]
+        if let commandAck { state["command"] = commandAck }
         do {
             let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys, .prettyPrinted])
             try data.write(to: stateURL, options: .atomic)
@@ -278,16 +338,22 @@ final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextVi
     }
 }
 
-guard CommandLine.arguments.count == 3 else {
-    fputs("Usage: macos-cua-app <unique-window-title> <absolute-state-json-path>\n", stderr)
+guard (3...4).contains(CommandLine.arguments.count) else {
+    fputs("Usage: macos-cua-app <unique-window-title> <absolute-state-json-path> [absolute-command-json-path]\n", stderr)
     exit(2)
 }
 guard CommandLine.arguments[2].hasPrefix("/") else {
     fputs("The state path must be absolute.\n", stderr)
     exit(2)
 }
+let commandPath = CommandLine.arguments.count == 4 ? CommandLine.arguments[3] : nil
+guard commandPath == nil || commandPath!.hasPrefix("/") else {
+    fputs("The command path must be absolute.\n", stderr)
+    exit(2)
+}
 let app = NSApplication.shared
-let fixture = Fixture(title: CommandLine.arguments[1], stateURL: URL(fileURLWithPath: CommandLine.arguments[2]))
+let fixture = Fixture(title: CommandLine.arguments[1], stateURL: URL(fileURLWithPath: CommandLine.arguments[2]),
+                      commandURL: commandPath.map { URL(fileURLWithPath: $0) })
 app.setActivationPolicy(.regular)
 app.delegate = fixture
 app.run()

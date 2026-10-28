@@ -82,19 +82,18 @@ Operating-system permissions and these platform limits still apply.
   covered by unit tests over the verdict, not by a real denial. The window list
   is the exception: it reads the window server's own list and needs no grant at
   all, though its title column stays empty without Screen Recording.
-- **It does not convert coordinates for the caller.** A capture reports the
-  ratio of device pixels to screen points the file itself states, as
-  `metadata.pixel_scale` plus one text sentence when it is above 1
-  (`src/computer/capture.ts:66-106`); the family never rewrites a coordinate, so
-  a caller that read a pixel position off a screenshot must divide it by that
-  scale before `computer_click` or `computer_move`, which take screen
-  coordinates.
-- **A window capture carries no screen origin.** `screencapture -l` with `-o`
-  returns exactly the window's frame in device pixels, so a pixel in that image
-  cannot be turned into a screen coordinate without the window's own bounds,
-  which the result does not report; it is for reading content. Use a full-screen
-  or `region` capture when the goal is to compute a click position
-  (`src/computer/drivers/darwin.ts:5-21`).
+- **Screenshot coordinates need a current snapshot.** Pointer tools map image
+  pixels automatically with `screenshot_id`; without it they take absolute
+  screen coordinates. Captures report their origin and per-axis pixel scales.
+  Window moves/resizes and display changes invalidate guarded input and require
+  recapture. This detects geometry changes, not every UI content change, and
+  cannot lock out another process after the check or during a drag. IDs expire
+  after ten minutes and are scoped to the session, workspace and platform.
+- **Capture support has platform limits.** macOS screenshots require Screen Recording
+  permission for the application launching the host. Windows and X11 window
+  captures include occluding content; focus first. X11 captures client areas
+  without decorations, requires RandR 1.5 monitor support, and refuses regions
+  outside the current X root screen. See [computer-use.md](computer-use.md#screenshots-and-coordinates).
 - **Linux is X11 only.** A Wayland session is an explicit refusal — `scrot`,
   `import` and `xdotool` cannot inject through a Wayland compositor, and
   rolebox declares no Wayland driver (`src/computer/drivers/linux.ts:36-43`) —

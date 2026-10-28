@@ -19,7 +19,7 @@
  */
 
 import { dirname, resolve } from "node:path";
-import { chmodSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { z } from "zod";
 import { defineTool, type CanonicalToolDef } from "../platform/ports/tool-factory.ts";
 import { currentPlatform, getSystem } from "../platform/system/index.ts";
@@ -33,6 +33,7 @@ import type {
 import { captureFilePath, captureResult, ensureCaptureDirectory } from "./capture.ts";
 import { DEFAULT_COMPUTER_TIMEOUT_MS, helperAvailable, runComputerPlan, spawnVectorFor } from "./exec.ts";
 import { computerOperationQueue } from "./queue.ts";
+import { COMPUTER_DISPLAY_SCHEMA, computerScreenshots, parseCaptureGeometry } from "./geometry.ts";
 import { permissionRecovery, PERMISSION_REQUEST_GUIDANCE, PERMISSION_USER_GUIDANCE } from "./permissions.ts";
 
 /** The action names every result reports in `metadata.action`. */
@@ -45,6 +46,28 @@ const DRY_RUN_ARG = z
 
 const TIMEOUT_ARG = z.number().int().min(1).max(120_000).optional()
   .describe("Total time limit including the desktop queue (default 15000ms, maximum 120000ms)");
+
+const INPUT_WINDOW_ARG = z.number().int().positive().optional()
+  .describe("Window id to focus and verify before input on macOS, Windows or X11; omitted uses the current desktop focus. With screenshot_id the captured window is selected automatically; an explicit ID must match it.");
+
+const SCREENSHOT_ARG = z.string().min(1).optional()
+  .describe("ID from a recent screenshot in this session. Coordinates then use image pixels and are mapped to the screen automatically. The captured window is focused; changed window geometry or display layout refuses input and requires a fresh screenshot.");
+
+function windowMetadata(windowId: number | undefined): Record<string, unknown> {
+  return windowId === undefined ? {} : { window_id: windowId };
+}
+
+function pointerRequest<T extends Extract<ComputerInputRequest, { action: "click" | "move" | "scroll" | "drag" }>>(
+  request: T, screenshotId: string | undefined, context: CanonicalToolContext,
+): T {
+  return screenshotId === undefined ? request : computerScreenshots.map(screenshotId, request, {
+    sessionID: context.sessionID, worktree: context.worktree, platform: getSystem().id,
+  }) as T;
+}
+
+function pointerMetadata(request: Extract<ComputerInputRequest, { action: "click" | "move" | "scroll" | "drag" }>, screenshotId: string | undefined): Record<string, unknown> {
+  return { ...windowMetadata(request.windowId), ...(screenshotId === undefined ? {} : { screenshot_id: screenshotId }) };
+}
 
 function defineComputerTool<Args extends z.ZodRawShape>(action: ActionName, definition: CanonicalToolDef<Args>): CanonicalToolDef<Args> {
   const schema = z.object(definition.args);
@@ -109,7 +132,7 @@ function metadataFor(action: ActionName, driver: string): Record<string, unknown
   return { platform: getSystem().id, driver, action };
 }
 
-type Prepared = { readonly ok: true; readonly plan: ComputerPlan } | { readonly ok: false; readonly result: ToolResult };
+type Prepared = { readonly ok: true; readonly plan: ComputerPlan } | { readonly ok: false; readonly result: Exclude<ToolResult, string> };
 
 /**
  * Turn a per-OS builder's answer into either a plan or the refusal result.
@@ -166,7 +189,7 @@ function dryRunResult(action: ActionName, plan: ComputerPlan): Exclude<ToolResul
   };
 }
 
-type Performed = { readonly ok: true; readonly output: string } | { readonly ok: false; readonly result: ToolResult };
+type Performed = { readonly ok: true; readonly output: string; readonly stdout: string } | { readonly ok: false; readonly result: Exclude<ToolResult, string> };
 
 async function performPlan(
   action: ActionName,
@@ -191,7 +214,7 @@ async function performPlan(
       },
     };
   }
-  return { ok: true, output: run.output };
+  return { ok: true, output: run.output, stdout: run.stdout };
 }
 
 function errorText(error: unknown): string {
@@ -232,11 +255,11 @@ export function createComputerScreenshotTool() {
     description:
       "Capture the screen, one window or one region as a PNG and return it as an image attachment. " +
       "The file is written under <worktree>/.rolebox/computer/ unless path is given. " +
-      "macOS uses screencapture, Linux X11 import/scrot, Windows PowerShell System.Drawing. " +
+      "macOS uses screencapture with native geometry verification, Linux X11 import/scrot, Windows PowerShell System.Drawing. " +
       "window_id, region and display are mutually exclusive; use computer_windows to find a window id. " +
-      "On macOS a region is exclusive with display too: a region is in global screen coordinates and already selects its own display, and screencapture ignores -D when -R is given. " +
       "A capture with no target covers ONE display (macOS: the main display), never a stitched image of every screen. " +
-      "Input uses absolute screen coordinates. Convert image pixels using metadata.pixel_scale and add metadata.origin; when origin is unknown, locate the window or display before clicking. " +
+      "Returns screenshot_id, screen bounds, origin and per-axis pixel scales. Pass screenshot_id to pointer tools to use image pixels with automatic mapping and stale-geometry checks. " +
+      "A region may span monitors with different UI scaling; the image uses a uniform mapping. Capture fails if window geometry or the display layout changes during capture. " +
       "dry_run returns the exact command without executing it.",
     args: {
       window_id: z.number().int().positive().optional().describe("One window id from computer_windows"),
@@ -254,7 +277,7 @@ export function createComputerScreenshotTool() {
         .int()
         .min(0)
         .optional()
-        .describe("Which display to capture: macOS -D is 1-based (1 = the main display, 2 the next), an X11 screen number, or a Windows AllScreens index"),
+        .describe("Display id returned by computer_displays on the current desktop; refresh after changing the display layout"),
       path: z
         .string()
         .min(1)
@@ -307,11 +330,23 @@ export function createComputerScreenshotTool() {
           context,
           args.timeout_ms ?? DEFAULT_COMPUTER_TIMEOUT_MS,
         );
+        if (existsSync(target)) chmodSync(target, 0o600);
         if (!performed.ok) return performed.result;
-        chmodSync(target, 0o600);
-        return captureResult(target, platform, prepared.plan.driver, {
-          windowId: args.window_id, region: args.region, display: args.display,
+        const geometry = parseCaptureGeometry(performed.stdout);
+        const captureTarget = {
+          windowId: args.window_id, region: args.region === undefined ? undefined : geometry.bounds, display: args.display,
+        };
+        const result = captureResult(target, platform, prepared.plan.driver, captureTarget, geometry);
+        if (typeof result === "string" || result.attachments === undefined) return result;
+        const screenshotId = computerScreenshots.remember({
+          sessionID: context.sessionID, worktree: context.worktree, platform,
+          target: captureTarget, geometry, width: result.metadata!.width as number, height: result.metadata!.height as number,
         });
+        return {
+          ...result,
+          output: `${result.output}\nScreenshot ID: ${screenshotId}. Pass screenshot_id with image-pixel coordinates to pointer tools; moved/resized windows or changed displays require a fresh screenshot.`,
+          metadata: { ...result.metadata, screenshot_id: screenshotId },
+        };
       } catch (error) {
         return {
           title: "Screenshot failed",
@@ -323,7 +358,7 @@ export function createComputerScreenshotTool() {
   });
 }
 
-/** One shared shape for the four input tools. */
+/** Run one discovery or input operation inside the tool's desktop queue slot. */
 async function runInput(
   action: ActionName,
   build: (facts: SupportedComputerUse) => ComputerPlanOrRefusal,
@@ -331,11 +366,16 @@ async function runInput(
   dryRun: boolean | undefined,
   extraMetadata: Record<string, unknown>,
 ): Promise<ToolResult> {
+  const target = { ...(extraMetadata.window_id === undefined ? {} : { window_id: extraMetadata.window_id }),
+    ...(extraMetadata.screenshot_id === undefined ? {} : { screenshot_id: extraMetadata.screenshot_id }) };
   const prepared = prepare(action, build);
-  if (!prepared.ok) return prepared.result;
-  if (dryRun === true) return dryRunResult(action, prepared.plan);
+  if (!prepared.ok) return { ...prepared.result, metadata: { ...prepared.result.metadata, ...target } };
+  if (dryRun === true) {
+    const result = dryRunResult(action, prepared.plan);
+    return { ...result, metadata: { ...result.metadata, ...target } };
+  }
   const performed = await performPlan(action, prepared.plan, context);
-  if (!performed.ok) return performed.result;
+  if (!performed.ok) return { ...performed.result, metadata: { ...performed.result.metadata, ...target } };
   const detail = performed.output.length === 0 ? "" : `\n${performed.output}`;
   return {
     title: action,
@@ -372,10 +412,10 @@ export function createComputerWindowsTool() {
   return defineComputerTool("windows", {
     description:
       "List the visible windows with the id this OS uses for window capture and input: " +
-      "the macOS window number, an X11 window id, or a Windows MainWindowHandle. " +
+      "the macOS window number, an X11 window id, or a Windows top-level window handle (including multiple windows from one process). " +
       "One line per window: on macOS and Windows id, process or owner, title; on X11 the id and the title. " +
-      "On macOS this reads the window server's own list, so the ids are real CGWindowIDs that screencapture -l " +
-      "accepts, with no Accessibility grant; window titles need Screen Recording and are empty without it. " +
+      "On macOS this reads the window server's own list, so the ids are native CGWindowIDs, " +
+      "with no Accessibility grant; window titles need Screen Recording and are empty without it. " +
       "The app filter is a case-insensitive substring of the owner's name on macOS, the title on X11 or the " +
       "process name or title on Windows; a filter that matches nothing is an error on macOS and an empty " +
       "listing elsewhere. dry_run returns the exact command without executing it.",
@@ -391,7 +431,7 @@ export function createComputerWindowsTool() {
       if (args.dry_run === true) return dryRunResult("windows", prepared.plan);
       const performed = await performPlan("windows", prepared.plan, context);
       if (!performed.ok) return performed.result;
-      const lines = performed.output.split(/\r?\n/).filter(line => line.trim().length > 0);
+      const lines = performed.stdout.split(/\r?\n/).filter(line => line.trim().length > 0);
       return {
         title: "windows",
         output: lines.length === 0 ? "No visible windows were listed." : lines.join("\n"),
@@ -405,16 +445,17 @@ export function createComputerWindowsTool() {
 export function createComputerClickTool() {
   return defineComputerTool("click", {
     description:
-      "Click a mouse button at absolute screen coordinates, optionally targeting one X11 window. " +
+      "Click a mouse button at absolute screen coordinates, optionally focusing and verifying window_id before input. " +
       "Darwin uses native Quartz mouse events for left, right and middle clicks; " +
       "Linux X11 uses xdotool; Windows uses mouse_event through PowerShell. " +
       "dry_run returns the exact command without executing it.",
     args: {
-      x: z.number().describe("Absolute screen x coordinate"),
-      y: z.number().describe("Absolute screen y coordinate"),
+      x: z.number().describe("Screen x coordinate, or image pixel x when screenshot_id is supplied"),
+      y: z.number().describe("Screen y coordinate, or image pixel y when screenshot_id is supplied"),
       button: z.enum(["left", "right", "middle"]).optional().default("left").describe("Mouse button (default left)"),
       clicks: z.union([z.literal(1), z.literal(2)]).optional().default(1).describe("Click count: 1 or 2 (default 1)"),
-      window_id: z.number().int().positive().optional().describe("One window id from computer_windows (X11 only)"),
+      window_id: INPUT_WINDOW_ARG,
+      screenshot_id: SCREENSHOT_ARG,
       dry_run: DRY_RUN_ARG,
       timeout_ms: TIMEOUT_ARG,
     },
@@ -424,15 +465,15 @@ export function createComputerClickTool() {
       // click here too, never an undefined one a driver would refuse.
       const button = args.button ?? "left";
       const clicks = args.clicks ?? 1;
-      const request: ComputerInputRequest = {
+      const request = pointerRequest({
         action: "click",
         x: args.x,
         y: args.y,
         button,
         clicks,
         windowId: args.window_id,
-      };
-      const extra = { x: Math.round(args.x), y: Math.round(args.y), button, clicks };
+      } as const, args.screenshot_id, context);
+      const extra = { x: Math.round(request.x), y: Math.round(request.y), button, clicks, ...pointerMetadata(request, args.screenshot_id) };
       return await runInput("click", facts => facts.inputPlan(request, process.env), context, args.dry_run, extra);
     },
   });
@@ -446,19 +487,21 @@ export function createComputerMoveTool() {
       "Darwin uses native Quartz mouse events, Linux X11 uses xdotool, Windows uses SetCursorPos through PowerShell. " +
       "dry_run returns the exact command without executing it.",
     args: {
-      x: z.number().describe("Absolute screen x coordinate"),
-      y: z.number().describe("Absolute screen y coordinate"),
+      x: z.number().describe("Screen x coordinate, or image pixel x when screenshot_id is supplied"),
+      y: z.number().describe("Screen y coordinate, or image pixel y when screenshot_id is supplied"),
+      window_id: INPUT_WINDOW_ARG,
+      screenshot_id: SCREENSHOT_ARG,
       dry_run: DRY_RUN_ARG,
       timeout_ms: TIMEOUT_ARG,
     },
     async execute(args, context) {
-      const request: ComputerInputRequest = { action: "move", x: args.x, y: args.y };
+      const request = pointerRequest({ action: "move", x: args.x, y: args.y, windowId: args.window_id }, args.screenshot_id, context);
       return await runInput(
         "move",
         facts => facts.inputPlan(request, process.env),
         context,
         args.dry_run,
-        { x: Math.round(args.x), y: Math.round(args.y) },
+        { x: Math.round(request.x), y: Math.round(request.y), ...pointerMetadata(request, args.screenshot_id) },
       );
     },
   });
@@ -468,12 +511,12 @@ export function createComputerMoveTool() {
 export function createComputerTypeTool() {
   return defineComputerTool("type", {
     description:
-      "Type text into the focused window. " +
+      "Type text into the focused window, optionally focusing and verifying window_id first. " +
       "Darwin uses Quartz Unicode keyboard events, Linux X11 uses xdotool type, Windows uses SendKeys. " +
       "Execution results omit the text; dry_run includes the exact command and therefore the text. Do not dry-run secrets.",
     args: {
       text: z.string().min(1).describe("Text to type; a newline presses Return"),
-      window_id: z.number().int().positive().optional().describe("One window id from computer_windows (X11 only)"),
+      window_id: INPUT_WINDOW_ARG,
       dry_run: DRY_RUN_ARG,
       timeout_ms: TIMEOUT_ARG,
     },
@@ -484,7 +527,7 @@ export function createComputerTypeTool() {
         facts => facts.inputPlan(request, process.env),
         context,
         args.dry_run,
-        { characters: [...args.text].length },
+        { characters: [...args.text].length, ...windowMetadata(args.window_id) },
       );
     },
   });
@@ -500,7 +543,7 @@ export function createComputerKeyTool() {
       "dry_run returns the exact command without executing it.",
     args: {
       keys: z.array(z.string().min(1)).min(1).describe('Modifiers then the key, e.g. ["ctrl", "shift", "t"]'),
-      window_id: z.number().int().positive().optional().describe("One window id from computer_windows (X11 only)"),
+      window_id: INPUT_WINDOW_ARG,
       dry_run: DRY_RUN_ARG,
       timeout_ms: TIMEOUT_ARG,
     },
@@ -511,25 +554,18 @@ export function createComputerKeyTool() {
         facts => facts.inputPlan(request, process.env),
         context,
         args.dry_run,
-        { keys: args.keys },
+        { keys: args.keys, ...windowMetadata(args.window_id) },
       );
     },
   });
 }
 
-const DISPLAY_SCHEMA = z.object({
-  id: z.number().int().nonnegative(),
-  x: z.number(), y: z.number(),
-  width: z.number().positive(), height: z.number().positive(),
-  scale: z.number().positive(), primary: z.boolean(),
-});
-
 export function createComputerDisplaysTool() {
   return defineComputerTool("displays", {
     description: "List displays as JSON with screenshot display ids, screen-coordinate bounds, scale and primary flag. " +
-      "macOS ids start at 1; Windows and X11 screen ids start at 0. X11 screens are separate coordinate spaces, not RandR monitors. " +
-      "Use the display origin when converting screenshot pixels to absolute input coordinates. " +
-      "X11 input remains on the host's DISPLAY screen; restart the host with the target DISPLAY to control a different X screen.",
+      "macOS ids start at 1; Windows and X11 monitor ids start at 0. Refresh IDs after a layout change. " +
+      "X11 lists RandR monitors on the current DISPLAY screen. Windows and X11 use physical desktop pixels; macOS uses screen points. " +
+      "Display scale describes UI scaling, not the screenshot pixel-to-input ratio; use the screenshot's per-axis scales or screenshot_id for input.",
     args: { dry_run: DRY_RUN_ARG, timeout_ms: TIMEOUT_ARG },
     async execute(args, context) {
       const prepared = prepare("displays", facts => facts.inputPlan({ action: "displays" }, process.env));
@@ -537,7 +573,7 @@ export function createComputerDisplaysTool() {
       if (args.dry_run) return dryRunResult("displays", prepared.plan);
       const performed = await performPlan("displays", prepared.plan, context, args.timeout_ms);
       if (!performed.ok) return performed.result;
-      const displays = z.array(DISPLAY_SCHEMA).min(1).parse(JSON.parse(performed.output));
+      const displays = z.array(COMPUTER_DISPLAY_SCHEMA).min(1).parse(JSON.parse(performed.stdout));
       return {
         title: "displays", output: JSON.stringify(displays),
         metadata: { ...metadataFor("displays", prepared.plan.driver), displays, count: displays.length },
@@ -569,12 +605,16 @@ export function createComputerScrollTool() {
       direction: z.enum(["up", "down", "left", "right"]),
       amount: z.number().int().min(1).max(100).optional().default(3),
       x: z.number().optional(), y: z.number().optional(),
+      window_id: INPUT_WINDOW_ARG,
+      screenshot_id: SCREENSHOT_ARG,
       dry_run: DRY_RUN_ARG, timeout_ms: TIMEOUT_ARG,
     },
     async execute(args, context) {
-      const request: ComputerInputRequest = { action: "scroll", direction: args.direction, amount: args.amount ?? 3, x: args.x, y: args.y };
+      const request = pointerRequest({ action: "scroll", direction: args.direction, amount: args.amount ?? 3, x: args.x, y: args.y, windowId: args.window_id }, args.screenshot_id, context);
       return runInput("scroll", facts => facts.inputPlan(request, process.env), context, args.dry_run,
-        { direction: request.direction, amount: request.amount });
+        { direction: request.direction, amount: request.amount,
+          ...(request.x === undefined ? {} : { x: request.x }), ...(request.y === undefined ? {} : { y: request.y }),
+          ...pointerMetadata(request, args.screenshot_id) });
     },
   });
 }
@@ -586,15 +626,17 @@ export function createComputerDragTool() {
     args: {
       from_x: z.number(), from_y: z.number(), to_x: z.number(), to_y: z.number(),
       duration_ms: z.number().int().min(100).max(5000).optional().default(500),
+      window_id: INPUT_WINDOW_ARG,
+      screenshot_id: SCREENSHOT_ARG,
       dry_run: DRY_RUN_ARG, timeout_ms: TIMEOUT_ARG,
     },
     async execute(args, context) {
-      const request: ComputerInputRequest = {
+      const request = pointerRequest({
         action: "drag", fromX: args.from_x, fromY: args.from_y, toX: args.to_x, toY: args.to_y,
-        durationMs: args.duration_ms ?? 500,
-      };
+        durationMs: args.duration_ms ?? 500, windowId: args.window_id,
+      } as const, args.screenshot_id, context);
       return runInput("drag", facts => facts.inputPlan(request, process.env), context, args.dry_run,
-        { from_x: args.from_x, from_y: args.from_y, to_x: args.to_x, to_y: args.to_y, duration_ms: request.durationMs });
+        { from_x: request.fromX, from_y: request.fromY, to_x: request.toX, to_y: request.toY, duration_ms: request.durationMs, ...pointerMetadata(request, args.screenshot_id) });
     },
   });
 }
@@ -639,7 +681,7 @@ export function createComputerStatusTool() {
         }
       }
       const report = {
-        platform: getSystem().id, supported: true, operations, helpers, input_permission: permission,
+        platform: getSystem().id, supported: true, operations, ...(helpers === undefined ? {} : { helpers }), input_permission: permission,
         screen_capture: args.dry_run ? { checked: false } : await capturePermission(facts, context),
         install_hint: facts.installHint, serialization: "Operations are serialized within this host process; other applications and host processes can still change the desktop.",
       };

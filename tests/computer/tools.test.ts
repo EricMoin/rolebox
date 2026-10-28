@@ -3,13 +3,12 @@
  * The computer-use tool face: dry-run plans, refusals, the screenshot
  * attachment, and the default-off registration.
  *
- * Every tool assertion goes through `dry_run`, which executes nothing: no test
- * in this file can move the pointer, type a character or photograph the
- * developer's screen. The one real capture lives in its own file, guarded to
- * macOS.
+ * Input assertions use `dry_run` or an inert command fixture: no test in this
+ * file can move the pointer, type a character or photograph the developer's
+ * screen. Real captures live in their own opt-in macOS test file.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,8 +121,38 @@ function parseReport(result: unknown): Record<string, any> {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setPlatformForTest(undefined);
   while (worktrees.length > 0) rmSync(worktrees.pop()!, { recursive: true, force: true });
+});
+
+describe("computer tool JSON results", () => {
+  it.each([
+    { args: { direction: "down" }, metadata: { direction: "down", amount: 3 } },
+    { args: { direction: "up", window_id: 42 }, metadata: { direction: "up", amount: 3, window_id: 42 } },
+    { args: { direction: "left", amount: 2, x: -40, y: 0 }, metadata: { direction: "left", amount: 2, x: -40, y: 0 } },
+  ])("returns lossless JSON after scrolling with $args", async ({ args, metadata }) => {
+    setPlatformForTest("darwin");
+    const plan = vi.spyOn(darwinComputerUse, "inputPlan").mockReturnValue({
+      argv: [process.execPath, "-e", "process.exit(0)"],
+      windowsVerbatimArguments: false,
+      requires: [process.execPath],
+      driver: "fixture",
+    });
+    const result = structuredResult(await createComputerTools().computer_scroll!.execute(args, makeContext(makeWorktree())));
+    expect(result.output).toBe(`Scrolled ${args.direction} by ${metadata.amount} wheel ticks (fixture).`);
+    expect(result.metadata).toEqual({ platform: "darwin", driver: "fixture", action: "scroll", ...metadata });
+    expect(result).toStrictEqual(JSON.parse(JSON.stringify(result)));
+    expect(plan).toHaveBeenCalledOnce();
+  });
+
+  it("returns lossless JSON for status without helper probes in dry runs", async () => {
+    setPlatformForTest("darwin");
+    const result = structuredResult(await createComputerTools().computer_status!.execute({ dry_run: true }, makeContext(makeWorktree())));
+    expect(result.metadata).not.toHaveProperty("helpers");
+    expect(result.metadata).toMatchObject({ dry_run: true, input_permission: { checked: false } });
+    expect(result).toStrictEqual(JSON.parse(JSON.stringify(result)));
+  });
 });
 
 // ── Dry runs ─────────────────────────────────────────────────────────────────
@@ -135,7 +164,7 @@ describe("computer tools — dry runs", () => {
 
     const screenshot = await createComputerScreenshotTool().execute({ dry_run: true }, context);
     const shot = parseReport(screenshot);
-    expect(shot.argv[0]).toBe("/usr/sbin/screencapture");
+    expect(shot.argv[0]).toBe("/usr/bin/osascript");
     expect((screenshot as any).metadata.dry_run).toBe(true);
     expect((screenshot as any).metadata.driver).toBe("screencapture");
 
@@ -226,7 +255,7 @@ describe("computer tools — dry runs", () => {
     const key = parseReport(await createComputerKeyTool().execute({ keys: ["ctrl", "v"], dry_run: true }, context));
     expect(key.script).toContain("SendWait('^v')");
     const windows = parseReport(await createComputerWindowsTool().execute({ app: "code", dry_run: true }, context));
-    expect(windows.script).toContain("MainWindowHandle");
+    expect(windows.script).toContain("EnumWindows");
   });
 
   it("executes nothing and writes nothing for a dry run", async () => {
@@ -275,8 +304,8 @@ describe("computer tools — refusals", () => {
     expect(both.output).toContain("Error: ");
     expect(both.output).toContain("not both");
 
-    const windowed = (await createComputerTypeTool().execute({ text: "hi", window_id: 4, dry_run: true }, context)) as any;
-    expect(windowed.output).toContain("frontmost application");
+    const windowed = (await createComputerTypeTool().execute({ text: "hi", window_id: 0, dry_run: true }, context)) as any;
+    expect(windowed.output).toContain("invalid computer_type arguments: window_id");
     expect(windowed.metadata.driver).toBe("none");
 
     const badKey = (await createComputerKeyTool().execute({ keys: ["Nope"], dry_run: true }, context)) as any;

@@ -1,11 +1,10 @@
 /**
  * Linux computer-use driver — X11 only, and honest about it.
  *
- * Capture prefers ImageMagick's `import` (`-window root` for the whole screen,
- * `-window <id>` for one X11 window, `-crop w x h + x + y` for a region) and
- * falls back to `scrot`, which cannot address one window. Both are looked up by
- * the shell script the plan carries, so the plan itself stays a pure value: it
- * names the helpers it will try instead of probing for them here.
+ * Capture crops the current root screen to a RandR monitor, window client area
+ * or region. Both ImageMagick `import` and the `scrot` fallback use those exact
+ * bounds. Geometry is checked before and after capture, and again before input
+ * derived from the image.
  *
  * Input is `xdotool` (XTEST). Text uses direct argv; drag uses a numeric-only
  * shell plan so it can release the button if movement fails.
@@ -22,7 +21,8 @@ import type {
   ComputerPlanOrRefusal,
   SupportedComputerUse,
 } from "../../platform/system/types.ts";
-import { REGION_REFUSAL, shellQuote, usableWindowId, wholeRegion } from "./shared.ts";
+import { shellQuote, usableWindowId } from "./shared.ts";
+import { linuxDisplayScript, linuxGeometryJson, linuxGeometryScript, linuxTargetRefusal } from "./linux-geometry.ts";
 
 const SH = "/bin/sh";
 const XDOTOOL = "xdotool";
@@ -34,7 +34,7 @@ const XDOTOOL_INSTALL_HINT =
   "install xdotool, for example: apt-get install xdotool, dnf install xdotool, or pacman -S xdotool.";
 
 const DISPLAY_INSTALL_HINT =
-  "install xdpyinfo (x11-utils on Debian/Ubuntu, xorg-x11-utils on Fedora, or xorg-xdpyinfo on Arch).";
+  "install xrandr with RandR 1.5 support (x11-xserver-utils on Debian/Ubuntu, xrandr on Fedora, or xorg-xrandr on Arch).";
 
 /** The refusal a Wayland session gets, or `null` on an X11 session. */
 function waylandRefusal(env: NodeJS.ProcessEnv): string | null {
@@ -48,65 +48,37 @@ function waylandRefusal(env: NodeJS.ProcessEnv): string | null {
 function capturePlan(request: ComputerCaptureRequest, env: NodeJS.ProcessEnv): ComputerPlanOrRefusal {
   const wayland = waylandRefusal(env);
   if (wayland !== null) return wayland;
-  if (request.windowId !== undefined && request.region !== undefined) {
-    return "an X11 capture takes one window (-window) or one region (-crop), not both; pass window_id or region.";
-  }
-  if (request.display !== undefined && (!Number.isInteger(request.display) || request.display < 0)) {
-    return "an X11 display must be a non-negative screen index from computer_displays.";
-  }
+  const refusal = linuxTargetRefusal(request);
+  if (refusal !== null) return refusal;
   const path = shellQuote(request.path);
-  let screen = "";
-  if (request.display !== undefined) {
-    const display = env.DISPLAY;
-    if (!display || !/:[0-9]+(?:\.[0-9]+)?$/.test(display)) {
-      return "selecting an X11 screen needs a valid DISPLAY connection, such as :0 or localhost:10.0.";
-    }
-    screen = `env DISPLAY=${shellQuote(display.replace(/\.[0-9]+$/, "") + "." + request.display)} `;
-  }
-
-  let script: string;
-  if (request.windowId !== undefined) {
-    if (!usableWindowId(request.windowId)) {
-      return "a window id must be a positive whole number (X11 window ids come from computer_windows).";
-    }
-    script = [
-      "if command -v import >/dev/null 2>&1; then",
-      `  exec ${screen}import -window ${request.windowId} ${path}`,
-      "fi",
-      `echo 'capturing one X11 window needs ImageMagick import; ${CAPTURE_INSTALL_HINT}' >&2`,
-      "exit 127",
-    ].join("\n");
-  } else if (request.region !== undefined) {
-    const region = wholeRegion(request.region);
-    if (region === null) return REGION_REFUSAL;
-    script = [
-      "if command -v import >/dev/null 2>&1; then",
-      `  exec ${screen}import -window root -crop ${region.w}x${region.h}+${region.x}+${region.y} +repage ${path}`,
-      "fi",
-      "if command -v scrot >/dev/null 2>&1; then",
-      `  exec ${screen}scrot -o -a ${region.x},${region.y},${region.w},${region.h} ${path}`,
-      "fi",
-      `echo 'no X11 screenshot helper is installed; ${CAPTURE_INSTALL_HINT}' >&2`,
-      "exit 127",
-    ].join("\n");
-  } else {
-    script = [
-      "if command -v import >/dev/null 2>&1; then",
-      `  exec ${screen}import -window root ${path}`,
-      "fi",
-      "if command -v scrot >/dev/null 2>&1; then",
-      `  exec ${screen}scrot -o ${path}`,
-      "fi",
-      `echo 'no X11 screenshot helper is installed; ${CAPTURE_INSTALL_HINT}' >&2`,
-      "exit 127",
-    ].join("\n");
-  }
+  const script = [
+    "set -e",
+    linuxGeometryScript(request, env),
+    "if ! read_geometry; then",
+    "  echo 'could not determine the capture geometry on the current X11 screen' >&2",
+    "  exit 3",
+    "fi",
+    'before_geometry=$geometry_json',
+    "if command -v import >/dev/null 2>&1; then",
+    `  import -window root -crop "\${capture_w}x\${capture_h}+\${capture_x}+\${capture_y}" +repage ${path} >/dev/null`,
+    "elif command -v scrot >/dev/null 2>&1; then",
+    `  scrot -o -a "\${capture_x},\${capture_y},\${capture_w},\${capture_h}" ${path} >/dev/null`,
+    "else",
+    `  echo 'no X11 screenshot helper is installed; ${CAPTURE_INSTALL_HINT}' >&2`,
+    "  exit 127",
+    "fi",
+    'if ! read_geometry || [ "$before_geometry" != "$geometry_json" ]; then',
+    "  echo 'screenshot geometry changed; take a fresh screenshot' >&2",
+    "  exit 3",
+    "fi",
+    "printf '%s\\n' \"$geometry_json\"",
+  ].join("\n");
 
   return {
     argv: [SH, "-c", script],
     windowsVerbatimArguments: false,
     script,
-    requires: [SH],
+    requires: [SH, "xrandr", "awk", ...(request.windowId === undefined ? [] : [XDOTOOL])],
     driver: "import",
   };
 }
@@ -190,44 +162,35 @@ function keyCombo(keys: readonly string[]): KeyCombo {
   return { combo: combo.join("+") };
 }
 
-function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): ComputerPlanOrRefusal {
-  const wayland = waylandRefusal(env);
-  if (wayland !== null) return wayland;
+function focusScript(windowId: number): string {
+  return [
+    "set -e",
+    `xdotool windowactivate --sync ${windowId}`,
+    "if ! active=$(xdotool getactivewindow); then",
+    "  echo 'could not verify the active X11 window' >&2",
+    "  exit 3",
+    "fi",
+    `if [ \"$active\" != '${windowId}' ]; then`,
+    "  echo 'the window manager refused foreground activation; select the target window manually and retry' >&2",
+    "  exit 3",
+    "fi",
+  ].join("\n");
+}
 
+function operationPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
   switch (request.action) {
     case "displays": {
-      // X11 screens each have a root window; RandR monitors can share one root.
       const script = [
         "set -e",
-        "info=$(LC_ALL=C xdpyinfo)",
-        "printf '%s\\n' \"$info\" | awk '",
-        '  /default screen number:/ { primary = $NF }',
-        '  /^screen #[0-9]+:/ { id = $2; sub(/^#/, "", id); sub(/:$/, "", id); screen = 1 }',
-        '  screen && /^[[:space:]]*dimensions:/ {',
-        '    split($2, size, "x")',
-        '    if (size[1] + 0 <= 0 || size[2] + 0 <= 0) exit 3',
-        '    printf "%s{\\\"id\\\":%d,\\\"x\\\":0,\\\"y\\\":0,\\\"width\\\":%d,\\\"height\\\":%d,\\\"scale\\\":1,\\\"primary\\\":%s}", (count++ ? "," : "["), id, size[1], size[2], (id == primary ? "true" : "false")',
-        '    screen = 0',
-        '  }',
-        '  END { if (!count) exit 3; print "]" }',
-        "'",
+        linuxDisplayScript(),
+        "monitors=$(read_monitors)",
+        "printf '%s\\n' \"$monitors\" | display_json",
       ].join("\n");
-      return { argv: [SH, "-c", script], script, windowsVerbatimArguments: false, requires: [SH, "xdpyinfo", "awk"], driver: "xdotool" };
+      return { argv: [SH, "-c", script], script, windowsVerbatimArguments: false, requires: [SH, "xrandr", "awk"], driver: "xdotool" };
     }
     case "focus": {
       if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
-      const script = [
-        "set -e",
-        `xdotool windowactivate --sync ${request.windowId}`,
-        "if ! active=$(xdotool getactivewindow); then",
-        "  echo 'could not verify the active X11 window' >&2",
-        "  exit 3",
-        "fi",
-        `if [ "$active" != '${request.windowId}' ]; then`,
-        "  echo 'the window manager refused foreground activation; select the target window manually and retry' >&2",
-        "  exit 3",
-        "fi",
-      ].join("\n");
+      const script = focusScript(request.windowId);
       return {
         argv: [SH, "-c", script],
         script,
@@ -299,11 +262,7 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
       const y = Math.round(request.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return "click coordinates must be finite numbers.";
       const argv = [XDOTOOL, "mousemove", "--sync", "--"];
-      if (request.windowId !== undefined) {
-        if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
-      }
       argv.push(String(x), String(y), "click");
-      if (request.windowId !== undefined) argv.push("--window", String(request.windowId));
       if (request.clicks === 2) argv.push("--repeat", "2", "--delay", "100");
       argv.push(String(BUTTONS[request.button]));
       return { argv, windowsVerbatimArguments: false, requires: [XDOTOOL], driver: "xdotool" };
@@ -318,10 +277,6 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
     case "type": {
       if (request.text.length === 0) return "computer_type needs non-empty text.";
       const argv = [XDOTOOL, "type"];
-      if (request.windowId !== undefined) {
-        if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
-        argv.push("--window", String(request.windowId));
-      }
       argv.push("--delay", "12", "--", request.text);
       return { argv, windowsVerbatimArguments: false, requires: [XDOTOOL], driver: "xdotool" };
     }
@@ -329,20 +284,48 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
       const combo = keyCombo(request.keys);
       if ("refusal" in combo) return combo.refusal;
       const argv = [XDOTOOL, "key", "--clearmodifiers"];
-      if (request.windowId !== undefined) {
-        if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
-        argv.push("--window", String(request.windowId));
-      }
       argv.push(combo.combo);
       return { argv, windowsVerbatimArguments: false, requires: [XDOTOOL], driver: "xdotool" };
     }
   }
 }
 
+function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): ComputerPlanOrRefusal {
+  const wayland = waylandRefusal(env);
+  if (wayland !== null) return wayland;
+  const windowId = request.action !== "focus" && "windowId" in request ? request.windowId : undefined;
+  if (windowId !== undefined && !usableWindowId(windowId)) return "a window id must be a positive whole number.";
+  const plan = operationPlan(request);
+  const guard = "captureGuard" in request ? request.captureGuard : undefined;
+  if (typeof plan === "string" || (windowId === undefined && guard === undefined)) return plan;
+  if (guard !== undefined) {
+    const refusal = linuxTargetRefusal(guard.target);
+    if (refusal !== null) return refusal;
+  }
+  const script = [
+    windowId === undefined ? "set -e" : focusScript(windowId),
+    ...(guard === undefined ? [] : [
+      linuxGeometryScript(guard.target, env),
+      `if ! read_geometry || [ "$geometry_json" != ${shellQuote(linuxGeometryJson(guard.geometry))} ]; then`,
+      "  echo 'ROLEBOX_SCREENSHOT_STALE: screenshot geometry changed; take a fresh screenshot' >&2",
+      "  exit 3",
+      "fi",
+    ]),
+    'exec "$@"',
+  ].join("\n");
+  return {
+    ...plan,
+    ...(guard === undefined ? {} : { inputGuardFailureMarker: "ROLEBOX_SCREENSHOT_STALE" }),
+    argv: [SH, "-c", script, "rolebox-computer", ...plan.argv],
+    script,
+    requires: [...new Set([SH, XDOTOOL, ...plan.requires, ...(guard === undefined ? [] : ["xrandr", "awk"])])],
+  };
+}
+
 /** The Linux computer-use facts, declared once for the linux descriptor. */
 export const linuxComputerUse: SupportedComputerUse = {
   supported: true,
-  requiredBinaries: ["import", "scrot", XDOTOOL, "xdpyinfo"],
+  requiredBinaries: ["import", "scrot", XDOTOOL, "xrandr"],
   installHint: `${CAPTURE_INSTALL_HINT} ${XDOTOOL_INSTALL_HINT} ${DISPLAY_INSTALL_HINT}`,
   capturePlan(request, env) {
     return capturePlan(request, env);
