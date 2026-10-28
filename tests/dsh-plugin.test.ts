@@ -3124,20 +3124,27 @@ describe("dsh native tool-presentation surface", () => {
     });
   });
 
-  it("declines honestly (undefined) when a projection has no truthful input", () => {
+  it("uses the generic fallback when a projection has no display data", () => {
     const compiled = compiledRoleboxTools();
 
     // A non-URL fetch arg yields no pending card rather than a placeholder.
     expect(compiled.web_fetch.presentCall!({})).toBeUndefined();
-    // A plain-string result carries no display metadata.
-    expect(
-      compiled.web_fetch.output.presentationMeta!({ url: "u" }, "plain text"),
-    ).toBeUndefined();
+    for (const value of ["plain text", { output: "body" }, { output: "body", title: "", metadata: {} }]) {
+      expect(
+        compiled.web_fetch.output.presentationMeta!({ url: "u" }, value),
+      ).toBeNull();
+    }
     // Absent durable meta declines to dsh's generic fallback.
     expect(
       compiled.web_fetch.presentResult!(
         { url: "u" },
         { content: [], isError: false },
+      ),
+    ).toBeUndefined();
+    expect(
+      compiled.web_fetch.presentResult!(
+        { url: "u" },
+        { content: [], isError: false, meta: null },
       ),
     ).toBeUndefined();
   });

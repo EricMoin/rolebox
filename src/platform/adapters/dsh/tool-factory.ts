@@ -331,6 +331,7 @@ export interface DshToolDefinition {
      * (`index.ts:210`). Computed only for top-level calls and MUST depend only
      * on `args` + `value`, so a session-log replay reconstructs identical meta.
      * Omitted when rolebox has no truthful display metadata for the tool.
+     * A declared projector must return lossless JSON; null means no metadata.
      */
     presentationMeta?(args: unknown, value: unknown): unknown;
   };
@@ -899,11 +900,11 @@ export class DshReservedToolNameError extends Error {
 // calls. `isConcurrencySafe` is declared ONLY where the tool body provably reads
 // and mutates no parent-owned state.
 
-/** Pure projection of a canonical ToolResult's own display metadata. */
+/** dsh requires lossless JSON even when a result has no display metadata. */
 function displayMetaFromValue(
   value: unknown,
-): { title?: string; metadata?: Record<string, unknown> } | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+): { title?: string; metadata?: Record<string, unknown> } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as { title?: unknown; metadata?: unknown };
   const out: { title?: string; metadata?: Record<string, unknown> } = {};
   if (typeof v.title === "string" && v.title.length > 0) out.title = v.title;
@@ -915,7 +916,7 @@ function displayMetaFromValue(
   ) {
     out.metadata = v.metadata as Record<string, unknown>;
   }
-  return out.title !== undefined || out.metadata !== undefined ? out : undefined;
+  return out.title !== undefined || out.metadata !== undefined ? out : null;
 }
 
 /** Pure narrowing of the durable presentation meta into a generic result card. */

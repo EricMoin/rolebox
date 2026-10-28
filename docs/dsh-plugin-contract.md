@@ -494,6 +494,12 @@ does NOT set. The decision is recorded here so a future maintainer does not
   `src/platform/adapters/dsh/tool-factory.ts`. For every other tool the
   field is absent, which is the honest dsh generic fallback — never an
   `undefined` placeholder.
+  An installed `output.presentationMeta` callback must return lossless JSON on
+  every successful result, including plain-text results and argument corrections.
+  `web_fetch` and `interactive_terminal` return `null` when a result has no
+  display metadata; `presentResult` then returns `undefined` for the generic
+  fallback. Returning `undefined` from the metadata callback fails output
+  validation even if the tool body completed successfully.
 
 All three groups of fields are never model-visible — `schemas()` whitelists only
 `name`/`description`/`parameters` (§3.1) — so they cannot leak into the model's
