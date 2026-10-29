@@ -103,7 +103,9 @@ describe("worker code execution", () => {
     expect(hostSettled).toBe(true);
     hostSettled = false;
     queryStarted = startSignal();
-    await expect(session.runCode("tools.call('service.query', {}); await tools.call('service.await-query', {}); while(true) {}", { timeoutMs: 100 })).rejects.toThrow('exceeded');
+    // The timeout budget starts at process spawn, so keep it far above startup (~100ms on Windows).
+    // The service.await-query handshake above already proves the pending call reached the host.
+    await expect(session.runCode("tools.call('service.query', {}); await tools.call('service.await-query', {}); while(true) {}", { timeoutMs: 1000 })).rejects.toThrow('exceeded');
     expect(hostSettled).toBe(true);
   });
 
@@ -112,7 +114,7 @@ describe("worker code execution", () => {
     const session = createWorkerToolSession({ registry: registry(async () => new Promise(resolve => { complete = resolve; })), allowedTools: ["service.*"], presentation: { mode: "code" } });
     const started = Date.now();
     try {
-      await session.runCode("await tools.call('service.query', {})", {timeoutMs:100});
+      await session.runCode("await tools.call('service.query', {})", { timeoutMs: 400 });
       throw new Error("expected timeout");
     } catch (error) {
       expect(error).toMatchObject({code:"timeout",pendingCalls:1});
