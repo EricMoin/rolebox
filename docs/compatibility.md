@@ -132,8 +132,8 @@ merges it only when the host asked for it (`src/platform/tool-assembly.ts:146-15
 DSH, Pi and Codex enable it by default. No role YAML opt-in is needed; optional
 role `tools` rules can restrict it. An explicit `computerUse: false` in a host
 option, global config, or project config disables the family. DSH namespace
-filters and graph node grants still apply. Neither OpenCode entry registers
-the family.
+filters and graph workers' inherited parent authorization still apply. Neither
+OpenCode entry registers the family.
 
 OS authorization is requested through `computer_permissions` and remains a
 separate user-controlled step. DSH/Pi prompt context and Codex MCP initialize

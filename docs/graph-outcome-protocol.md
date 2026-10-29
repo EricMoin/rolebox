@@ -129,8 +129,8 @@ the failing path, and nothing is persisted.
 | `join` | No | Fan-in strategy: `{ strategy: "all" }`, `{ strategy: "any" }` or `{ strategy: "quorum", quorum: N }` with a positive integer `N`. |
 | `budget` | No | Per-node ceilings: `timeout_ms`, `max_input_tokens`, `max_output_tokens`, `max_cost_usd`. `max_retries` is refused by name. |
 | `inputs` | No | The accepted results this node consumes, each `{ from, outcome, when?: "triggered" }`. Resolved against declared nodes and outcomes at compile time. |
-| `tools` | No | Extra host tool names or trailing-star prefixes, such as `docs_search` or `docs_*`. The grant never admits graph control tools. |
-| `toolPresentation` | No | `{ mode: "native" \| "discover" \| "code", preload?: string[] }`. Controls how granted tools are shown, without expanding authority. See [Worker tools](worker-tools.md). |
+| `tools` | No | Legacy node metadata accepted for declaration compatibility: it neither restricts, grants nor registers task tools, and the inherited parent authorization never admits graph control tools. |
+| `toolPresentation` | No | `{ mode: "native" \| "discover" \| "code", preload?: string[] }`. Controls how inherited authorized tools are shown, without expanding authority. See [Worker tools](worker-tools.md). |
 
 **A join waits for FEEDERS, and a loop continuation edge is not one.** The nodes
 a `join` counts are the sources of the node's in-edges **minus the loop

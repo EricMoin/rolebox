@@ -12,7 +12,8 @@ the available API:
 - Newer source hosts expose `ctx.tools.setExecutor`. Their assembly waterfall
   carries text presentation only; provider-owned tool schemas are assembled
   separately. Each graph worker selects the host's native executor and filters
-  its `describe` input by the node grant. The execution guard remains active.
+  its `describe` input by the worker's inherited parent authorization. The
+  execution guard remains active.
 - Worker discovery and code subcalls use the host invocation pipeline, keeping
   the original agent, parent token, cancellation and step tool admission.
   Executor modules resolve through the host plugin loader.
@@ -1972,10 +1973,10 @@ callbacks are keyed by the canonical name at compile time — and one warning
 names both. If the prefixed name is taken too, the tool is skipped with a
 warning instead of failing the boot; a probe that throws counts as "free". The
 graph-worker outcome entry (`graph_submit_outcome`) is
-never renamed: the worker execution guard and the dispatch tool filter match
-them by literal, so an occupied name is warned about and skipped rather than
-silently broken. In the preset-based profile above nothing is prefixed (the read
-is free at rolebox's own scope); where a base-backed row does own the name, the
+never renamed: the worker execution guard matches it by literal, so an occupied
+name is warned about and skipped rather than silently broken. In the
+preset-based profile above nothing is prefixed (the read is free at rolebox's
+own scope); where a base-backed row does own the name, the
 `rb_` variant is what a session resolving to the global layer actually sees.
 
 **`enabledNamespaces` remains the explicit narrowing mechanism.** It still
