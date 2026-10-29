@@ -258,6 +258,7 @@ export function createBrowseEvalTool(runtime: BrowseRuntime): CanonicalToolDef {
       "Evaluate a JavaScript expression in the page and return its value. " +
       "A string result is returned as text; anything else is serialized as indented JSON. " +
       "The result is capped by max_chars (default 20000, maximum 200000). " +
+      "Page JavaScript exceptions report script_error with expression or DOM guidance; execution_context_destroyed means navigation interrupted evaluation. " +
       "timeout_ms limits evaluation (default 15000); a timeout or cancellation closes the page to stop unfinished JavaScript. " +
       "Prefer browse_read or browse_snapshot when a dedicated representation exists, and never use eval to bypass an action that a browse tool provides.",
     args: {

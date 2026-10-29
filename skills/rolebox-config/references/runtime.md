@@ -87,6 +87,22 @@ that the rolebox package cannot resolve is insufficient. Use the status tool's
 installation guidance rather than assuming the browser executable is present.
 These settings are global/project/host options, not `role.yaml` fields.
 
+`browse_eval` runs `expression` in the selected page without automatically waiting
+for DOM elements or retrying failures. Its `metadata.code` distinguishes
+`script_error` (an identifiable JavaScript exception or rejected Promise) from
+`execution_context_destroyed` (navigation or frame detachment), `browser_closed`,
+`timeout`, `cancelled`, and `protocol_error` (driver/protocol or unrecognized
+failures). Script exceptions are identified by JavaScript error prefixes or page
+execution frames; ambiguous errors such as thrown primitives without those
+markers remain `protocol_error`. For script errors, fix syntax or page globals;
+for null/undefined access, confirm the page and selector with `browse_snapshot`,
+wait with `browse_wait`, and guard missing values. Navigation interruptions need
+a fresh page observation after navigation finishes. Script errors leave the page
+open; timeout/cancellation closes it, so reopen with `browse_open`. Raising
+`timeout_ms` does not fix a synchronous script exception. Reserve `browse_status`
+for driver availability or persistent protocol failures. This behavior applies
+to every harness exposing `browse_eval`; restart the host after updating rolebox.
+
 ## Hooks and recovery
 
 Declare custom hooks in `role.yaml`:

@@ -181,6 +181,23 @@ to stop unfinished JavaScript and release the session queue; reopen the page
 with `browse_open`. Calls cancelled while queued do not run. An action already
 delivered to the browser cannot be undone.
 
+`browse_eval` distinguishes evaluation failures through `metadata.code`:
+
+| Code | Meaning and next step |
+| --- | --- |
+| `script_error` | An identifiable JavaScript exception or rejected Promise from the page. Fix syntax or page-global references in `expression`; for null/undefined access, confirm the page and selector with `browse_snapshot`, wait for the element with `browse_wait`, and guard missing values. |
+| `execution_context_destroyed` | Navigation or a detached frame invalidated the execution context. Wait for navigation to finish and inspect the selected page with `browse_snapshot` before evaluating again. |
+| `browser_closed` | The page or browser closed. Open a new page. |
+| `timeout` / `cancelled` | Evaluation was interrupted and its page closed. Reopen it with `browse_open`. |
+| `protocol_error` | A protocol/driver failure or an unrecognized failure. Inspect `browse_status` if it persists. |
+
+Script exceptions are recognized from JavaScript error prefixes or page execution
+frames in Playwright's error message. Ambiguous failures, including thrown primitive
+values without those markers, retain `protocol_error`. The original first error
+line is preserved. Evaluation does not automatically wait for DOM elements or
+retry failed expressions; raising `timeout_ms` does not fix a synchronous exception.
+Script errors leave the page open.
+
 ### Pages
 
 Every page-bound tool accepts `page`, a name of at most 40 characters; without

@@ -453,6 +453,42 @@ function isTimeoutError(error: unknown): boolean {
   return error.message.includes("Timeout") && error.message.includes("exceeded");
 }
 
+function mapEvaluationError(error: unknown): BrowseError {
+  if (error instanceof BrowseError) return error;
+  if (error instanceof Error && ["TimeoutError", "TargetClosedError", "ProtocolError"].includes(error.name)) {
+    return mapPlaywrightError(error, "evaluate the expression");
+  }
+  const message = errorMessage(error);
+  const detail = message.replace(/^(?:page|frame)\.evaluate:\s*/, "").replace(/^Evaluation failed:\s*/, "");
+  const scriptError = /^(?:Error|[\w$]+(?:Error|Exception)):/.test(detail)
+    || /\bUtilityScript\.evaluate\b|__playwright_evaluation_script__/.test(message);
+  if (scriptError) {
+    let hint = "Inspect expression and the current page with browse_snapshot; handle the thrown exception or rejected Promise before evaluating again.";
+    if (/^TypeError:/.test(detail) && /\b(?:null|undefined)\b/.test(detail)) {
+      hint = "Check the selected page and DOM selector with browse_snapshot; wait for the element with browse_wait and guard null or undefined before accessing its properties.";
+    } else if (/^SyntaxError:/.test(detail)) {
+      hint = "Fix the JavaScript syntax in expression before evaluating again.";
+    } else if (/^ReferenceError:/.test(detail)) {
+      hint = "Check variable names and page globals in expression; values from the host process are not available in the page.";
+    }
+    return browseError(
+      "script_error",
+      `the page script threw an exception (${firstSentence(message)})`,
+      hint,
+      error,
+    );
+  }
+  if (/execution context (?:was destroyed|is not available)|cannot find context with (?:specified )?id|frame was detached/i.test(detail)) {
+    return browseError(
+      "execution_context_destroyed",
+      `the page execution context became unavailable (${firstSentence(message)})`,
+      "Wait for navigation to finish, then call browse_snapshot to confirm the selected page before evaluating again.",
+      error,
+    );
+  }
+  return mapPlaywrightError(error, "evaluate the expression");
+}
+
 /**
  * Translate any Playwright failure into a {@link BrowseError}.
  *
@@ -1352,7 +1388,7 @@ class PlaywrightPageDriver implements BrowsePageDriver {
     });
     try {
       return await this.run("evaluate the expression", () => Promise.race([
-        this.page.evaluate(expression, arg) as Promise<T>, interrupted,
+        this.page.evaluate(expression, arg).catch(error => { throw mapEvaluationError(error); }) as Promise<T>, interrupted,
       ]));
     } finally {
       clearTimeout(timer);

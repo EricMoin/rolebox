@@ -424,6 +424,76 @@ async function openPage(harness: FakeBrowserHarness): Promise<{ driver: AnyRecor
 }
 
 describe("PlaywrightPageDriver", () => {
+  it.each([
+    ["page.evaluate: TypeError: Cannot read properties of null (reading 'getBoundingClientRect')", "script_error", "browse_wait"],
+    ["page.evaluate: TypeError: Cannot read properties of undefined (reading 'value')", "script_error", "guard null or undefined"],
+    ["page.evaluate: SyntaxError: Unexpected end of input", "script_error", "syntax"],
+    ["page.evaluate: ReferenceError: missingVariable is not defined", "script_error", "page globals"],
+    ["page.evaluate: Error: custom failure", "script_error", "expression"],
+    ["page.evaluate: SecurityError: Blocked a frame with a different origin", "script_error", "expression"],
+    ["page.evaluate: Evaluation failed: TypeError: value is null", "script_error", "browse_wait"],
+    ["page.evaluate: CustomFailure: rejected\n    at UtilityScript.evaluate (<anonymous>:303:30)", "script_error", "expression"],
+    ["page.evaluate: Error: Target page, context or browser has been closed", "script_error", "expression"],
+    ["page.evaluate: Error: net::ERR_FAILED", "script_error", "expression"],
+    ["page.evaluate: Error: Timeout 100ms exceeded", "script_error", "expression"],
+    ["page.evaluate: Error: Execution context was destroyed", "script_error", "expression"],
+    ["page.evaluate: Execution context was destroyed, most likely because of a navigation.", "execution_context_destroyed", "navigation"],
+    ["page.evaluate: Cannot find context with specified id", "execution_context_destroyed", "browse_snapshot"],
+    ["page.evaluate: Frame was detached", "execution_context_destroyed", "navigation"],
+    ["page.evaluate: Target page, context or browser has been closed", "browser_closed", "browse_tabs"],
+    ["page.evaluate: Protocol error (Runtime.callFunctionOn): Session closed", "protocol_error", "browse_status"],
+    ["page.evaluate: unexpected driver failure", "protocol_error", "browse_status"],
+    ["page.evaluate: plain thrown value", "protocol_error", "browse_status"],
+  ])("classifies evaluation failure %s as %s", async (message, code, hint) => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+    const original = new Error(message);
+    harness.page.evaluate = async () => { throw original; };
+    try {
+      const error = await pageDriver.evaluate("expression").catch((error: unknown) => error) as BrowseError;
+      expect(error).toBeInstanceOf(BrowseError);
+      expect(error.code).toBe(code);
+      expect(error.cause).toBe(original);
+      expect(error.message).toContain(message.split("\n")[0].replace(/\.$/, ""));
+      expect(error.hint).toContain(hint);
+      if (code === "script_error" || code === "execution_context_destroyed") {
+        expect(error.hint).not.toMatch(/browse_status|driver|retry/i);
+      }
+      expect(pageDriver.isClosed()).toBe(false);
+    } finally {
+      await driver.close();
+    }
+  });
+
+  it.each([
+    ["TimeoutError", "page.evaluate: TimeoutError: Timeout 100ms exceeded", "timeout"],
+    ["TargetClosedError", "page.evaluate: Target page, context or browser has been closed", "browser_closed"],
+    ["ProtocolError", "page.evaluate: ProtocolError: Session closed", "protocol_error"],
+  ])("preserves Playwright's %s driver error", async (name, message, code) => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+    const original = new Error(message);
+    original.name = name;
+    harness.page.evaluate = async () => { throw original; };
+    try {
+      await expect(pageDriver.evaluate("expression")).rejects.toMatchObject({ code, cause: original });
+    } finally {
+      await driver.close();
+    }
+  });
+
+  it("preserves a classified evaluation failure", async () => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+    const original = browseError("cancelled", "the evaluation was cancelled", "Reopen the page.");
+    harness.page.evaluate = async () => { throw original; };
+    try {
+      await expect(pageDriver.evaluate("expression")).rejects.toBe(original);
+    } finally {
+      await driver.close();
+    }
+  });
+
   it("times out an unresolved evaluation and closes its page", async () => {
     const harness = fakeBrowser();
     const { driver, pageDriver } = await openPage(harness);

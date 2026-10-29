@@ -43,6 +43,8 @@ export type BrowseErrorCode =
   | "dialog_open"
   | "dialog_missing"
   | "navigation_failed"
+  | "script_error"
+  | "execution_context_destroyed"
   | "file_not_found"
   | "too_large"
   | "cancelled"

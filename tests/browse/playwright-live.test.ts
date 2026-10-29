@@ -39,6 +39,50 @@ function refFor(refs: readonly SnapshotRef[], name: string): SnapshotRef {
 }
 
 describe.skipIf(!live)("playwright live", () => {
+  it("reports script exceptions and navigation interruptions through browse_eval", async () => {
+    const worktree = mkdtempSync(join(tmpdir(), "rolebox-browse-evaluation-errors-"));
+    scratchDirectories.push(worktree);
+    const manager = new BrowseSessionManager({ worktree });
+    const tools = createBrowseTools({ manager });
+    const context: CanonicalToolContext = {
+      sessionID: "s", messageID: "m", agent: "base", directory: worktree, worktree,
+      abort: new AbortController().signal, metadata: () => undefined,
+      ask: async () => undefined,
+    };
+    try {
+      await tools.browse_open.execute({ url: livePageUrl() }, context);
+      for (const [expression, message, hint] of [
+        ["document.querySelector('#missing').getBoundingClientRect()", "TypeError:", "browse_wait"],
+        ["(() =>", "SyntaxError:", "syntax"],
+        ["missingVariable", "ReferenceError:", "page globals"],
+        ["Promise.reject(new Error('rejected'))", "Error: rejected", "expression"],
+        ["(() => { throw new DOMException('blocked', 'SecurityError'); })()", "SecurityError: blocked", "expression"],
+        ["(() => { throw new Error('Target page, context or browser has been closed'); })()", "Error: Target page", "expression"],
+        ["(() => { throw new Error('Timeout 100ms exceeded'); })()", "Error: Timeout", "expression"],
+      ]) {
+        const result = await tools.browse_eval.execute({ expression }, context);
+        if (typeof result === "string") throw new Error(result);
+        expect(result.metadata?.error).toBe(true);
+        expect(result.metadata?.code).toBe("script_error");
+        expect(result.output).toContain(message);
+        expect(result.metadata?.hint).toContain(hint);
+        expect(result.metadata?.hint).not.toMatch(/browse_status|driver|retry/i);
+      }
+      const navigation = await tools.browse_eval.execute({
+        expression: "new Promise(() => { setTimeout(() => { location.href = 'about:blank'; }, 0); })",
+      }, context);
+      if (typeof navigation === "string") throw new Error(navigation);
+      expect(navigation.metadata?.code).toBe("execution_context_destroyed");
+      expect(navigation.metadata?.hint).toContain("browse_snapshot");
+      const recovered = await tools.browse_eval.execute({ expression: "1 + 1" }, context);
+      if (typeof recovered === "string") throw new Error(recovered);
+      expect(recovered.metadata?.error).toBeUndefined();
+      expect(recovered.output).toBe("2");
+    } finally {
+      await manager.dispose();
+    }
+  }, 120_000);
+
   it("never reassigns an old snapshot ref to a different button or page", async () => {
     const worktree = mkdtempSync(join(tmpdir(), "rolebox-browse-refs-"));
     scratchDirectories.push(worktree);
