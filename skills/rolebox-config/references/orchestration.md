@@ -154,3 +154,9 @@ with all members, even when only one recipient is woken.
 members and two in-flight deliveries. Failure pauses the team; resume preserves
 the consumed turn budget. The turn cap does not measure tokens or money. Team
 execution on OpenCode, Pi and Codex is not implemented by this integration.
+
+Removing a member or deleting a team releases its team session descriptor and
+lease. Peers created or resumed by rolebox are disposed. When DSH has restored a
+peer itself, the host keeps that session and pending user input; rolebox clears
+queued team deliveries before releasing the team identity. Cleanup waits while
+another running host holds the peer lease, and failed cleanup is retried.

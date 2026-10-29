@@ -360,10 +360,9 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
   }
 
   /**
-   * Release a removed or deleted member's durable identity: dispose its live
-   * handle, drop its lease and delete the descriptor, so a later team can add
-   * the same role as a fresh peer. Unknown ids and ordinary user sessions are
-   * untouched. A foreign lease defers cleanup until the owning host releases it.
+   * Release a removed member's team identity. Host-restored peers have no
+   * adapter-owned handle, so they keep their session and pending user input.
+   * A foreign lease defers cleanup until the owning host releases it.
    */
   async forget(id: string): Promise<void> {
     const path = this.descriptorPath(id);
@@ -374,12 +373,14 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     const forgetting = Promise.resolve().then(async () => {
       await this.loading.get(id)?.catch(() => undefined);
       const handle = this.handles.get(id);
+      const resident = this.options.agents.get(id);
       if (handle) {
         await handle.dispose();
         this.handles.delete(id);
         this.requestOptions.delete(id);
-      } else if (this.options.agents.get(id)) {
-        throw new Error("DSH team session handle is not owned by this adapter");
+      } else if (resident) {
+        removePendingTeamDeliveries(resident);
+        await this.flush(resident.session);
       }
       rmSync(path, { force: true });
       this.leases.release(id);

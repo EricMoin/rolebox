@@ -7,6 +7,7 @@ import SessionStore, { SessionId } from "@deepseek-ai/dsh-session";
 import { MessageId } from "@deepseek-ai/dsh-llm";
 import { DshTeamSessionAdapter, type DshTeamAgent, type DshTeamAgentOptions, type DshTeamAgents } from "../../src/platform/adapters/dsh/team-session.ts";
 import type { DshSessionEventLike, DshSessionLike, DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
+import { DshTeamSessionLease } from "../../src/platform/adapters/dsh/team-session-lease.ts";
 import { TeamRuntime } from "../../src/team/runtime.ts";
 import type { ResolvedRole } from "../../src/types.ts";
 
@@ -358,6 +359,31 @@ describe("DSH team execution sessions", () => {
     await owner.forget(id);
     expect(existsSync(path)).toBe(false);
     expect(f.agents.has(id)).toBe(false);
+  });
+
+  it("retries host-owned peer cleanup after a failed flush and releases its lease only when durable", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    await first.dispose();
+    const handle = await f.registry.resume({ resumeSessionId: id, setup() {}, signal: new AbortController().signal });
+    cleanups.push(() => handle.dispose());
+    const adapter = f.makeAdapter();
+    const lease = new DshTeamSessionLease(f.directory);
+    cleanups.push(() => lease.dispose());
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    f.setFlush(false);
+
+    await expect(adapter.forget(id)).rejects.toThrow("durable team session storage");
+    expect(existsSync(path)).toBe(true);
+    expect(f.agents.get(id)).toBe(handle.agent);
+    expect(lease.acquire(id)).toBe(false);
+    f.setFlush(true);
+    await adapter.forget(id);
+
+    expect(existsSync(path)).toBe(false);
+    expect(f.agents.get(id)).toBe(handle.agent);
+    expect(f.pending.get(id)).toEqual([]);
+    expect(lease.acquire(id)).toBe(true);
   });
 
   it("keeps the descriptor, handle and lease when disposal fails so cleanup can retry", async () => {

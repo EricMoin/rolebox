@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
@@ -202,6 +202,37 @@ describe("DSH team adapter with the installed agent host", () => {
     expect(f.published).toEqual([id, id]);
     expect((await restored.messages(id)).filter(message => message.info.role === "idle")).toHaveLength(2);
     expect(await restored.abort(id)).toBe(true);
+  });
+
+  it("forgets team membership after the host resumes a peer while preserving the host's session and user input", async () => {
+    const f = await fixture();
+    const first = f.adapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    await first.dispose();
+    const handle = await f.ctx.agents.resume({ resumeSessionId: id as never });
+    cleanups.push(() => handle.dispose());
+    const adapter = f.adapter();
+    await adapter.prompt(id, { agent: "designer", noReply: true,
+      parts: [{ type: "text", text: "[rolebox-team removed-member]\nOld team work" }] });
+    handle.agent.inject({ id: "user-pending" as never, role: "user", source: { kind: "user" },
+      content: [{ type: "text", text: "Keep this user request" }] });
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+
+    await expect(adapter.forget(id)).resolves.toBeUndefined();
+    await adapter.forget(id);
+
+    expect(existsSync(path)).toBe(false);
+    expect(f.ctx.agents.get(id as never)).toBe(handle.agent);
+    expect(f.ctx.sessions.get(id as never)).toBe(handle.agent.session);
+    expect([...handle.agent.inbox.nextTurn, ...handle.agent.inbox.nextStep].map(message => message.id)).toEqual(["user-pending"]);
+    await adapter.dispose();
+    expect(f.ctx.agents.get(id as never)).toBe(handle.agent);
+    const snapshot = structuredClone(f.persistence.records.get(id)!.events);
+    await handle.dispose();
+    f.persistence.records.get(id)!.events = snapshot;
+    const restored = await f.ctx.agents.resume({ resumeSessionId: id as never });
+    cleanups.push(() => restored.dispose());
+    expect([...restored.agent.inbox.nextTurn, ...restored.agent.inbox.nextStep].map(message => message.id)).toEqual(["user-pending"]);
   });
 
   it("cold-reads a crash snapshot without waking it and replaces only stale team inbox messages on resume", async () => {
