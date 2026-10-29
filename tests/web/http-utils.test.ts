@@ -422,14 +422,19 @@ describe("per-host pacing", () => {
 
   it("spaces two sequential same-origin request starts by the interval", async () => {
     __configureHostPacing({ minIntervalMs: 80, jitterMs: 0 });
-    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
+    const starts: number[] = [];
+    globalThis.fetch = fetchDouble(() => { starts.push(Date.now()); return Promise.resolve(new Response("ok", { status: 200 })); });
 
     await fetchWithTimeout("https://pacing-a.example.com/one", {}, 5000);
-    const start = Date.now();
     await fetchWithTimeout("https://pacing-a.example.com/two", {}, 5000);
-    const elapsed = Date.now() - start;
 
-    expect(elapsed).toBeGreaterThanOrEqual(70);
+    // The gate stamps the origin's last start before the request runs, so
+    // measure the gap between the two recorded request starts. Measuring from
+    // the first call's completion deducted any preemption between that stamp
+    // and the baseline. The >= 70 ms bound tolerates timer overshoot and clock
+    // skew; the gate can only make the gap larger.
+    expect(starts).toHaveLength(2);
+    expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(70);
   });
 
   it("serializes concurrent same-origin callers", async () => {
