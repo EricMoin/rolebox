@@ -30,7 +30,7 @@ import type {
 import {
   type ThemeColors, type HealthState,
   rgbaToCSS, BOLD, DIM, DIM_ITALIC,
-  readPackageVersion, buildSessionScope, agentLeaf, agentRoot,
+  readPackageVersion, agentLeaf, agentRoot,
 } from "./helpers";
 import {
   renderHeader, renderRule,
@@ -39,6 +39,8 @@ import {
   renderFilterBar, countTotalItems, collectSessionIds,
   renderLogs,
 } from "./components/index";
+import { renderScopeHint } from "./components/Pulse";
+import type { SessionScopeProblem } from "../utils/session-scope";
 import {
   collectLogChannels,
   cycleLogsChannel,
@@ -53,7 +55,7 @@ import {
 } from "./logs";
 import type { LogRecord } from "../log/types";
 import { watchLogSource } from "../log/watch.ts";
-import { isLogsViewLive, nextView, type TuiView } from "./logic";
+import { assembleSessionScope, isLogsViewLive, nextView, type TuiView } from "./logic";
 
 import { foldGraphSignals } from "./events";
 import type { EventBridge } from "./events";
@@ -193,6 +195,7 @@ export function createSidebarRenderer(workspaceDir: string) {
       // renderer, which is how this ordering was found).
       const currentSessionId = props?.session_id ?? "";
       const [sessionScope, setSessionScope] = createSignal<Set<string>>(new Set([currentSessionId]));
+      const [scopeProblems, setScopeProblems] = createSignal<readonly SessionScopeProblem[]>([]);
 
       // ── View tabs and the Logs pane ──────────────────────────────────
       // The Logs view is the second live surface over the platform's own log
@@ -394,48 +397,13 @@ export function createSidebarRenderer(workspaceDir: string) {
           );
         if (present) {
           lastGood = snap;
-          const scope = buildSessionScope(stateDirFor(workspaceDir), currentSessionId);
-
-          // ── Engine-graph dispatch session IDs ──────────────────────────
-          // Graph-dispatched tasks get parentSessionId = graphId (via
-          // graphParentContext()), so buildSessionScope() can never match
-          // them by walking dispatch parent/child sessionId chains.  Engine-
-          // graph nodes carry dispatchSessionId on each node that was
-          // dispatched; adding those here gives the scope enough precision
-          // that the size === 1 fallback (below) becomes a genuine last-
-          // resort safety net.
-          if (snap.engineGraphs) {
-            for (const eg of snap.engineGraphs) {
-              if (eg.nodes) {
-                for (const node of eg.nodes) {
-                  if (node.dispatchSessionId) {
-                    scope.add(node.dispatchSessionId);
-                  }
-                }
-              }
-            }
-          }
-
-          // When no child sessions were discovered (only the current session
-          // in scope), widen by collecting every runtime session ID present in
-          // the snapshot.  The TUI may be loaded in a session that is not a
-          // dispatch parent; without this fallback the scope collapses to
-          // {currentSessionId} and every downstream filter drops ALL activity.
-          if (scope.size === 1) {
-            for (const t of snap.tasks ?? []) {
-              if (t.sessionId) scope.add(t.sessionId);
-            }
-            for (const fn of snap.activeFunctions ?? []) {
-              scope.add(fn.sessionId);
-            }
-            for (const g of snap.graphSessions ?? []) {
-              scope.add(g.sessionId);
-            }
-            for (const l of snap.loops ?? []) {
-              scope.add(l.originSessionId);
-            }
-          }
-          setSessionScope(scope);
+          const assembled = assembleSessionScope({
+            stateDir: stateDirFor(workspaceDir),
+            currentSessionId,
+            snapshot: snap,
+          });
+          setSessionScope(assembled.scope);
+          setScopeProblems(assembled.problems);
         }
           setSnapshot(present ? snap : (lastGood ?? snap));
 
@@ -820,6 +788,7 @@ export function createSidebarRenderer(workspaceDir: string) {
               {view() === "activity" && renderMetricsPanel()}
 
               {view() === "activity" && health() === "STALE" && renderStaleHint({ c: tc(), isStale: true })}
+              {view() === "activity" && stateDirPresent() && scopeProblems().length > 0 && renderScopeHint({ c: tc(), problems: scopeProblems() })}
               {view() === "activity" && !stateDirPresent() && renderNoStateBody({ c: tc(), show: true })}
 
               {/* When in detail view, show the detail panel instead of activity list */}

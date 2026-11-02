@@ -1,6 +1,10 @@
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
+  assembleSessionScope,
   computeHealth,
   getActiveTasks,
   computeFilteredActivity,
@@ -8,10 +12,13 @@ import {
   nextView,
   previousView,
   isLogsViewLive,
+  scopeHintLines,
   TUI_VIEWS,
   LOGS_TOGGLE_KEY,
   LOGS_PAUSE_KEY,
 } from "../../src/tui/logic.ts";
+import { SIDEBAR_WIDTH } from "../../src/tui/layout.ts";
+import type { SessionScopeProblem } from "../../src/utils/session-scope.ts";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
@@ -115,6 +122,30 @@ function makeEngineGraph(overrides: Partial<EngineGraphSnapshot>): EngineGraphSn
     ...overrides,
   };
 }
+
+// ── Session-scope fixtures ─────────────────────────────────────────────
+
+const scopeDirs: string[] = [];
+
+/** Create a temp state dir that is removed after the current case. */
+function tmpScopeDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "tui-logic-scope-"));
+  scopeDirs.push(dir);
+  return dir;
+}
+
+/** Write a dispatch-<name>.json file with the given parent -> child rows. */
+function writeDispatch(
+  dir: string,
+  name: string,
+  rows: Array<{ parentSessionId?: string; sessionId?: string }>,
+): void {
+  writeFileSync(join(dir, `dispatch-${name}.json`), JSON.stringify({ tasks: rows }, null, 2), "utf-8");
+}
+
+afterEach(() => {
+  for (const dir of scopeDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 // ── computeHealth ───────────────────────────────────────────────────────
 
@@ -911,5 +942,132 @@ describe("TUI view tabs", () => {
     // build from. The bare keys are deliberately NOT claimed.
     expect(LOGS_TOGGLE_KEY).toBe("ctrl+l");
     expect(LOGS_PAUSE_KEY).toBe("ctrl+p");
+  });
+});
+
+// ── assembleSessionScope ────────────────────────────────────────────────
+
+describe("assembleSessionScope", () => {
+  it("seeds engine-graph dispatch session IDs and discovers their dispatch children", () => {
+    const dir = tmpScopeDir();
+    writeDispatch(dir, "graph", [
+      { parentSessionId: "graph-scope-key", sessionId: "worker-1" },
+      { parentSessionId: "worker-1", sessionId: "worker-2" },
+    ]);
+    const snapshot = makeSnapshot({
+      engineGraphs: [
+        makeEngineGraph({
+          nodes: [{
+            nodeId: "n1",
+            agent: "test-agent",
+            status: "running",
+            startedAt: new Date().toISOString(),
+            dispatchSessionId: "graph-scope-key",
+          }],
+        }),
+      ],
+    });
+
+    const assembled = assembleSessionScope({ stateDir: dir, currentSessionId: "sess-1", snapshot });
+    expect(assembled.complete).toBe(true);
+    expect(assembled.problems).toEqual([]);
+    expect([...assembled.scope].sort()).toEqual([
+      "graph-scope-key",
+      "sess-1",
+      "worker-1",
+      "worker-2",
+    ]);
+  });
+
+  it("widens to every snapshot session when only the current session is in scope", () => {
+    const dir = tmpScopeDir();
+    const snapshot = makeSnapshot({
+      tasks: [makeTask({ id: "t1", sessionId: "task-sess" })],
+      activeFunctions: [makeFn({ sessionId: "fn-sess" })],
+      graphSessions: [makeGraph({ sessionId: "graph-sess" })],
+      loops: [makeLoop({ originSessionId: "loop-sess" })],
+    });
+
+    const assembled = assembleSessionScope({ stateDir: dir, currentSessionId: "sess-1", snapshot });
+    expect(assembled.complete).toBe(true);
+    expect([...assembled.scope].sort()).toEqual([
+      "fn-sess",
+      "graph-sess",
+      "loop-sess",
+      "sess-1",
+      "task-sess",
+    ]);
+  });
+
+  it("does not widen when a child session was discovered", () => {
+    const dir = tmpScopeDir();
+    writeDispatch(dir, "child", [{ parentSessionId: "sess-1", sessionId: "child-sess" }]);
+    const snapshot = makeSnapshot({
+      tasks: [makeTask({ id: "t1", sessionId: "task-sess" })],
+      activeFunctions: [makeFn({ sessionId: "fn-sess" })],
+      graphSessions: [makeGraph({ sessionId: "graph-sess" })],
+      loops: [makeLoop({ originSessionId: "loop-sess" })],
+    });
+
+    const assembled = assembleSessionScope({ stateDir: dir, currentSessionId: "sess-1", snapshot });
+    expect(assembled.complete).toBe(true);
+    expect([...assembled.scope].sort()).toEqual(["child-sess", "sess-1"]);
+  });
+
+  it("passes problems through from a malformed dispatch file while keeping discovered children", () => {
+    const dir = tmpScopeDir();
+    writeDispatch(dir, "good", [{ parentSessionId: "sess-1", sessionId: "child-1" }]);
+    const broken = join(dir, "dispatch-broken.json");
+    writeFileSync(broken, "{not json", "utf-8");
+
+    const assembled = assembleSessionScope({
+      stateDir: dir,
+      currentSessionId: "sess-1",
+      snapshot: makeSnapshot(),
+    });
+    expect(assembled.complete).toBe(false);
+    expect(assembled.problems).toHaveLength(1);
+    expect(assembled.problems[0]).toMatchObject({ code: "malformed-file", path: broken });
+    expect(assembled.scope.has("child-1")).toBe(true);
+  });
+});
+
+// ── scopeHintLines ──────────────────────────────────────────────────────
+
+describe("scopeHintLines", () => {
+  const problem = (path: string): SessionScopeProblem => ({
+    code: "malformed-file",
+    path,
+    message: "bad",
+  });
+
+  it("returns no lines when the scope is complete", () => {
+    expect(scopeHintLines([])).toEqual([]);
+  });
+
+  it("reports the header and a singular source count for one problem", () => {
+    expect(scopeHintLines([problem("/state/dispatch-a.json")])).toEqual([
+      "scope incomplete",
+      "1 dispatch state source unreadable",
+    ]);
+  });
+
+  it("pluralizes the source count for multiple problems", () => {
+    expect(
+      scopeHintLines([problem("/state/dispatch-a.json"), problem("/state/dispatch-b.json")]),
+    ).toEqual([
+      "scope incomplete",
+      "2 dispatch state sources unreadable",
+    ]);
+  });
+
+  it("keeps every line within the sidebar width", () => {
+    const lines = scopeHintLines([
+      problem("/state/dispatch-a.json"),
+      problem("/state/dispatch-b.json"),
+    ]);
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(SIDEBAR_WIDTH);
+    }
   });
 });

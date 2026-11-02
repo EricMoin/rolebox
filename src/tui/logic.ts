@@ -1,9 +1,11 @@
 /**
  * Pure business logic for the TUI sidebar.
  *
- * All functions are deterministic, side-effect-free, and testable without
- * SolidJS, OpenTUI, or any UI framework. Only imports from type definition
- * modules and pure utility modules.
+ * Functions are deterministic, side-effect-free, and testable without SolidJS,
+ * OpenTUI, or any UI framework. Only imports from type definition modules and
+ * utility modules. {@link assembleSessionScope} is the one deliberate
+ * exception: it reads the dispatch state directory so scope assembly is
+ * testable without the Solid renderer.
  *
  * @module
  */
@@ -17,6 +19,7 @@ import type {
   GraphSessionSnapshot,
   EngineGraphSnapshot,
 } from "../cli/commands/monitor/monitor-reader-types";
+import { buildSessionScope, type SessionScopeProblem } from "../utils/session-scope";
 
 // ── View tabs ────────────────────────────────────────────────────────────
 
@@ -121,6 +124,80 @@ export interface FilterParams {
   sessionScope: Set<string>;
   currentSessionId: string;
   filterText: string;
+}
+
+// ── Session scope assembly ──────────────────────────────────────────────
+
+/** Inputs for {@link assembleSessionScope}. */
+export interface AssembleSessionScopeParams {
+  stateDir: string;
+  currentSessionId: string;
+  snapshot: MonitorSnapshot;
+}
+
+/** The assembled scope plus whether every dispatch source was readable. */
+export interface AssembledSessionScope {
+  scope: Set<string>;
+  complete: boolean;
+  problems: SessionScopeProblem[];
+}
+
+/**
+ * Assemble the activity view's session scope from the dispatch state.
+ *
+ * Graph-dispatched workers are parented by a graph-scoped key rather than by a
+ * session id, so the engine-graph nodes' `dispatchSessionId`s are passed to
+ * {@link buildSessionScope} as explicit seeds; its transitive walk then also
+ * discovers those workers' own dispatch children.
+ */
+export function assembleSessionScope(params: AssembleSessionScopeParams): AssembledSessionScope {
+  const { stateDir, currentSessionId, snapshot } = params;
+
+  const graphSessionIds: string[] = [];
+  for (const graph of snapshot.engineGraphs) {
+    for (const node of graph.nodes) {
+      if (node.dispatchSessionId) graphSessionIds.push(node.dispatchSessionId);
+    }
+  }
+
+  const { sessionIds, complete, problems } = buildSessionScope(stateDir, currentSessionId, {
+    extraSessionIds: graphSessionIds,
+  });
+
+  // Last-resort widening: when nothing widened the scope beyond the current
+  // session, adopt every runtime session ID present in the snapshot. The TUI
+  // may be loaded in a session that is not a dispatch parent; without this
+  // fallback the scope collapses to one session and every filter drops all
+  // activity.
+  if (sessionIds.size === 1) {
+    for (const task of snapshot.tasks) {
+      if (task.sessionId) sessionIds.add(task.sessionId);
+    }
+    for (const fn of snapshot.activeFunctions) {
+      sessionIds.add(fn.sessionId);
+    }
+    for (const graph of snapshot.graphSessions) {
+      sessionIds.add(graph.sessionId);
+    }
+    for (const loop of snapshot.loops) {
+      sessionIds.add(loop.originSessionId);
+    }
+  }
+
+  return { scope: sessionIds, complete, problems };
+}
+
+/**
+ * The status-seat copy for an incomplete scope.
+ *
+ * Empty when there is nothing to report; otherwise a header line and the count
+ * of unreadable dispatch sources. Every line fits the 40-cell sidebar — the
+ * widest is the plural form at 35 cells.
+ */
+export function scopeHintLines(problems: readonly SessionScopeProblem[]): string[] {
+  if (problems.length === 0) return [];
+  const noun = problems.length === 1 ? "source" : "sources";
+  return ["scope incomplete", `${problems.length} dispatch state ${noun} unreadable`];
 }
 
 // ── Health computation ───────────────────────────────────────────────────

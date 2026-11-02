@@ -11,9 +11,8 @@ import { join } from "node:path";
 import { TextAttributes } from "@opentui/core";
 import type { RGBA } from "@opentui/core";
 import { formatDuration, truncate, shortSessionId, compactDuration, barSegments } from "../utils/display-helpers";
-import { buildSessionScope } from "../utils/session-scope";
 
-export { formatDuration, truncate, shortSessionId, compactDuration, barSegments, buildSessionScope };
+export { formatDuration, truncate, shortSessionId, compactDuration, barSegments };
 
 // ── Types ────────────────────────────────────────────────────────────────
 

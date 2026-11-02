@@ -9,6 +9,8 @@ import type { RGBA } from "@opentui/core";
 import type { ThemeColors, HealthState } from "../helpers.ts";
 import { rgbaToCSS, BOLD, DIM, DIM_ITALIC, G_RUNNING, G_PENDING, G_ERROR, G_SUB } from "../helpers.ts";
 import { INDENT } from "../layout.ts";
+import { scopeHintLines } from "../logic.ts";
+import type { SessionScopeProblem } from "../../utils/session-scope.ts";
 
 // ── Health display ───────────────────────────────────────────────────────
 
@@ -70,6 +72,22 @@ export function renderStaleHint(props: { c: ThemeColors; isStale: boolean }) {
   if (!props.isStale) return null;
   const c = props.c;
   return <text fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{"data may be outdated"}</text>;
+}
+
+// ── Render: Scope-incomplete hint ───────────────────────────────────────
+
+export function renderScopeHint(props: { c: ThemeColors; problems: readonly SessionScopeProblem[] }) {
+  const lines = scopeHintLines(props.problems);
+  if (lines.length === 0) return null;
+  const c = props.c;
+  return (
+    <>
+      <text fg={rgbaToCSS(c.warning)} attributes={DIM_ITALIC}>{lines[0]}</text>
+      {lines.slice(1).map((line) => (
+        <text fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{line}</text>
+      ))}
+    </>
+  );
 }
 
 // ── Render: No state body ───────────────────────────────────────────────
