@@ -14,9 +14,16 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(_args, context) { const runtime = resolve(context); return JSON.stringify(runtime.roles()); },
     }),
     team_create: defineTool({
-      description: "Create a durable team for complementary specialties. The current role/session becomes its creator. Add peers with team_add.",
+      description: "Create a durable team for complementary specialties. The current role/session becomes its creator. Returns a receipt with team/member IDs and turn budget; use team_status to read the stored goal and history. Add peers with team_add.",
       args: { name: z.string().min(1).max(200), goal: z.string().min(1).max(16000), max_turns: z.number().int().min(1).max(100).optional() },
-      async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.create(context, args.name, args.goal, args.max_turns)); },
+      async execute(args, context) {
+        const runtime = resolve(context);
+        const state = runtime.create(context, args.name, args.goal, args.max_turns);
+        return JSON.stringify({ id: state.id, name: state.name, status: state.status,
+          ownerSessionId: state.ownerSessionId, ownerRoleId: state.ownerRoleId, createdAt: state.createdAt,
+          maxTurns: state.maxTurns, turns: state.turns,
+          members: state.members.map(({ id, roleId, sessionId, status }) => ({ id, roleId, sessionId, status })) });
+      },
     }),
     team_add: defineTool({
       description: "Creator only: record a top-level role as a team member. This does not start a turn; the member's first woken event (a message or task event addressed to it) starts it with the goal, roster and tasks.",
@@ -24,11 +31,16 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.add(context, args.team_id, args.role_id)); },
     }),
     team_send_event: defineTool({
-      description: "Publish a peer message or task event. task_claim atomically reserves a task; act only after success. Claim leases last 30 minutes and can be renewed. Complete/release only tasks you own. Messages, offered/completed/released tasks wake peers; claims and turn notices do not. task_offer normally wakes every member: pass wake:false to register the task without waking anyone, and/or set recipient to wake one member. Recipients affect wake routing; every event is readable by the whole team.",
+      description: "Publish a peer message or task event. Returns event metadata without echoing content; team_status can retrieve the stored event. task_claim atomically reserves a task; act only after success. Claim leases last 30 minutes and can be renewed. Complete/release only tasks you own. Messages, offered/completed/released tasks wake peers; claims and turn notices do not. task_offer normally wakes every member: pass wake:false to register the task without waking anyone, and/or set recipient to wake one member. Recipients affect wake routing; every event is readable by the whole team.",
       args: { team_id: teamId, kind: z.enum(["message", "task_offer", "task_claim", "task_complete", "task_release"]),
         content: z.string().min(1).max(16000), task_id: z.string().min(1).max(200).optional(), recipient: z.string().min(1).optional(),
         wake: z.boolean().optional().describe("Wake peers for this event; task_claim never wakes. Defaults to true") },
-      async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.send(context, args.team_id, args)); },
+      async execute(args, context) {
+        const runtime = resolve(context);
+        const event = runtime.send(context, args.team_id, args);
+        return JSON.stringify({ id: event.id, seq: event.seq, type: event.type, sender: event.sender,
+          recipient: event.recipient, taskId: event.taskId, at: event.at, wake: event.wake });
+      },
     }),
     team_status: defineTool({
       description: "Read your teams or one team's roster, claims, delivery errors and durable event stream. Closed teams are hidden from the team list unless include_deleted is set; reading one by team_id always works. A single team also reports budgetExhausted when its turn budget is spent. Reading does not acknowledge or discard pending events.",

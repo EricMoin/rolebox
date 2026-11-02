@@ -172,6 +172,15 @@ successfully claim a task before editing shared work, then publish the result
 through a team event. Final replies alone remain private. Events are shared
 with all members, even when only one recipient is woken.
 
+`team_create` returns a compact receipt with the team ID, creator/member
+identities, status and turn budget; it does not echo the submitted goal or return
+the event history. `team_send_event` returns the event ID, sequence, type, sender,
+resolved recipient, task ID (when applicable), timestamp and effective wake flag,
+without echoing the submitted content. Full goals and event/task bodies remain
+stored and delivered to peers; retrieve them with `team_status(team_id, after_seq?)`
+when needed. These receipts do not mean a peer has already finished or even
+started its turn. Restart DSH with the updated build to use the new responses.
+
 `team_create` accepts `max_turns` (1–100, default 40); a team has at most eight
 members and two in-flight deliveries. Failure pauses the team; resume preserves
 the consumed turn budget. The turn cap does not measure tokens or money. Team

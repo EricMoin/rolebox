@@ -276,13 +276,17 @@ describe("DSH team entry", () => {
     expect(roles.map((role: { id: string }) => role.id).sort()).toEqual(["designer", "developer"]);
     const team = await fixture.call("team_create", { name: "Polish", goal: "Design and build a page", agent: "designer", directory: join(root, "workspace-b") }, owner) as TeamState;
     expect(team.ownerRoleId).toBe("developer");
+    expect(team).not.toHaveProperty("goal");
+    expect(team).not.toHaveProperty("events");
     expect(existsSync(join(root, "workspace-a", ".rolebox", "team", team.id))).toBe(true);
     expect(await fixture.call("team_status", {}, other)).toEqual([]);
     await expect(fixture.call("team_status", { team_id: team.id }, other)).rejects.toThrow("not found");
     await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
     // Adding records membership only; the first woken event starts the peer.
     expect(fixture.created).toHaveLength(0);
-    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the first design" }, owner);
+    const receipt = await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the first design" }, owner);
+    expect(receipt).toMatchObject({ type: "message", wake: true });
+    expect(receipt).not.toHaveProperty("content");
     fixture.finish(owner);
     await eventually(() => fixture.created.length === 1 && fixture.sent.some(message => message.id === fixture.created[0]!.id));
     expect(fixture.created[0]!.model).toBe("designer-model");
