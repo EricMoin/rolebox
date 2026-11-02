@@ -1848,21 +1848,14 @@ export async function apply(
   // keeps its documented no-op and the graph engine's F6 notifier logs the
   // degraded reminder — never a crash, never gating boot.
   const agentRegistry = probeAgentRegistry(ctx);
-  // Optional host grouping seam (`ctx.get("workspaceRegistry")`) — probed
-  // structurally, exactly like ctx.agents. A peer is created through the agent
-  // factory, which does not run the gateway session.create accounting that
-  // lists a session under its Workspace, so this registry is handed to the team
-  // session adapter to attach a created peer to the workspace that owns its
-  // directory. Absent (headless/minimal profile) → peers stay where the host
-  // put them.
-  const workspaceRegistry = probeWorkspaceRegistry(ctx);
-  // Optional host agent-composition seam (`ctx.get("agentPresets")`). The Web
-  // profile mounts a preset registry and gives each new conversation its
-  // capability set from a preset; the agent factory a team peer uses does not
-  // run that composition, so the resolved preset is recorded on the peer's
-  // header and mounted before its first turn. Absent (headless/minimal
-  // profile) → peers keep the host's process-wide composition.
-  const agentPresets = probeAgentPresets(ctx);
+  // The optional host grouping (`ctx.get("workspaceRegistry")`) and
+  // agent-composition (`ctx.get("agentPresets")`) seams are resolved PER CALL
+  // inside `teamRuntime` below, never once here: a sibling plugin's service may
+  // mount AFTER this plugin composes (the Workspace registry's `storageDomain`
+  // and `sessionPersistence` dependencies resolve asynchronously), and a
+  // startup-time probe silently disabled the seam for the whole process
+  // lifetime when it missed. Absent (headless/minimal profile) → peers keep
+  // whatever placement and process-wide composition the host gave them.
   const promptInjector = buildAgentPromptInjector(agentRegistry);
   const graphNotifyWired = promptInjector !== undefined;
   const sessionAdapter = new DshSessionAdapter(ctx.sessions, {
@@ -1975,36 +1968,45 @@ export async function apply(
         readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, sessionPersistence, id),
         // A peer is created through the agent factory, which skips the gateway
         // session.create accounting; attach it to the Workspace that owns this
-        // adapter's (already realpath'd) directory. Best effort: the adapter
-        // logs and swallows a host rejection.
-        ...(workspaceRegistry ? { attachWorkspace: async (sessionId: string) => {
-          const owner = await workspaceRegistry.resolveByPath(workspace);
+        // adapter's (already realpath'd) directory. The host service is resolved
+        // PER CALL, never once at apply: an optional service may mount after
+        // this plugin composes (a startup-time probe silently left peers outside
+        // every workspace). Best effort: the adapter logs and swallows a host
+        // rejection.
+        attachWorkspace: async (sessionId: string) => {
+          const registry = probeWorkspaceRegistry(ctx);
+          if (!registry) return;
+          const owner = await registry.resolveByPath(workspace);
           await owner?.attachSession(sessionId);
-        } } : {}),
+        },
         // The host's per-agent capability set. Resolve the preset the peer will
         // record (the host default on creation) and mount it before its first
-        // turn, exactly as the gateway does for a new conversation. Every
-        // resolution and mount failure propagates: a peer that silently loses
-        // its capability set is the defect this seam exists to prevent. The one
-        // exception is a recorded preset that no longer resolves (deleted or
-        // renamed): it falls back to the host default so an existing team stays
-        // resumable, and a failing fallback propagates too.
-        ...(agentPresets ? { composePeer: async (presetId: string | undefined) => {
+        // turn, exactly as the gateway does for a new conversation. The service
+        // is resolved PER CALL for the same startup-race reason as
+        // `attachWorkspace`. Every resolution and mount failure propagates: a
+        // peer that silently loses its capability set is the defect this seam
+        // exists to prevent. The one exception is a recorded preset that no
+        // longer resolves (deleted or renamed): it falls back to the host
+        // default so an existing team stays resumable, and a failing fallback
+        // propagates too. Returning `undefined` is only the no-host-service path.
+        composePeer: async (presetId: string | undefined) => {
+          const presets = probeAgentPresets(ctx);
+          if (!presets) return undefined;
           let id: string;
           if (presetId === undefined) {
             // Creation asks for the host default; failing here fails the spawn.
-            id = (await agentPresets.resolve()).id;
+            id = (await presets.resolve()).id;
           } else {
             try {
-              id = (await agentPresets.resolve(presetId)).id;
+              id = (await presets.resolve(presetId)).id;
             } catch (error) {
               log.warn("dsh team agent preset unavailable; using the host default", { agentPreset: presetId,
                 error: error instanceof Error ? error.message : String(error) });
-              id = (await agentPresets.resolve()).id;
+              id = (await presets.resolve()).id;
             }
           }
-          return { presetId: id, mount: async (agentCtx: unknown) => { await agentPresets.mount(agentCtx, id); } };
-        } } : {}),
+          return { presetId: id, mount: async (agentCtx: unknown) => { await presets.mount(agentCtx, id); } };
+        },
       });
       const runtime = new TeamRuntime({ directory: workspace, platformId: "dsh", session,
         roles: () => resolvedRoles, canPollStatus: true, memberProblem,

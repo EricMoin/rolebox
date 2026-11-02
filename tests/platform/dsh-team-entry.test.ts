@@ -48,7 +48,14 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   workspaceRegistry?: boolean;
   agentPresets?: boolean;
   agentPresetsFailResolve?: boolean;
-  agentDefaultModel?: { provider: string; model: string; reasoningEffort?: string } } = {}) {
+  agentDefaultModel?: { provider: string; model: string; reasoningEffort?: string };
+  /**
+   * Opt-in late mount: the named optional service is HIDDEN from `ctx.get`
+   * while `apply()` runs (the observed startup race — a service whose own
+   * dependencies resolve asynchronously composes after this plugin) and
+   * becomes visible only after the fixture's `mountLateHost()` is called.
+   */
+  lateHost?: { workspaceRegistry?: boolean; agentPresets?: boolean } } = {}) {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
   const tools = new Map<string, DshToolDefinition>();
   const providers = new Map<string, DshSubagentProvider>();
@@ -121,7 +128,11 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   // Optional Workspace registry: a host WITHOUT it is the compatibility case
   // covered by every existing fixture. Opting in models a DSH profile where the
   // agent factory does not run the gateway session.create workspace accounting.
-  const workspaceRegistry = options.workspaceRegistry ? {
+  // `lateHost` builds the same service but hides it from `ctx.get` until
+  // `mountLateHost()` flips the flag below, modelling a service that composes
+  // after this plugin (the observed startup race).
+  let lateHostMounted = false;
+  const workspaceRegistry = options.workspaceRegistry || options.lateHost?.workspaceRegistry ? {
     async resolveByPath(path: string) {
       workspaceResolveCalls.push(path);
       return { async attachSession(sessionId: string) { workspaceAttachCalls.push({ directory: path, sessionId }); } };
@@ -131,7 +142,7 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   // covered by every default fixture (the host keeps its process-wide
   // composition). Opting in models the DSH Web profile, where the agent factory
   // does not run the gateway's per-conversation preset composition.
-  const agentPresets = options.agentPresets ? {
+  const agentPresets = options.agentPresets || options.lateHost?.agentPresets ? {
     async resolve(id?: string) {
       presetResolveCalls.push(id);
       if (options.agentPresetsFailResolve) throw new Error("Agent preset registry unavailable");
@@ -193,8 +204,14 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
     ...(options.prompt === false ? {} : { systemPrompt }),
     get(name) {
       if (name === "agents") return agents;
-      if (name === "workspaceRegistry") return workspaceRegistry;
-      if (name === "agentPresets") return agentPresets;
+      if (name === "workspaceRegistry") {
+        if (options.workspaceRegistry) return workspaceRegistry;
+        return options.lateHost?.workspaceRegistry && lateHostMounted ? workspaceRegistry : undefined;
+      }
+      if (name === "agentPresets") {
+        if (options.agentPresets) return agentPresets;
+        return options.lateHost?.agentPresets && lateHostMounted ? agentPresets : undefined;
+      }
       if (name === "systemPrompt") return options.prompt === false ? undefined : systemPrompt;
       if (name === "agentLoop") return options.loop === false ? undefined : { createAgent() {}, resume() {} };
       if (name === "agentDefaultModel") {
@@ -225,6 +242,7 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   const fail = (agent: DshTeamAgent, text: string) => (agent as DshTeamAgent & { fail(text: string): void }).fail(text);
   return { ctx, tools, live, owner, call, finish, fail, created, resumed, sent, disposed, persisted, listeners, spawnToolAvailability,
     workspaceResolveCalls, workspaceAttachCalls, presetResolveCalls, presetMountCalls,
+    mountLateHost: () => { lateHostMounted = true; },
     delayDisposal: (barrier: Promise<void>) => { disposalBarrier = barrier; } };
 }
 
@@ -320,6 +338,49 @@ describe("DSH team entry", () => {
     await eventually(() => fixture.created.length === 1 && fixture.presetMountCalls.length === 1);
 
     const peerId = fixture.created[0]!.id;
+    expect(fixture.presetResolveCalls).toEqual([undefined]);
+    expect(fixture.created[0]!.meta.agentPreset).toBe("standard");
+    expect(fixture.presetMountCalls).toEqual([{ ctx: { sessionId: peerId }, id: "standard" }]);
+  });
+
+  it("attaches a peer to the creator's workspace when the registry mounts after boot", async () => {
+    const fixture = host({ lateHost: { workspaceRegistry: true } });
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    // apply() probed before the service mounted and saw nothing — the observed
+    // startup race. A one-time probe would leave the seam disabled for good.
+    expect(fixture.workspaceResolveCalls).toEqual([]);
+    fixture.mountLateHost();
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Late attach", goal: "Attach after boot" }, owner) as TeamState;
+    await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the design" }, owner);
+    await eventually(() => fixture.created.length === 1);
+    const peerId = fixture.created[0]!.id;
+
+    // Resolving the registry when the peer is created reaches the Workspace
+    // that owns the creator's directory and attaches the created session.
+    await eventually(() => fixture.workspaceAttachCalls.some(call => call.sessionId === peerId));
+    const directory = realpathSync(join(root, "workspace-a"));
+    expect(fixture.workspaceResolveCalls).toEqual([directory]);
+    expect(fixture.workspaceAttachCalls).toContainEqual({ directory, sessionId: peerId });
+  });
+
+  it("composes a peer with the host's default preset when the preset registry mounts after boot", async () => {
+    const fixture = host({ lateHost: { agentPresets: true } });
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    expect(fixture.presetResolveCalls).toEqual([]);
+    fixture.mountLateHost();
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Late preset", goal: "Compose after boot" }, owner) as TeamState;
+    await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the design" }, owner);
+    await eventually(() => fixture.created.length === 1 && fixture.presetMountCalls.length === 1);
+    const peerId = fixture.created[0]!.id;
+
+    // The capability set must not silently disappear just because the registry
+    // mounted late: the peer records the resolved id and mounts it.
     expect(fixture.presetResolveCalls).toEqual([undefined]);
     expect(fixture.created[0]!.meta.agentPreset).toBe("standard");
     expect(fixture.presetMountCalls).toEqual([{ ctx: { sessionId: peerId }, id: "standard" }]);
