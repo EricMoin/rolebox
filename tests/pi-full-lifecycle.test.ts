@@ -84,8 +84,8 @@ function createMockHotReloadService(): HotReloadService {
     health: () => ({ status: "healthy" as const }),
     isDegraded: () => false,
     triggerReload: vi.fn(async () => ({
-      success: true,
-      disabled: false,
+      kind: "reloaded",
+      scope: "full",
       discovered: 2,
       resolved: 2,
       skipped: 0,
@@ -105,8 +105,8 @@ function createFailingHotReloadService(): HotReloadService {
     health: () => ({ status: "healthy" as const }),
     isDegraded: () => false,
     triggerReload: vi.fn(async () => ({
-      success: false,
-      error: "Simulated reload failure",
+      kind: "failed",
+      reason: "Simulated reload failure",
     })),
   } as unknown as HotReloadService;
 }

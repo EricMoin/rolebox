@@ -555,7 +555,7 @@ describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
     const fixture = await createFixture({
       reload: async () => {
         calls++;
-        return { success: true, discovered: 3, resolved: 2, skipped: 1 };
+        return { kind: "reloaded", discovered: 3, resolved: 2, skipped: 1 };
       },
     });
     const { webServer, registered } = createFakeWebServer();
@@ -572,7 +572,7 @@ describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
 
   it("returns 409 with disabled:true when the reloader is kill-switched", async () => {
     const fixture = await createFixture({
-      reload: async () => ({ success: false, disabled: true }),
+      reload: async () => ({ kind: "disabled" }),
     });
     const { webServer, registered } = createFakeWebServer();
     fixture.route.register(webServer);
@@ -590,7 +590,7 @@ describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
 
   it("returns 409 with the error when a reload is already in progress", async () => {
     const fixture = await createFixture({
-      reload: async () => ({ success: false, error: "reload already in progress" }),
+      reload: async () => ({ kind: "busy" }),
     });
     const { webServer, registered } = createFakeWebServer();
     fixture.route.register(webServer);
@@ -602,9 +602,26 @@ describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
     expect(json(res)).toEqual({ ok: false, error: "reload already in progress" });
   });
 
+  it("returns 409 with the failure reason when the reload failed", async () => {
+    const fixture = await createFixture({
+      reload: async () => ({ kind: "failed", reason: "role-snapshot re-registration failed" }),
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(409);
+    expect(json(res)).toEqual({
+      ok: false,
+      error: "role-snapshot re-registration failed",
+    });
+  });
+
   it("returns 409 with a stable error when a failed reload carries no message", async () => {
     const fixture = await createFixture({
-      reload: async () => ({ success: false }),
+      reload: async () => ({ kind: "failed", reason: "" }),
     });
     const { webServer, registered } = createFakeWebServer();
     fixture.route.register(webServer);
@@ -649,7 +666,7 @@ describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
     const fixture = await createFixture({
       reload: async () => {
         calls++;
-        return { success: true };
+        return { kind: "reloaded", discovered: 0, resolved: 0, skipped: 0 };
       },
     });
     const { webServer, registered } = createFakeWebServer();
@@ -668,7 +685,7 @@ describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
     const fixture = await createFixture({
       reload: async () => {
         calls++;
-        return { success: true, discovered: 2, resolved: 2, skipped: 0 };
+        return { kind: "reloaded", discovered: 2, resolved: 2, skipped: 0 };
       },
     });
     // Compose exactly like the plugin: the monitor route owns the ONLY

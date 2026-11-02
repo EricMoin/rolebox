@@ -336,20 +336,23 @@ export class DshRoleSwitchWebRoute {
       });
       return sendJson(res, 500, errorBody("Internal server error"));
     }
-    if (result.disabled) {
+    if (result.kind === "disabled") {
       return sendJson(res, 409, {
         ok: false,
         disabled: true,
-        error: result.error ?? "Role reload is disabled",
+        error: "Role reload is disabled",
       });
     }
-    if (!result.success) {
-      return sendJson(res, 409, errorBody(result.error ?? "Role reload failed"));
+    if (result.kind === "busy") {
+      return sendJson(res, 409, errorBody("reload already in progress"));
+    }
+    if (result.kind === "failed") {
+      // Keep the empty-string guard so a message-less failure still gets the
+      // stable fallback text.
+      return sendJson(res, 409, errorBody(result.reason || "Role reload failed"));
     }
 
-    const discovered = result.discovered ?? 0;
-    const resolved = result.resolved ?? 0;
-    const skipped = result.skipped ?? 0;
+    const { discovered, resolved, skipped } = result;
     this._log.info("Role reloaded via web route", {
       discovered,
       resolved,

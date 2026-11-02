@@ -65,23 +65,18 @@ import type { ResolvedFunction, ResolvedRole } from "../../../types.ts";
 const log = createSubLogger("dsh-rolebox-reload");
 
 /**
- * Result of {@link DshRoleboxReloader.reload}. Shaped like
- * `HotReloadResult` (`src/core/services/hot-reload-service.ts:32-44`) so the
- * web route can report status identically to the opencode tool.
+ * Sealed outcome of {@link DshRoleboxReloader.reload}. The dsh reloader only
+ * performs full reloads, so its `reloaded` arm always carries the
+ * full-reload counts. `disabled` and `busy` mean nothing was attempted and
+ * are NOT errors; `failed` carries the reason and leaves the previous state
+ * preserved. Deliberately a separate union from the opencode-only
+ * `HotReloadResult` — no platform → core-service import edge exists.
  */
-export interface DshRoleboxReloadResult {
-  success: boolean;
-  /** Set when the reload is disabled via env var (not an error). */
-  disabled?: boolean;
-  /** Error message when success is false (and not disabled). */
-  error?: string;
-  /** Number of roles discovered on disk. */
-  discovered?: number;
-  /** Number of roles successfully resolved. */
-  resolved?: number;
-  /** Number of discovered roles that failed to resolve. */
-  skipped?: number;
-}
+export type DshRoleboxReloadResult =
+  | { kind: "reloaded"; discovered: number; resolved: number; skipped: number }
+  | { kind: "disabled" }
+  | { kind: "busy" }
+  | { kind: "failed"; reason: string };
 
 /** Dependencies for {@link DshRoleboxReloader}. */
 export interface DshRoleboxReloaderOptions {
@@ -174,17 +169,18 @@ export class DshRoleboxReloader {
    * Re-discover and re-resolve every role, then refresh every consumer that
    * captured the previous role state.
    *
-   * Never throws: a failure is caught and reported as `{success: false,
-   * error}`, with the previous state preserved. A second concurrent call is
-   * rejected by the single-flight guard.
+   * Never throws: a failure is caught and reported as
+   * `{ kind: "failed", reason }`, with the previous state preserved. A second
+   * concurrent call is rejected by the single-flight guard as
+   * `{ kind: "busy" }`.
    */
   async reload(): Promise<DshRoleboxReloadResult> {
-    if (this.disabled) return { success: false, disabled: true };
+    if (this.disabled) return { kind: "disabled" };
 
     // Concurrency guard (mirrors hot-reload-service.ts:185-190).
     if (this.isReloading) {
       log.warn("Role reload skipped — another reload is already in progress");
-      return { success: false, error: "reload already in progress" };
+      return { kind: "busy" };
     }
     this.isReloading = true;
 
@@ -195,7 +191,7 @@ export class DshRoleboxReloader {
       log.error("Role reload failed — previous state preserved", {
         error: errorMsg,
       });
-      return { success: false, error: errorMsg };
+      return { kind: "failed", reason: errorMsg };
     } finally {
       this.isReloading = false;
     }
@@ -303,7 +299,7 @@ export class DshRoleboxReloader {
     const resolved = newResolvedRoles.length;
     const skipped = discovered - resolved;
     log.info("Role reload complete", { discovered, resolved, skipped });
-    return { success: true, discovered, resolved, skipped };
+    return { kind: "reloaded", discovered, resolved, skipped };
   }
 
   /** Restore the pre-swap in-memory state, in place. */

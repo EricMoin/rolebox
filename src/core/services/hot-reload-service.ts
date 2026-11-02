@@ -29,20 +29,27 @@ const DEBOUNCE_MS = 500;
 /** Settle window to absorb late fsevents after symlink writes during reload. */
 const SETTLE_MS = 200;
 
-/** Result returned by triggerReload() so callers (tools, tests) can report status accurately. */
-export interface HotReloadResult {
-  success: boolean;
-  /** Set when hot reload is disabled via env var (not an error). */
-  disabled?: boolean;
-  /** Error message when success is false (and not disabled). */
-  error?: string;
-  /** Number of roles discovered on disk. */
-  discovered?: number;
-  /** Number of roles successfully resolved. */
-  resolved?: number;
-  /** Number of discovered roles that failed to resolve. */
-  skipped?: number;
-}
+/**
+ * Sealed outcome of a hot reload, returned by triggerReload() so callers
+ * (tools, tests, routes) can report status accurately. Exactly one arm
+ * describes what happened:
+ *
+ * - `reloaded` — the reload ran; `scope` names what actually refreshed.
+ *   `fast` re-resolved the skill files of exactly one role; `full`
+ *   re-discovered and re-resolved every role.
+ * - `disabled` — hot reload is off via env var; nothing was attempted and
+ *   this is NOT an error.
+ * - `busy` — another reload already holds the single-flight guard; nothing
+ *   was attempted and this is NOT an error.
+ * - `failed` — the attempt failed; `reason` says why and the previous state
+ *   was preserved.
+ */
+export type HotReloadResult =
+  | { kind: "reloaded"; scope: "full"; discovered: number; resolved: number; skipped: number }
+  | { kind: "reloaded"; scope: "fast"; roleId: string; skills: number }
+  | { kind: "disabled" }
+  | { kind: "busy" }
+  | { kind: "failed"; reason: string };
 const WATCH_EXTENSIONS = new Set([
   ".md",
   ".yaml",
@@ -167,28 +174,28 @@ export class HotReloadService implements PluginService {
   }
 
   /**
-   * Public trigger to force a hot reload. If disabled, returns a resolved promise
-   * with `success: false` and `disabled: true`.
+   * Public trigger to force a hot reload. If disabled, returns
+   * `{ kind: "disabled" }` without attempting anything.
    * Useful for P2 tools to programmatically trigger a reload and report status.
    */
   async triggerReload(): Promise<HotReloadResult> {
-    if (this.disabled) return { success: false, disabled: true };
+    if (this.disabled) return { kind: "disabled" };
     return this.performReload();
   }
 
   private async performReload(): Promise<HotReloadResult> {
-    if (this.disabled) return { success: false, disabled: true };
+    if (this.disabled) return { kind: "disabled" };
 
     // Guard: we need the resolver context to reload
     if (!this.ctx.roleboxDir || !this.ctx.globalSkillsDir || !this.ctx.configDir || !this.ctx.builtinDir) {
       log.warn("Hot reload aborted: resolver context fields not set on PluginContext");
-      return { success: false, error: "resolver context fields not set on PluginContext" };
+      return { kind: "failed", reason: "resolver context fields not set on PluginContext" };
     }
 
     // Concurrency guard: if a reload is already in progress, bail
     if (this.isReloading) {
       log.warn("Hot reload skipped — another reload is already in progress");
-      return { success: false, error: "reload already in progress" };
+      return { kind: "busy" };
     }
     this.isReloading = true;
 
@@ -209,7 +216,7 @@ export class HotReloadService implements PluginService {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       log.error("Hot reload failed — previous state preserved", { error: errorMsg });
-      return { success: false, error: errorMsg };
+      return { kind: "failed", reason: errorMsg };
     } finally {
       this.pendingChanges = [];
       this.isReloading = false;
@@ -287,7 +294,7 @@ export class HotReloadService implements PluginService {
       //    the agent registry has been updated in-place
 
       log.info("Fast reload complete", { roleId, skills: newSkills.length });
-      return { success: true, discovered: this.ctx.resolvedRoles.length, resolved: this.ctx.resolvedRoles.length, skipped: 0 };
+      return { kind: "reloaded", scope: "fast", roleId, skills: newSkills.length };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       log.error("Fast reload failed, falling back to full reload", { roleId, error: errorMsg });
@@ -380,7 +387,8 @@ export class HotReloadService implements PluginService {
       skipped: newRoles.size - newResolvedRoles.length,
     });
     return {
-      success: true,
+      kind: "reloaded",
+      scope: "full",
       discovered: newRoles.size,
       resolved: newResolvedRoles.length,
       skipped: newRoles.size - newResolvedRoles.length,

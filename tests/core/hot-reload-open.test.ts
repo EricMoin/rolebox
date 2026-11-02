@@ -137,7 +137,12 @@ describe("HotReloadService teammate catalog", () => {
     // Drive the fast path directly: re-resolve skills for the consumer role.
     const result = await (svc as any).performFastReload("consumer");
 
-    expect(result.success).toBe(true);
+    expect(result).toEqual({
+      kind: "reloaded",
+      scope: "fast",
+      roleId: "consumer",
+      skills: 0,
+    });
 
     // The rebuilt prompt must retain the `## Available public agents` block
     // listing the producer with its id and description.
@@ -157,7 +162,12 @@ describe("HotReloadService teammate catalog", () => {
     await svc.init(ctx);
     try {
       const result = await (svc as any).performFastReload("consumer");
-      expect(result.success).toBe(true);
+      expect(result).toEqual({
+        kind: "reloaded",
+        scope: "fast",
+        roleId: "consumer",
+        skills: 0,
+      });
       expect(consumer.prompt).toContain("## Available public agents");
       expect(consumer.prompt).toContain("team_create");
       expect(consumer.prompt).not.toContain("## Available sub-agents");
@@ -212,9 +222,13 @@ describe("HotReloadService teammate catalog", () => {
 
     const result = await svc.triggerReload();
 
-    expect(result.success).toBe(true);
-    expect(result.discovered).toBe(2);
-    expect(result.resolved).toBe(2);
+    expect(result).toEqual({
+      kind: "reloaded",
+      scope: "full",
+      discovered: 2,
+      resolved: 2,
+      skipped: 0,
+    });
 
     // Stale entries disappear and legacy exports remain private.
     expect(roleOpenRegistry.has("stale-role")).toBe(false);

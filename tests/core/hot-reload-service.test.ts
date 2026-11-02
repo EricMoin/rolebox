@@ -92,10 +92,9 @@ describe("HotReloadService", () => {
     // restartService should NOT be callable since we never schedule
     expect(core.restartService).not.toHaveBeenCalled();
 
-    // triggerReload should return disabled result (not success)
+    // triggerReload should return the non-error disabled arm
     const result = await svc.triggerReload();
-    expect(result.success).toBe(false);
-    expect(result.disabled).toBe(true);
+    expect(result).toEqual({ kind: "disabled" });
 
     process.env.ROLEBOX_HOT_RELOAD = original;
     await svc.dispose();
@@ -251,10 +250,14 @@ describe("HotReloadService", () => {
     // Trigger reload — empty temp dir means discoverRoles returns empty map
     const result = await svc.triggerReload();
 
-    // Reload should report success with 0 discovered/resolved
-    expect(result.success).toBe(true);
-    expect(result.discovered).toBe(0);
-    expect(result.resolved).toBe(0);
+    // Reload should report a full-scope reloaded arm with 0 discovered/resolved
+    expect(result).toEqual({
+      kind: "reloaded",
+      scope: "full",
+      discovered: 0,
+      resolved: 0,
+      skipped: 0,
+    });
 
     // Stale entries should be gone (atomic swap cleared them)
     expect(ctx.roleFunctionsMap.has("old-role")).toBe(false);
@@ -298,9 +301,11 @@ describe("HotReloadService", () => {
     // Trigger reload — guard clause fires, returns early before clearing maps
     const result = await svc.triggerReload();
 
-    // Reload should report failure (guard clause returned without success)
-    expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
+    // Reload should report the failed arm with the guard's reason
+    expect(result).toEqual({
+      kind: "failed",
+      reason: "resolver context fields not set on PluginContext",
+    });
 
     // Previous state must be preserved
     expect(ctx.roleFunctionsMap.has("existing-role")).toBe(true);
@@ -309,6 +314,31 @@ describe("HotReloadService", () => {
 
     // restartService must NOT have been called (guard returned before step 7)
     expect(core.restartService).not.toHaveBeenCalled();
+
+    await svc.dispose();
+  });
+
+  it("overlapping triggerReload calls yield one full reloaded result and one busy result", async () => {
+    const svc = new HotReloadService();
+    const core = makeMockCore();
+    await svc.init(makeCtx(tempDir, core));
+
+    // performReload sets the single-flight guard synchronously, before its
+    // first await, so the second call observes the guard already held.
+    const first = svc.triggerReload();
+    const second = svc.triggerReload();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(firstResult).toEqual({
+      kind: "reloaded",
+      scope: "full",
+      discovered: 0,
+      resolved: 0,
+      skipped: 0,
+    });
+    expect(secondResult).toEqual({ kind: "busy" });
+    expect(core.restartService).toHaveBeenCalledTimes(1);
 
     await svc.dispose();
   });

@@ -23,12 +23,13 @@
 //     (success | retry | next_strategy | abort), not a 2-arm verdict.
 //   - HotReloadResult (src/core/services/hot-reload-service.ts) and
 //     DshRoleboxReloadResult (src/platform/adapters/dsh/rolebox-reload.ts) —
-//     a MULTI-OUTCOME report, not a 2-arm verdict: success, an explicitly
-//     non-error "disabled" state (success: false; disabled: true; documented
-//     "not an error"), and failure, with progress counters (discovered /
-//     resolved / skipped) meaningful on more than one path. A Result's two
-//     arms cannot express a third, non-error outcome without flattening it
-//     into the error arm. Not expressible.
+//     SEALED multi-outcome unions, not 2-arm verdicts: a `reloaded` arm whose
+//     payload depends on the scope that actually ran (fast = one role's id and
+//     skill count; full = discovered / resolved / skipped counts), plus two
+//     distinct NON-ERROR outcomes (`disabled`, `busy` — nothing attempted) and
+//     a `failed` arm carrying a reason. A Result's two arms cannot express
+//     more than one success payload and two independent non-error outcomes
+//     without flattening them into the error arm. Not expressible.
 // The rule also leaves three seams alone — they are not verdicts at all:
 //   - Host-facing callbacks keep their "no opinion" form: the dsh
 //     presentCall / presentResult / finalizeContent members are typed

@@ -270,7 +270,7 @@ describe("DshRoleboxReloader", () => {
     const result: DshRoleboxReloadResult = await reloader.reload();
 
     expect(result).toEqual({
-      success: true,
+      kind: "reloaded",
       discovered: 1,
       resolved: 1,
       skipped: 0,
@@ -325,16 +325,13 @@ describe("DshRoleboxReloader", () => {
     // already held when the second call is issued.
     const first = reloader.reload();
     const second: DshRoleboxReloadResult = await reloader.reload();
-    expect(second).toEqual({
-      success: false,
-      error: "reload already in progress",
-    });
+    expect(second).toEqual({ kind: "busy" });
 
-    expect((await first).success).toBe(true);
+    expect((await first).kind).toBe("reloaded");
     expect(snapshotCalls).toHaveLength(1);
 
     // The guard is released once the first reload settles.
-    expect((await reloader.reload()).success).toBe(true);
+    expect((await reloader.reload()).kind).toBe("reloaded");
     expect(snapshotCalls).toHaveLength(2);
   });
 
@@ -363,7 +360,7 @@ describe("DshRoleboxReloader", () => {
 
       const disabledResult: DshRoleboxReloadResult = await reloader.reload();
       expect(reloader.isDisabled).toBe(true);
-      expect(disabledResult).toEqual({ success: false, disabled: true });
+      expect(disabledResult).toEqual({ kind: "disabled" });
 
       // Nothing was touched.
       expect(roles).toHaveLength(1);
@@ -437,8 +434,8 @@ describe("DshRoleboxReloader", () => {
     const result: DshRoleboxReloadResult = await reloader.reload();
 
     expect(result).toEqual({
-      success: false,
-      error: "role-snapshot re-registration failed",
+      kind: "failed",
+      reason: "role-snapshot re-registration failed",
     });
 
     // The swap DID happen (the refresh saw the freshly resolved role), and the
@@ -462,8 +459,10 @@ describe("DshRoleboxReloader", () => {
 
     // The guard is released, so a later attempt is not stuck "in progress".
     const retry = await reloader.reload();
-    expect(retry.success).toBe(false);
-    expect(retry.error).toBe("role-snapshot re-registration failed");
+    expect(retry).toEqual({
+      kind: "failed",
+      reason: "role-snapshot re-registration failed",
+    });
   });
 
   it("restores the previous state when the skill refresh throws after the tool rebuild", async () => {
@@ -497,8 +496,8 @@ describe("DshRoleboxReloader", () => {
     const result: DshRoleboxReloadResult = await reloader.reload();
 
     expect(result).toEqual({
-      success: false,
-      error: "skill catalog refresh failed",
+      kind: "failed",
+      reason: "skill catalog refresh failed",
     });
     expect(refreshedIds).toEqual([["live-role"], ["stale-role"]]);
     expect(roles).toHaveLength(1);

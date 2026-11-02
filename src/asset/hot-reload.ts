@@ -26,7 +26,7 @@ export function createAssetHotReloadTool(hotReloadService: HotReloadService) {
 
       const requestedLabel = "assets (full reload)";
 
-      if (isDisabled || result.disabled) {
+      if (isDisabled || result.kind === "disabled") {
         log.info("Hot reload is disabled by env var");
         return (
           "## Asset Hot Reload\n" +
@@ -37,18 +37,45 @@ export function createAssetHotReloadTool(hotReloadService: HotReloadService) {
         );
       }
 
-      if (!result.success) {
-        log.warn("Hot reload failed", { error: result.error });
+      if (result.kind === "busy") {
+        log.info("Hot reload skipped — another reload is in progress");
+        return (
+          "## Asset Hot Reload\n" +
+          "\n" +
+          `**Requested:** ${requestedLabel}\n` +
+          `**Status:** skipped\n` +
+          `**Details:** another hot reload is already in progress; nothing was changed.\n`
+        );
+      }
+
+      if (result.kind === "failed") {
+        log.warn("Hot reload failed", { error: result.reason });
         return (
           "## Asset Hot Reload\n" +
           "\n" +
           `**Requested:** ${requestedLabel}\n` +
           `**Status:** failed\n` +
-          `**Details:** ${result.error ?? "Unknown error"}.\n`
+          `**Details:** ${result.reason}.\n`
+        );
+      }
+
+      if (result.scope === "fast") {
+        log.info("Hot reload completed", {
+          scope: "fast",
+          roleId: result.roleId,
+          skills: result.skills,
+        });
+        return (
+          "## Asset Hot Reload\n" +
+          "\n" +
+          `**Requested:** ${requestedLabel}\n` +
+          `**Status:** completed\n` +
+          `**Details:** skills re-resolved for role "${result.roleId}" (${result.skills} skills).\n`
         );
       }
 
       log.info("Hot reload completed", {
+        scope: "full",
         discovered: result.discovered,
         resolved: result.resolved,
         skipped: result.skipped,
@@ -59,7 +86,7 @@ export function createAssetHotReloadTool(hotReloadService: HotReloadService) {
         `**Requested:** ${requestedLabel}\n` +
         `**Status:** completed\n` +
         `**Details:** Roles re-discovered and re-resolved. ` +
-        `Discovered: ${result.discovered ?? 0}, Resolved: ${result.resolved ?? 0}, Skipped: ${result.skipped ?? 0}.\n`
+        `Discovered: ${result.discovered}, Resolved: ${result.resolved}, Skipped: ${result.skipped}.\n`
       );
     },
   });
