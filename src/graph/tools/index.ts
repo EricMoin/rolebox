@@ -435,7 +435,8 @@ function createGraphStatusTool(
       include_loops: z.boolean().optional().describe("Include loop definitions, traversal counts and progress in summary and tree output."),
       include_artifacts: z.boolean().optional().describe("Include accepted result records with immutable artifact versions."),
       include_evidence: z.boolean().optional().describe("Include accepted result records with their validation evidence."),
-      include_history: z.boolean().optional().describe("Include full run, attempt and control history."),
+      include_prompt: z.boolean().optional().describe("Include node prompts in status and history. Omitted by default; does not affect query matching."),
+      include_history: z.boolean().optional().describe("Include full run, attempt and control history. Node prompts require include_prompt."),
       max_chars: z
         .number()
         .optional()

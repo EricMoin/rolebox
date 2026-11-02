@@ -21,6 +21,7 @@ export interface GraphStatusArgs {
   limit?: number;
   depth?: number;
   include_output?: boolean;
+  include_prompt?: boolean;
   include_history?: boolean;
   include_budget?: boolean;
   include_loops?: boolean;
@@ -49,6 +50,11 @@ export function filterNodes(nodes: readonly GraphNodeView[], args: GraphStatusAr
   );
 }
 
+function presentNode(node: GraphNodeView, includePrompt: boolean | undefined): Omit<GraphNodeView, "prompt"> & { prompt?: string } {
+  const { prompt, ...summary } = node;
+  return includePrompt ? { ...summary, prompt } : summary;
+}
+
 function snapshot(graph: GraphView, args: GraphStatusArgs) {
   const run = args.run_id === undefined ? graph.current : graph.runs.find((item) => item.runId === args.run_id);
   if (args.run_id !== undefined && run === undefined) throw new Error(`Unknown run ${args.run_id}`);
@@ -73,11 +79,16 @@ function snapshot(graph: GraphView, args: GraphStatusArgs) {
   return {
     graph_id: graph.graphId, plan_revision: graph.planRevision,
     run_id: run?.runId, phase: run?.phase ?? graph.phase, updated_at: run?.updatedAt ?? graph.updatedAt,
-    nodes: nodes.map(({ nodeId, ...node }) => ({ node_id: nodeId, ...node })),
+    nodes: nodes.map((node) => {
+      const { nodeId, ...summary } = presentNode(node, args.include_prompt);
+      return { node_id: nodeId, ...summary };
+    }),
     attempts, control: run?.control, stop: run?.stop,
     approvals: run?.approvals ?? [], decisions: run?.decisions ?? [],
     budget: run?.budget, loops: run?.loops ?? [], unsettled_effects: run?.unsettledEffects ?? [],
-    runs: args.include_history ? graph.runs : graph.runs.map(({ runId, runSeq, phase }) => ({ runId, runSeq, phase })),
+    runs: args.include_history ? graph.runs.map((history) => ({
+      ...history, nodes: history.nodes.map((node) => presentNode(node, args.include_prompt)),
+    })) : graph.runs.map(({ runId, runSeq, phase }) => ({ runId, runSeq, phase })),
   };
 }
 
@@ -163,6 +174,7 @@ export function renderGraphQuery(query: GraphQueryResult, args: GraphStatusArgs,
         unsettled_effects: view.unsettled_effects.length ? view.unsettled_effects : undefined,
         ...(args.include_budget ? { budget: view.budget } : {}),
         ...(args.include_loops || args.include_progress ? { loops: view.loops } : {}),
+        ...(args.include_prompt ? { prompts: view.nodes.map(({ node_id, prompt }) => ({ node_id, prompt })) } : {}),
         ...(args.include_output || args.include_artifacts || args.include_evidence ? { attempts: view.attempts } : {}),
         ...(args.include_history ? { runs: view.runs, decisions: view.decisions } : {}),
       }, null, 2);

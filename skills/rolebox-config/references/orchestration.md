@@ -49,6 +49,11 @@ The effective interface declares a complete version-3 document through
 dedicated `graph_submit_outcome` entry point. Read actual tool schemas for the
 transport wrapper around the declaration and control commands.
 
+`graph_status` omits node prompt bodies by default, including in run history.
+Use `include_prompt: true` when you need the full node instructions. Text search
+still matches stored prompts when they are omitted from the result; this option
+does not change the declaration, worker delivery or audit records.
+
 There are no incremental `graph_create` / `graph_add_node` / `graph_add_edge`
 construction tools in this protocol. Signals do not settle graph-v3 nodes.
 `graph: { orchestration: graph_v2 }` in `role.yaml` is recognized legacy metadata

@@ -57,7 +57,7 @@ describe("GraphApplication registered tools", () => {
     app.host.confirmExecution(sent[1]!.effect, { executionId: "child-2" });
     expect((await call("graph_submit_outcome", { ...args, node_id: "review", credential: sent[1]!.request.credential }, "child-2")).decision).toBe("accepted");
     const query = queryGraphs(join(root, "store")).graphs[0]!;
-    const status = await call("graph_status", { graph_id: "app.chain", format: "json", include_history: true });
+    const status = await call("graph_status", { graph_id: "app.chain", format: "json", include_history: true, include_prompt: true });
     const audit = await call("graph_audit", {});
     expect(status.phase).toBe("complete");
     expect(status.runs).toEqual(query.runs);
@@ -99,6 +99,44 @@ describe("GraphApplication registered tools", () => {
     expect(limited.nodes.map((node: { node_id: string }) => node.node_id)).toEqual(["review"]);
     expect(limited.attempts.map((attempt: { nodeId: string }) => attempt.nodeId)).toEqual(["review"]);
     expect(() => render({ run_id: "missing" })).toThrow("Unknown run");
+  });
+
+  it("omits prompts from status and history while preserving prompt search, retrieval and dispatch", async () => {
+    const { root, sent, call } = setup();
+    const declaration = chain("prompt-receipt");
+    const prompt = "prompt-only-search-token " + "Detailed worker instruction. ".repeat(500);
+    declaration.nodes[0]!.prompt = prompt;
+    const declared = await call("graph_declare", { declaration });
+    expect(JSON.stringify(declared)).not.toContain(prompt);
+    expect(sent[0]!.request.prompt).toBe(prompt);
+
+    const args = { graph_id: declaration.name, format: "json", include_history: true, query: "prompt-only-search-token" };
+    const compact = await call("graph_status", args);
+    expect(compact.nodes).toHaveLength(1);
+    expect(compact.nodes[0]).toMatchObject({ node_id: "work", status: "dispatched" });
+    expect(compact.nodes[0]).not.toHaveProperty("prompt");
+    expect(compact.runs).toHaveLength(1);
+    for (const node of compact.runs[0].nodes) expect(node).not.toHaveProperty("prompt");
+    expect(JSON.stringify(compact)).not.toContain(prompt);
+
+    const detailed = await call("graph_status", { ...args, include_prompt: true });
+    expect(detailed.nodes[0].prompt).toBe(prompt);
+    expect(detailed.runs[0].nodes.find((node: { nodeId: string }) => node.nodeId === "work").prompt).toBe(prompt);
+    const stored = queryGraphs(join(root, "store")).graphs[0]!;
+    expect(stored.nodes.find((node) => node.nodeId === "work")!.prompt).toBe(prompt);
+    expect(stored.declaration.nodes.find((node) => node.id === "work")!.prompt).toBe(prompt);
+  });
+
+  it.each(["summary", "tree"] as const)("only includes prompts on request in %s status", async (format) => {
+    const { app, call } = setup();
+    const declaration = chain("prompt-format");
+    const prompt = "Full task instructions for this node";
+    declaration.nodes[0]!.prompt = prompt;
+    await call("graph_declare", { declaration });
+    const args = { graph_id: declaration.name, format };
+
+    expect(app.tools.graph_status({ ...args, include_history: true })).not.toContain(prompt);
+    expect(app.tools.graph_status({ ...args, include_prompt: true })).toContain(prompt);
   });
 
   it("persists host failure with effect settlement and recovers its observation without the original adapter", async () => {
