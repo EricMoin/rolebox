@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createSubLogger } from "../../../logger.ts";
-import type { ISessionClient } from "../../ports/session-client.ts";
+import type { ISessionClient, SessionActivity } from "../../ports/session-client.ts";
 import type { Message, SessionInfo, SessionStatus } from "../../types.ts";
 import { getSystem } from "../../system/index.ts";
 import { DshSessionAdapter, type DshSessionEventLike, type DshSessionLike, type DshSessionStoreLike } from "./session.ts";
@@ -330,13 +330,16 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     const role = this.options.resolveRole(descriptor.roleId);
     if (!role) throw new Error("DSH team role is no longer available");
     const agentOptions = requireAgentOptions(descriptor.roleId, role);
-    if (!this.leases.acquire(id)) throw new Error("DSH team session is owned by another running host");
-    const changed = !sameAgentOptions(descriptor.agentOptions, agentOptions);
     const resident = this.options.agents.get(id);
-    if (resident) {
-      if (this.options.roleOf && this.options.roleOf(id) !== descriptor.roleId) {
+    if (this.options.roleOf) {
+      const selected = this.options.roleOf(id);
+      if (selected !== descriptor.roleId && (resident || selected !== undefined)) {
         throw new Error("DSH team member's active role changed; restore its assigned role before resuming the team");
       }
+    }
+    if (!this.leases.acquire(id)) throw new Error("DSH team session is owned by another running host");
+    const changed = !sameAgentOptions(descriptor.agentOptions, agentOptions);
+    if (resident) {
       if (!changed) return resident;
       if (resident.status !== "idle") throw new Error("DSH team member must be idle before changing its model");
       if (!this.handles.has(id)) throw new Error("DSH team session handle is not owned by this adapter");
@@ -403,6 +406,32 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     else agent.followup(message);
     await this.flush(agent.session);
     return { id: message.id };
+  }
+
+  memberAuthorized(id: string, roleId: string): boolean {
+    if (this.stopped) return false;
+    const selected = this.options.roleOf?.(id);
+    if (this.options.roleOf && selected !== undefined) return selected === roleId;
+    if (this.options.roleOf && this.options.agents.get(id)) return false;
+    return this.descriptor(id)?.roleId === roleId;
+  }
+
+  async prepareResume(id: string, input: { agent: string }): Promise<boolean> {
+    if (this.stopped) return false;
+    if (this.forgetting.has(id)) throw new Error("DSH team session is being removed");
+    const descriptor = this.descriptor(id);
+    if (!descriptor) return false;
+    if (descriptor.roleId !== input.agent) throw new Error("DSH team member role changed");
+    if (this.leases.isOwnedElsewhere(id)) throw new Error("DSH team session is owned by another running host");
+    if (!this.memberAuthorized(id, input.agent)) {
+      throw new Error("DSH team member's active role changed; restore its assigned role before resuming the team");
+    }
+    if (!this.leases.acquire(id)) throw new Error("DSH team session is owned by another running host");
+    const resident = this.options.agents.get(id);
+    const agent = resident?.status === "running" ? resident : await this.live(id, input.agent);
+    if (!agent || resolve(sessionDirectory(agent.session) ?? "") !== this.directory) return false;
+    await this.flush(agent.session);
+    return true;
   }
 
   override async abort(id: string): Promise<boolean> {
@@ -482,19 +511,26 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
   }
 
   override async status(id: string): Promise<SessionStatus | null> {
-    if (this.descriptor(id) && this.leases.isOwnedElsewhere(id)) return { type: "busy" };
+    const activity = await this.observeActivity(id);
+    return activity === "unknown" ? null : { type: activity === "idle" ? "idle" : "busy" };
+  }
+
+  async observeActivity(id: string, directory?: string): Promise<SessionActivity> {
+    if (this.stopped || (directory !== undefined && resolve(directory) !== this.directory)) return "unknown";
+    const descriptor = this.descriptor(id);
+    if (descriptor && this.leases.isOwnedElsewhere(id)) return "running";
     const agent = this.options.agents.get(id);
-    if (agent) return { type: agent.status === "running" ? "busy" : "idle" };
+    if (agent) return agent.status === "running" ? "running" : "idle";
     // User conversations are only awakened after the host restores them.
-    if (!this.descriptor(id)) return null;
+    if (!descriptor) return "unknown";
     const events = await this.events(id);
-    if (!events) return null;
+    if (!events) return "unknown";
     let busy = false;
     for (const event of events) {
       if (event.type === "turn/start") busy = true;
       else if (event.type === "turn/end") busy = false;
     }
-    return { type: busy ? "busy" : "idle" };
+    return busy ? "interrupted" : "idle";
   }
 
   override async messages(id: string, input?: { directory?: string; limit?: number }): Promise<Message[]> {

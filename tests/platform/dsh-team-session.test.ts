@@ -23,7 +23,7 @@ function fixture() {
   const stored = new Map<string, DshSessionEventLike[]>();
   const sessions = new Map<string, DshSessionLike>();
   const agents = new Map<string, DshTeamAgent>();
-  const roles = new Map<string, string>();
+  const roles = new Map<string, string | null>();
   const pending = new Map<string, PendingPrompt[]>();
   const requestHooks = new Map<string, RequestHook[]>();
   const created: Array<Parameters<DshTeamAgents["create"]>[0]> = [];
@@ -323,6 +323,156 @@ describe("DSH team execution sessions", () => {
     expect(f.resumed).toHaveLength(1);
     expect((await restored.messages(id)).at(-1)?.info).toMatchObject({ role: "idle", finish: "interrupted" });
     expect(f.pending.get(id)).toEqual([]);
+  });
+
+  it("observes disconnected open turns without restoring or changing their history", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    expect(await first.observeActivity(id)).toBe("idle");
+    await first.prompt(id, { parts: [{ type: "text", text: "[rolebox-team initial]" }] });
+    expect(await first.observeActivity(id)).toBe("running");
+    f.sessions.get(id)!.append("turn/start", { turn: 1 });
+    await first.messages(id);
+    await first.dispose();
+    const restored = f.makeAdapter();
+    const saved = structuredClone(f.stored.get(id));
+
+    expect(await restored.observeActivity(id)).toBe("interrupted");
+    expect(await restored.status(id)).toEqual({ type: "busy" });
+    expect(await restored.observeActivity("unknown-session")).toBe("unknown");
+    expect(await restored.observeActivity(id, join(f.directory, "other"))).toBe("unknown");
+    expect(f.stored.get(id)).toEqual(saved);
+    expect(f.resumed).toEqual([]);
+    expect(f.agents.has(id)).toBe(false);
+  });
+
+  it("explicitly restores a disconnected peer in its existing session without replaying work", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    f.sessions.get(id)!.append("turn/start", { turn: 1 });
+    await first.messages(id);
+    await first.dispose();
+    f.roles.delete(id);
+    const restored = f.makeAdapter();
+
+    expect(restored.memberAuthorized(id, "designer")).toBe(true);
+    expect(restored.memberAuthorized(id, "developer")).toBe(false);
+    expect(await restored.prepareResume(id, { agent: "designer" })).toBe(true);
+    expect(f.resumed).toHaveLength(1);
+    expect(f.resumed[0].resumeSessionId).toBe(id);
+    expect(f.created).toHaveLength(1);
+    expect(f.roles.get(id)).toBe("designer");
+    expect(f.pending.get(id)).toEqual([]);
+    expect(await restored.observeActivity(id)).toBe("idle");
+    expect((await restored.messages(id)).at(-1)?.info.finish).toBe("interrupted");
+    expect(await restored.prepareResume("user-session", { agent: "designer" })).toBe(false);
+  });
+
+  it("preserves a running resident and user input during explicit resume preparation", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    const original = f.agents.get(id);
+    await adapter.prompt(id, { parts: [{ type: "text", text: "[rolebox-team running]" }] });
+    const userMessage = { id: "user-pending", role: "user", content: [{ type: "text", text: "Keep this input" }],
+      source: { kind: "user" } } satisfies PendingPrompt;
+    f.pending.get(id)!.push(userMessage);
+    const pending = [...f.pending.get(id)!];
+    f.setRoleOptions({ provider: "example-provider", model: "new-model" });
+
+    expect(await adapter.prepareResume(id, { agent: "designer" })).toBe(true);
+    expect(f.agents.get(id)).toBe(original);
+    expect(await adapter.observeActivity(id)).toBe("running");
+    expect(f.pending.get(id)).toEqual(pending);
+    expect(f.resumed).toEqual([]);
+    expect(await f.requestOptions(id)).toMatchObject({ model: "design-model" });
+  });
+
+  it("does not restore peers owned by another live host", async () => {
+    const f = fixture(); const owner = f.makeAdapter(); const observer = f.makeAdapter();
+    const id = (await owner.create({ directory: f.directory, agent: "designer" }))!.id;
+    expect(await observer.observeActivity(id)).toBe("running");
+    await expect(observer.prepareResume(id, { agent: "designer" })).rejects.toThrow("another running host");
+    expect(f.resumed).toEqual([]);
+    expect(await owner.observeActivity(id)).toBe("idle");
+  });
+
+  it("recognizes a remote-owned peer's role without acquiring its session", async () => {
+    const f = fixture(); const owner = f.makeAdapter();
+    const id = (await owner.create({ directory: f.directory, agent: "designer" }))!.id;
+    const observer = new DshTeamSessionAdapter({
+      directory: f.directory, sessions: f.store, agents: { ...f.registry, get: () => undefined },
+      bindRole() { throw new Error("Observer must not bind a remote peer"); },
+      roleOf: () => undefined,
+      resolveRole: () => ({ agentOptions: { provider: "example-provider", model: "design-model" } }),
+      readExecutionEvents: async sessionId => f.stored.get(sessionId),
+    });
+    cleanups.push(() => observer.dispose());
+
+    expect(observer.memberAuthorized(id, "designer")).toBe(true);
+    expect(observer.memberAuthorized(id, "developer")).toBe(false);
+    expect(await observer.observeActivity(id)).toBe("running");
+    await expect(observer.prepareResume(id, { agent: "designer" })).rejects.toThrow("another running host");
+    expect(await observer.abort(id)).toBe(false);
+    expect(f.resumed).toEqual([]);
+    expect(await owner.observeActivity(id)).toBe("idle");
+  });
+
+  it("preserves explicit role changes on cold peers and missing bindings on resident peers", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    f.roles.delete(id);
+    expect(first.memberAuthorized(id, "designer")).toBe(false);
+    await expect(first.prepareResume(id, { agent: "designer" })).rejects.toThrow("active role changed");
+    await first.dispose();
+    const restored = f.makeAdapter();
+    for (const selected of ["developer", null]) {
+      f.roles.set(id, selected);
+      expect(restored.memberAuthorized(id, "designer")).toBe(false);
+      await expect(restored.prepareResume(id, { agent: "designer" })).rejects.toThrow("active role changed");
+      await expect(restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team retry]" }] }))
+        .rejects.toThrow("active role changed");
+      expect(f.roles.get(id)).toBe(selected);
+    }
+    expect(f.resumed).toEqual([]);
+  });
+
+  it("resumes a disconnected team member with no delivery through its existing session", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const creator = { sessionID: "owner", agent: "developer" };
+    const roles = ["developer", "designer"].map(id => ({ id, config: { name: id } })) as ResolvedRole[];
+    const makeRuntime = (session: DshTeamSessionAdapter) => {
+      const runtime = new TeamRuntime({ directory: f.directory, platformId: "dsh", session, roles: () => roles,
+        canPollStatus: true, memberAuthorized: member => !member.sessionId || session.memberAuthorized(member.sessionId, member.roleId) });
+      cleanups.push(() => runtime.dispose());
+      return runtime;
+    };
+    const origin = makeRuntime(first);
+    const team = origin.create(creator, "Build", "Prepare the design");
+    const member = origin.add(creator, team.id, "designer");
+    origin.send(creator, team.id, { kind: "message", content: "Prepare the first design" });
+    await origin.tick();
+    const id = origin.status(creator, team.id).members.find(item => item.id === member.id)!.sessionId!;
+    f.complete(id, "error");
+    await origin.tick();
+    expect(origin.status(creator, team.id).members.find(item => item.id === member.id)?.delivery).toBeUndefined();
+    f.sessions.get(id)!.append("turn/start", { turn: 2 });
+    await first.messages(id);
+    await origin.dispose();
+    await first.dispose();
+    f.roles.delete(id);
+
+    const session = f.makeAdapter();
+    const restored = makeRuntime(session);
+    expect(await session.observeActivity(id)).toBe("interrupted");
+    await restored.resume(creator, team.id);
+    await restored.tick();
+
+    expect(f.resumed).toHaveLength(1);
+    expect(f.resumed[0].resumeSessionId).toBe(id);
+    expect(f.created).toHaveLength(1);
+    expect(restored.status(creator, team.id).status).toBe("active");
+    expect(restored.status(creator, team.id).members.find(item => item.id === member.id)?.sessionId).toBe(id);
+    expect(f.pending.get(id)).toHaveLength(1);
   });
 
   it("does not acknowledge unconfirmed cancellation or durability", async () => {

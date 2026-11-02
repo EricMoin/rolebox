@@ -52,7 +52,7 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(args, context) { const runtime = resolve(context); await runtime.delete(context, args.team_id); return "Team closed"; },
     }),
     team_resume: defineTool({
-      description: "Creator only: resume a paused team after inspecting errors and existing artifacts. Unacknowledged events may be replayed. Does not reset the turn budget.",
+      description: "Any active team member can resume a paused team after inspecting errors and existing artifacts. Restore disconnected members in their original sessions and preserve running turns, including the caller's current turn. Unacknowledged events may be replayed; inspect prior work before repeating effects. Does not reset the completed-turn budget.",
       args: { team_id: teamId },
       async execute(args, context) {
         const runtime = resolve(context);

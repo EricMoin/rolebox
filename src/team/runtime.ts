@@ -12,7 +12,6 @@ export const TEAM_MARKER = "[rolebox-team ";
 const MAX_EVENTS = 5000;
 const MAX_MEMBERS = 8;
 const LEASE_MS = 30 * 60_000;
-const TURN_TIMEOUT_MS = 15 * 60_000;
 const runtimes = new Set<string>();
 const log = createSubLogger("team");
 
@@ -157,7 +156,8 @@ export class TeamRuntime {
   private beginControl(actor: Actor, id: string, resume = false): string {
     return this.store.update(id, state => {
       this.assertPlatform(state);
-      ownerOf(state, actor);
+      if (resume) memberOf(state, actor);
+      else ownerOf(state, actor);
       if (state.status === "deleted") throw new Error("Team is deleted");
       if (resume && state.status !== "paused") throw new Error("Only a paused team can resume");
       const control = state.control;
@@ -318,7 +318,7 @@ export class TeamRuntime {
           }
         }
         append(current, { type: "member_left", sender: memberId, content: `${target.roleId} left`, wake: false });
-        // Membership cancellation leaves the team paused until its creator resumes it.
+        // Membership cancellation leaves the team paused until an active member resumes it.
       });
       await this.forgetMember(this.store.read(id).members.find(m => m.id === memberId));
     } finally {
@@ -362,10 +362,23 @@ export class TeamRuntime {
 
   async resume(actor: Actor, id: string): Promise<string[]> {
     const before = this.status(actor, id);
-    ownerOf(before, actor);
     if (before.status !== "paused") throw new Error("Only a paused team can resume");
     const token = this.beginControl(actor, id, true);
     try {
+      for (const member of this.store.read(id).members) {
+        if (member.status !== "active" || !member.managed || !member.sessionId) continue;
+        if (this.options.memberAuthorized && !this.options.memberAuthorized(member)) {
+          throw new Error("Member session is no longer the assigned role; restore its assigned role before resuming the team");
+        }
+        if (!member.error && await this.options.session.observeActivity?.(member.sessionId, this.options.directory) === "running") continue;
+        if (this.options.session.prepareResume &&
+          !await this.options.session.prepareResume(member.sessionId, { agent: member.roleId })) {
+          throw new Error("Host could not restore the member session; team remains paused");
+        }
+        if (this.options.memberAuthorized && !this.options.memberAuthorized(member)) {
+          throw new Error("Member session is no longer the assigned role; restore its assigned role before resuming the team");
+        }
+      }
       // Every managed member is reconciled, not only members holding a
       // delivery: a peer whose turn failed clears its delivery but keeps its
       // cursor, and its host turn may have finished after the pause.
@@ -374,40 +387,48 @@ export class TeamRuntime {
         if (!member.managed && !member.delivery) continue;
         await this.reconcile(id, member.id);
       }
+      const continuing = new Set<string>();
       for (const member of this.store.read(id).members) {
         if (member.delivery) {
+          if (member.managed && member.sessionId === actor.sessionID) {
+            if (!member.delivery.promptId) {
+              throw new Error("The caller's delivery is unconfirmed; another team member must reconcile it after this turn ends");
+            }
+            continuing.add(member.delivery.id);
+            continue;
+          }
+          if (!member.error && member.delivery.promptId && member.sessionId &&
+            await this.options.session.observeActivity?.(member.sessionId, this.options.directory) === "running") {
+            continuing.add(member.delivery.id);
+            continue;
+          }
           if (!member.managed && member.sessionId === actor.sessionID) {
-            this.store.update(id, state => {
-              const current = state.members.find(m => m.id === member.id)!;
-              if (current.delivery?.id === member.delivery?.id) delete current.delivery;
-            });
+            this.discardDelivery(id, member);
             continue;
           }
           if (!member.sessionId && abandoned(member.delivery)) {
-            this.store.update(id, state => {
-              const current = state.members.find(m => m.id === member.id)!;
-              if (current.delivery?.id === member.delivery?.id) delete current.delivery;
-            });
+            this.discardDelivery(id, member);
             continue;
           }
           if (!member.managed || !member.sessionId || !await this.options.session.abort(member.sessionId)) {
             throw new Error("Host has not confirmed the interrupted delivery stopped; team remains paused");
           }
-          this.store.update(id, state => {
-            const current = state.members.find(m => m.id === member.id)!;
-            if (current.delivery?.id === member.delivery?.id) delete current.delivery;
-          });
+          this.discardDelivery(id, member);
           this.statuses.set(member.sessionId, "idle");
         }
       }
       const unresolved: string[] = [];
       this.store.update(id, state => {
         this.assertPlatform(state);
-        ownerOf(state, actor);
+        memberOf(state, actor);
         if (state.status === "deleted") throw new Error("Deleted teams cannot resume");
-        if (state.turns >= state.maxTurns) throw new Error("Team turn budget exhausted; create a new team");
+        if (state.turns >= state.maxTurns && continuing.size === 0) throw new Error("Team turn budget exhausted; create a new team");
         for (const member of state.members) {
-          if (member.delivery) throw new Error("A delivery still needs reconciliation; wait for its host turn to end");
+          if (member.status === "active" && (member.managed || member.delivery) &&
+            this.options.memberAuthorized && !this.options.memberAuthorized(member)) {
+            throw new Error("Member session is no longer the assigned role; restore its assigned role before resuming the team");
+          }
+          if (member.delivery && !continuing.has(member.delivery.id)) throw new Error("A delivery still needs reconciliation; wait for its host turn to end");
           if (member.error) unresolved.push(`${member.roleId}: ${member.error}`);
           delete member.error;
         }
@@ -416,6 +437,19 @@ export class TeamRuntime {
       });
       return unresolved;
     } finally { this.endControl(id, token); }
+  }
+
+  private discardDelivery(id: string, member: TeamMember): void {
+    const delivery = member.delivery;
+    if (!delivery) return;
+    const discarded = this.store.update(id, state => {
+      const current = state.members.find(m => m.id === member.id)!;
+      if (current.delivery?.id !== delivery.id) return false;
+      delete current.delivery;
+      if (state.turns > 0) state.turns--;
+      return true;
+    });
+    if (discarded && member.sessionId) this.store.releaseSession(this.sessionKey(member.sessionId), delivery.id);
   }
 
   /**
@@ -485,15 +519,21 @@ export class TeamRuntime {
   private fail(id: string, memberId: string, reason: string, clearDelivery = false): void {
     // A member being removed on purpose is not a member that failed.
     if (this.removing.has(memberId)) return;
-    this.store.update(id, state => {
+    const released = this.store.update(id, state => {
       const member = state.members.find(m => m.id === memberId)!;
       if (state.status === "deleted" || member.status !== "active") return;
-      if (member.error === reason) return;
+      if (member.error === reason && !(clearDelivery && member.delivery)) return;
       member.error = reason;
-      if (clearDelivery || !member.sessionId) delete member.delivery;
+      const delivery = clearDelivery || !member.sessionId ? member.delivery : undefined;
+      if (delivery) {
+        delete member.delivery;
+        if (state.turns > 0) state.turns--;
+      }
       state.status = "paused";
       append(state, { type: "member_failed", sender: member.id, content: reason, wake: false });
+      return delivery && member.sessionId ? { sessionId: member.sessionId, deliveryId: delivery.id } : undefined;
     });
+    if (released) this.store.releaseSession(this.sessionKey(released.sessionId), released.deliveryId);
   }
 
   private async pump(): Promise<void> {
@@ -530,6 +570,9 @@ export class TeamRuntime {
   }
 
   private async idle(sessionId: string): Promise<boolean> {
+    if (this.options.session.observeActivity) {
+      return await this.options.session.observeActivity(sessionId, this.options.directory) === "idle";
+    }
     if (this.options.canPollStatus) {
       const status = await this.options.session.status(sessionId, this.options.directory);
       if (status) { this.statuses.set(sessionId, status.type); return status.type === "idle"; }
@@ -558,10 +601,11 @@ export class TeamRuntime {
       if (member.delivery && abandoned(member.delivery)) this.fail(id, memberId, "Interrupted before session binding; resume to retry", true);
       return;
     }
-    const isIdle = await this.idle(member.sessionId);
-    const interrupted = member.delivery && abandoned(member.delivery);
-    const timedOut = member.delivery && Date.now() - member.delivery.startedAt > TURN_TIMEOUT_MS;
-    if (!isIdle && !interrupted && !timedOut) return;
+    const activity = await this.options.session.observeActivity?.(member.sessionId, this.options.directory);
+    if (activity === "running") return;
+    const isIdle = activity === undefined ? await this.idle(member.sessionId) : activity === "idle";
+    const interrupted = activity === "interrupted" || (member.delivery && abandoned(member.delivery));
+    if (!isIdle && !interrupted) return;
     const messages = await this.options.session.messages(member.sessionId, { directory: this.options.directory });
     const last = finalMessage(messages);
     const markerIndex = member.delivery ? messages.findIndex(message => message.parts.some(part =>
@@ -619,9 +663,6 @@ export class TeamRuntime {
       if (member.delivery && !this.store.read(id).members.find(m => m.id === memberId)?.delivery) {
         this.store.releaseSession(this.sessionKey(member.sessionId), member.delivery.id);
       }
-    } else if (timedOut) {
-      const stopped = member.managed && await this.options.session.abort(member.sessionId);
-      this.fail(id, memberId, "Team turn exceeded its 15 minute execution limit", Boolean(stopped));
     } else if (interrupted && !member.error) {
       // The host cannot prove completion. Keep the cursor unchanged and require explicit resumption.
       this.fail(id, memberId, "Interrupted delivery has no confirmed final turn; inspect session history, then team_resume to replay pending events");
@@ -642,7 +683,13 @@ export class TeamRuntime {
       const target = current.members.find(m => m.id === memberId)!;
       if (current.status !== "active" || target.status !== "active" || target.delivery || target.cursor !== member.cursor) return false;
       if (current.members.filter(m => m.delivery).length >= 2) return false;
-      if (current.turns >= current.maxTurns) { current.status = "paused"; target.error = "Team turn budget exhausted"; return false; }
+      if (current.turns >= current.maxTurns) {
+        if (!current.members.some(m => m.delivery)) {
+          current.status = "paused";
+          target.error = "Team turn budget exhausted";
+        }
+        return false;
+      }
       current.turns++;
       target.delivery = { id: deliveryId, throughSeq: pending.at(-1)!.seq, startedAt: Date.now(),
         ownerPid: process.pid, ownerId: this.ownerId, baselineMessageIds: baseline.map(m => m.info.id) };

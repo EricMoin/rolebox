@@ -16,6 +16,8 @@ import type {
   SessionStatus,
 } from "../types.ts";
 
+export type SessionActivity = "running" | "idle" | "interrupted" | "unknown";
+
 export interface ISessionClient {
   /** List sessions, optionally filtered by directory. */
   list(directory?: string): Promise<SessionInfo[]>;
@@ -49,6 +51,12 @@ export interface ISessionClient {
 
   /** Get session status (idle, busy, retry). */
   status(id: string, directory?: string): Promise<SessionStatus | null>;
+
+  /** Observe live execution separately from an unfinished persisted turn, without restoring a session. */
+  observeActivity?(id: string, directory?: string): Promise<SessionActivity>;
+
+  /** Restore a managed peer's existing session for an explicit team resume, without prompting it. */
+  prepareResume?(id: string, options: { agent: string }): Promise<boolean>;
 
   /**
    * Prompt a session asynchronously (fire-and-forget).

@@ -235,7 +235,7 @@ describe("DSH team adapter with the installed agent host", () => {
     expect([...restored.agent.inbox.nextTurn, ...restored.agent.inbox.nextStep].map(message => message.id)).toEqual(["user-pending"]);
   });
 
-  it("cold-reads a crash snapshot without waking it and replaces only stale team inbox messages on resume", async () => {
+  it("prepares a cold session without waking it and preserves user input before replaying team events", async () => {
     const f = await fixture();
     const first = f.adapter();
     const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
@@ -253,6 +253,12 @@ describe("DSH team adapter with the installed agent host", () => {
     expect(await restored.messages(id)).toEqual([]);
     expect(f.ctx.agents.get(id as never)).toBeUndefined();
     expect(f.published).toEqual([id]);
+
+    expect(await restored.prepareResume(id, { agent: "designer" })).toBe(true);
+    const peer = f.ctx.agents.get(id as never)!;
+    expect(peer.status).toBe("idle");
+    expect([...peer.inbox.nextTurn, ...peer.inbox.nextStep].map(message => message.id)).toEqual(["user-pending"]);
+    expect(await restored.messages(id)).toEqual([]);
 
     const replacement = "[rolebox-team replacement-delivery]\nNew authorized team work";
     await restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: replacement }] });

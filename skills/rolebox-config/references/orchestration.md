@@ -172,6 +172,32 @@ members and two in-flight deliveries. Failure pauses the team; resume preserves
 the consumed turn budget. The turn cap does not measure tokens or money. Team
 execution on OpenCode, Pi and Codex is not implemented by this integration.
 
+Team turns have no elapsed-time execution limit: a role may work for longer
+than 15 minutes. The scheduler checks live host activity and session ownership;
+it does not require model-generated heartbeat messages or cancel a quiet,
+long-running task. A live agent or another live host's session lease keeps an
+execution protected. An unfinished persisted turn without a live owner is
+interrupted, not evidence that the role is still working. Unknown activity is
+not treated as idle or successful completion.
+
+After inspecting errors and existing work, any active member can use `team_resume`
+to restore disconnected members in their original sessions, including members
+whose failed delivery was already cleared. Restoration retains history, role,
+task state and user input. The caller's confirmed current delivery and other
+confirmed running deliveries continue; only stopped or ambiguous deliveries
+need reconciliation or confirmed cancellation before
+pending events are replayed. A failed or discarded delivery releases its turn
+reservation, but completed turns remain charged and resume does not reset the
+budget. Exhausting the budget prevents new deliveries while already authorized
+turns can finish and publish results. Explicit role changes, unavailable models
+and another live host's ownership still prevent taking over a member. Session setup, event delivery and
+cancellation acknowledgements retain their bounded waits; these are not limits
+on how long a role may execute. Restart DSH with the updated build to load this
+behavior; no timeout setting or heartbeat configuration is required.
+Adding/removing members and deleting a team remain creator-only operations.
+Task claim leases remain 30 minutes and can be renewed; an in-flight delivery
+protects its member's claims from expiry. This is separate from session liveness.
+
 Removing a member or deleting a team releases its team session descriptor and
 lease. Peers created or resumed by rolebox are disposed. When DSH has restored a
 peer itself, the host keeps that session and pending user input; rolebox clears

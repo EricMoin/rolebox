@@ -32,6 +32,7 @@ function setup(memberProblem?: (roleId: string) => string | undefined,
   const messages = new Map<string, Message[]>();
   const statuses = new Map<string, SessionStatus>([["owner", { type: "busy" }]]);
   const prompts: Array<{ id: string; text: string }> = [];
+  const abortedSessions: string[] = [];
   const attached: string[] = [];
   let attachFailure: string | undefined;
   let nextSession = 0;
@@ -53,7 +54,7 @@ function setup(memberProblem?: (roleId: string) => string | undefined,
     },
     async status(id: string) { return statuses.get(id) ?? null; },
     async messages(id: string) { return messages.get(id) ?? []; },
-    async abort(id: string) { await onAbort?.(id); if (aborted) statuses.set(id, { type: "idle" }); return aborted; },
+    async abort(id: string) { abortedSessions.push(id); await onAbort?.(id); if (aborted) statuses.set(id, { type: "idle" }); return aborted; },
     async attachWorkspace(id: string) { attached.push(id); if (attachFailure === id) throw new Error("Workspace registry unavailable"); },
   } as unknown as ISessionClient;
   function make(platformId = "opencode") {
@@ -84,13 +85,360 @@ function setup(memberProblem?: (roleId: string) => string | undefined,
       { info: { id: messageId, sessionID: id, role: "idle", finish: "failed", error: { message: reason, code: "MODEL_ERROR" },
         time: { created: 1, completed: 2 } }, parts: [] }]);
   }
-  return { runtime, team, make, finish, fail, wake, wakePeer, prompts, messages, statuses, directory, attached,
+  return { runtime, team, make, finish, fail, wake, wakePeer, prompts, messages, statuses, directory, attached, session, abortedSessions,
     accept(value: boolean) { accept = value; }, abort(value: boolean) { aborted = value; },
     failAttach(id: string) { attachFailure = id; },
     onAbort(hook: (id: string) => void | Promise<void>) { onAbort = hook; } };
 }
 
 describe("durable team runtime", () => {
+  it("keeps a live member running beyond fifteen minutes without cancelling or replaying it", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    const store = new TeamStore(join(f.directory, ".rolebox", "team"));
+    store.update(f.team.id, state => { state.members[1].delivery!.startedAt = Date.now() - 2 * 60 * 60_000; });
+    store.close();
+    const delivery = f.runtime.status(owner, f.team.id).members[1].delivery;
+
+    await f.runtime.tick();
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.members[1]).toMatchObject({ cursor: 0, delivery });
+    expect(state.members[1].error).toBeUndefined();
+    expect(state.turns).toBe(1);
+    expect(f.abortedSessions).toEqual([]);
+    expect(f.prompts).toHaveLength(1);
+  });
+
+  it("keeps a confirmed live delivery after the scheduling runtime is replaced", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    const delivery = f.runtime.status(owner, f.team.id).members[1].delivery;
+    await f.runtime.dispose();
+    const recovered = f.make();
+
+    await recovered.tick();
+
+    const state = recovered.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.members[1].delivery).toEqual(delivery);
+    expect(state.members[1].error).toBeUndefined();
+    expect(f.abortedSessions).toEqual([]);
+    expect(f.prompts).toHaveLength(1);
+  });
+
+  it("resumes a failed member while preserving a healthy sibling's in-flight work", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    f.runtime.add(owner, f.team.id, "designer");
+    f.runtime.add(owner, f.team.id, "reviewer");
+    await f.wakePeer();
+    const healthyDelivery = f.runtime.status(owner, f.team.id).members[2].delivery;
+    f.fail("peer-1", "provider temporarily unavailable");
+    await f.runtime.tick();
+    expect(f.runtime.status(owner, f.team.id).status).toBe("paused");
+
+    await f.runtime.resume(owner, f.team.id);
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.members[2]).toMatchObject({ delivery: healthyDelivery, cursor: 0 });
+    expect(f.abortedSessions).toEqual([]);
+    expect(f.prompts.map(prompt => prompt.id)).toEqual(["peer-1", "peer-2", "peer-1"]);
+    expect(state.turns).toBe(2);
+  });
+
+  it("refuses to resume a live peer whose assigned role changed while the team was paused", async () => {
+    let reviewerAuthorized = true;
+    const f = setup(undefined, member => member.roleId !== "reviewer" || reviewerAuthorized);
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    f.runtime.add(owner, f.team.id, "designer");
+    f.runtime.add(owner, f.team.id, "reviewer");
+    await f.wakePeer();
+    f.fail("peer-1", "provider temporarily unavailable");
+    await f.runtime.tick();
+    reviewerAuthorized = false;
+
+    await expect(f.runtime.resume(owner, f.team.id)).rejects.toThrow("assigned role");
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("paused");
+    expect(state.members[2].delivery).toBeDefined();
+    expect(state.members[2].cursor).toBe(0);
+    expect(f.abortedSessions).toEqual([]);
+  });
+
+  it.each(["unavailable", "error"])("keeps failed work paused when restoring its session returns %s", async mode => {
+    const f = setup();
+    f.session.prepareResume = async () => {
+      if (mode === "error") throw new Error("host session restore failed");
+      return false;
+    };
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.fail("peer-1", "provider temporarily unavailable");
+    await f.runtime.tick();
+    const before = f.runtime.status(owner, f.team.id);
+
+    await expect(f.runtime.resume(owner, f.team.id)).rejects.toThrow(mode === "error" ? "host session restore failed" : "could not restore");
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("paused");
+    expect(state.members[1]).toEqual(before.members[1]);
+    expect(state.turns).toBe(before.turns);
+    expect(state.control).toBeUndefined();
+    expect(state.events.some(event => event.type === "team_resumed")).toBe(false);
+    expect(f.prompts).toHaveLength(1);
+    expect(f.abortedSessions).toEqual([]);
+  });
+
+  it("allows an active peer to resume while preserving its own running delivery", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    f.runtime.add(owner, f.team.id, "designer");
+    f.runtime.add(owner, f.team.id, "reviewer");
+    await f.wakePeer();
+    const caller = { sessionID: "peer-2", agent: "reviewer" };
+    const delivery = f.runtime.status(owner, f.team.id).members[2].delivery;
+    f.fail("peer-1", "provider temporarily unavailable");
+    await f.runtime.tick();
+
+    await f.runtime.resume(caller, f.team.id);
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.members[2].delivery).toEqual(delivery);
+    expect(state.events.findLast(event => event.type === "team_resumed")?.sender).toBe(state.members[2].id);
+    expect(f.abortedSessions).toEqual([]);
+    expect(f.prompts.map(prompt => prompt.id)).toEqual(["peer-1", "peer-2", "peer-1"]);
+    expect(() => f.runtime.add(caller, f.team.id, "developer")).toThrow("creator");
+    await expect(f.runtime.remove(caller, f.team.id, state.members[1].id)).rejects.toThrow("creator");
+    await expect(f.runtime.delete(caller, f.team.id)).rejects.toThrow("creator");
+  });
+
+  it("lets a peer continue its confirmed delivery after an old error without resetting an exhausted budget", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    const store = new TeamStore(join(f.directory, ".rolebox", "team"));
+    store.update(f.team.id, state => {
+      state.status = "paused";
+      state.maxTurns = 1;
+      state.members[1].error = "Previous execution timeout";
+    });
+    store.close();
+    const delivery = f.runtime.status(owner, f.team.id).members[1].delivery!;
+
+    await f.runtime.resume({ sessionID: "peer-1", agent: "designer" }, f.team.id);
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.turns).toBe(1);
+    expect(state.members[1].delivery).toEqual(delivery);
+    expect(state.members[1].error).toBeUndefined();
+    expect(state.members[1].cursor).toBe(0);
+    expect(f.abortedSessions).toEqual([]);
+    expect(f.prompts).toHaveLength(1);
+    f.finish("peer-1", "continued-final");
+    await f.runtime.tick();
+    expect(f.runtime.status(owner, f.team.id).members[1].cursor).toBe(delivery.throughSeq);
+    expect(f.runtime.status(owner, f.team.id).turns).toBe(1);
+  });
+
+  it("permits already authorized sibling work to finish when removal exhausted the dispatch budget", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    const removed = f.runtime.add(owner, f.team.id, "designer");
+    f.runtime.add(owner, f.team.id, "reviewer");
+    await f.wakePeer();
+    const store = new TeamStore(join(f.directory, ".rolebox", "team"));
+    store.update(f.team.id, state => { state.maxTurns = 2; });
+    store.close();
+    const delivery = f.runtime.status(owner, f.team.id).members[2].delivery;
+    await f.runtime.remove(owner, f.team.id, removed.id);
+
+    await f.runtime.resume(owner, f.team.id);
+    f.runtime.send({ sessionID: "peer-2", agent: "reviewer" }, f.team.id,
+      { kind: "message", content: "Review is still running", recipient: "developer" });
+    f.statuses.set("owner", { type: "idle" });
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.turns).toBe(2);
+    expect(state.members[2].delivery).toEqual(delivery);
+    expect(f.abortedSessions).toEqual(["peer-1"]);
+    expect(f.prompts).toHaveLength(2);
+    f.finish("peer-2");
+    await f.runtime.tick();
+    await f.runtime.tick();
+    expect(f.runtime.status(owner, f.team.id).status).toBe("paused");
+    expect(f.prompts).toHaveLength(2);
+  });
+
+  it("rechecks role authority after awaiting session restoration", async () => {
+    let authorized = true;
+    const f = setup(undefined, () => authorized);
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.fail("peer-1", "provider temporarily unavailable");
+    await f.runtime.tick();
+    f.session.prepareResume = async () => {
+      await Promise.resolve();
+      authorized = false;
+      return true;
+    };
+
+    await expect(f.runtime.resume(owner, f.team.id)).rejects.toThrow("assigned role");
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("paused");
+    expect(state.members[1].cursor).toBe(0);
+    expect(state.events.some(event => event.type === "team_resumed")).toBe(false);
+    expect(f.abortedSessions).toEqual([]);
+  });
+
+  it("refuses an ambiguous caller delivery without cancelling the tool's own running turn", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    f.runtime.add(owner, f.team.id, "designer");
+    f.accept(false);
+    await f.wakePeer();
+    f.statuses.set("peer-1", { type: "busy" });
+    const before = f.runtime.status(owner, f.team.id).members[1];
+
+    await expect(f.runtime.resume({ sessionID: "peer-1", agent: "designer" }, f.team.id)).rejects.toThrow();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("paused");
+    expect(state.members[1].delivery).toEqual(before.delivery);
+    expect(state.members[1].cursor).toBe(0);
+    expect(f.abortedSessions).toEqual([]);
+    expect(f.prompts).toHaveLength(1);
+  });
+
+  it("refuses resume from nonmembers, mismatched roles and removed members", async () => {
+    const f = setup();
+    const peer = f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    await f.runtime.remove(owner, f.team.id, peer.id);
+    for (const actor of [
+      { sessionID: "unrelated-session", agent: "designer" },
+      { sessionID: "owner", agent: "designer" },
+      { sessionID: "peer-1", agent: "designer" },
+    ]) {
+      await expect(f.runtime.resume(actor, f.team.id)).rejects.toThrow("active member");
+    }
+    expect(f.runtime.status(owner, f.team.id).status).toBe("paused");
+  });
+
+  it("restores an interrupted member without a delivery and delivers pending events in its existing session", async () => {
+    const f = setup();
+    let disconnected = false;
+    const restored: Array<{ id: string; agent: string }> = [];
+    f.session.observeActivity = async id => id === "peer-1" && disconnected
+      ? "interrupted" : f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async (id, options) => {
+      restored.push({ id, agent: options.agent });
+      disconnected = false;
+      f.statuses.set(id, { type: "idle" });
+      return true;
+    };
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.finish("peer-1");
+    await f.runtime.tick();
+    const before = f.runtime.status(owner, f.team.id).members[1];
+    expect(before.delivery).toBeUndefined();
+    f.wake("Continue from the existing design artifact");
+    disconnected = true;
+    f.statuses.set("peer-1", { type: "busy" });
+    await f.runtime.tick();
+    expect(f.runtime.status(owner, f.team.id).status).toBe("paused");
+
+    await f.runtime.resume(owner, f.team.id);
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(restored).toEqual([{ id: "peer-1", agent: "designer" }]);
+    expect(state.status).toBe("active");
+    expect(state.members[1]).toMatchObject({ sessionId: "peer-1", lastTurnId: before.lastTurnId, cursor: before.cursor });
+    expect(state.members[1].delivery).toBeDefined();
+    expect(f.prompts.map(prompt => prompt.id)).toEqual(["peer-1", "peer-1"]);
+    expect(f.prompts[1].text).toContain("Continue from the existing design artifact");
+    expect(f.abortedSessions).toEqual([]);
+  });
+
+  it("does not treat unknown activity as confirmed idle when another delivery is pending", async () => {
+    const f = setup();
+    let unknown = false;
+    f.session.observeActivity = async id => id === "peer-1" && unknown
+      ? "unknown" : f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.finish("peer-1");
+    await f.runtime.tick();
+    const before = f.runtime.status(owner, f.team.id).members[1];
+    f.wake("Pending review");
+    unknown = true;
+
+    await f.runtime.tick();
+
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.members[1].cursor).toBe(before.cursor);
+    expect(state.members[1].delivery).toBeUndefined();
+    expect(f.prompts).toHaveLength(1);
+    expect(f.abortedSessions).toEqual([]);
+  });
+
+  it("refunds a confirmed failed delivery so a one-turn team can recover without resetting completed work", async () => {
+    const f = setup();
+    f.session.observeActivity = async id => f.statuses.get(id)?.type === "busy" ? "running" : "idle";
+    f.session.prepareResume = async () => true;
+    f.runtime.add(owner, f.team.id, "designer");
+    const store = new TeamStore(join(f.directory, ".rolebox", "team"));
+    store.update(f.team.id, state => { state.maxTurns = 1; });
+    store.close();
+    await f.wakePeer();
+    expect(f.runtime.status(owner, f.team.id).turns).toBe(1);
+    f.statuses.set("peer-1", { type: "idle" });
+
+    await f.runtime.handleEvent({ type: "session.error", rawType: "session.error", properties: { sessionID: "peer-1" } });
+    const failed = f.runtime.status(owner, f.team.id);
+    expect(failed.status).toBe("paused");
+    expect(failed.turns).toBe(0);
+    expect(failed.members[1].delivery).toBeUndefined();
+    expect(failed.members[1].cursor).toBe(0);
+    await f.runtime.resume(owner, f.team.id);
+    await f.runtime.tick();
+    expect(f.prompts.map(prompt => prompt.id)).toEqual(["peer-1", "peer-1"]);
+    expect(f.runtime.status(owner, f.team.id).turns).toBe(1);
+
+    f.finish("peer-1", "successful-retry");
+    await f.runtime.tick();
+    f.wake("Another task after the completed turn");
+    await f.runtime.tick();
+    await expect(f.runtime.resume(owner, f.team.id)).rejects.toThrow("budget exhausted");
+    expect(f.runtime.status(owner, f.team.id).turns).toBe(1);
+    expect(f.prompts).toHaveLength(2);
+  });
+
   it("settles a durable final before applying an expired delivery timeout after restart", async () => {
     const f = setup();
     f.runtime.add(owner, f.team.id, "designer");

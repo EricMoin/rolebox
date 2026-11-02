@@ -1970,7 +1970,7 @@ export async function apply(
           // the peer's skills would be missing from the shared catalog.
           refreshSkillCatalog();
         },
-        roleOf: sessionId => activeRole.get(sessionId),
+        roleOf: sessionId => activeRole.has(sessionId) ? activeRole.get(sessionId) : undefined,
         resolveRole: roleId => resolveTeamRole(roleId),
         readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, sessionPersistence, id),
         // A peer is created through the agent factory, which skips the gateway
@@ -2010,9 +2010,9 @@ export async function apply(
         roles: () => resolvedRoles, canPollStatus: true, memberProblem,
         // A session switched to another role must not keep acting for its team
         // member; the reconciler pauses the team instead of recording its turns.
-        // The role holder is the binding the session switcher maintains, so this
-        // check costs one map lookup per pump tick instead of re-reading events.
-        memberAuthorized: member => !member.sessionId || activeRole.get(member.sessionId) === member.roleId });
+        // A cold peer with no selection may recover its descriptor's role;
+        // an explicit selection or clear still belongs to the user.
+        memberAuthorized: member => !member.sessionId || session.memberAuthorized(member.sessionId, member.roleId) });
       entry = { runtime, session };
       teamRuntimes.set(workspace, entry);
       if (teamReady) runtime.start();
