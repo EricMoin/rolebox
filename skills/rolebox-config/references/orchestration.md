@@ -170,7 +170,9 @@ Use `team_list_roles`, `team_create`, `team_add`, `team_send_event`, `team_statu
 a member does not start its turn; an addressed event wakes it. A member must
 successfully claim a task before editing shared work, then publish the result
 through a team event. Final replies alone remain private. Events are shared
-with all members, even when only one recipient is woken.
+with all members, even when only one recipient is woken. `recipient` names one
+active peer by member ID or role ID and an event addressed to its own sender is
+rejected, because it would wake nobody; omit `recipient` to wake every other member.
 
 `team_create` returns a compact receipt with the team ID, creator/member
 identities, status and turn budget; it does not echo the submitted goal or return

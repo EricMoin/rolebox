@@ -31,9 +31,10 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.add(context, args.team_id, args.role_id)); },
     }),
     team_send_event: defineTool({
-      description: "Publish a peer message or task event. Returns event metadata without echoing content; team_status can retrieve the stored event. task_claim atomically reserves a task; act only after success. Claim leases last 30 minutes and can be renewed. Complete/release only tasks you own. Messages, offered/completed/released tasks wake peers; claims and turn notices do not. task_offer normally wakes every member: pass wake:false to register the task without waking anyone, and/or set recipient to wake one member. Recipients affect wake routing; every event is readable by the whole team.",
+      description: "Publish a peer message or task event. Returns event metadata without echoing content; team_status can retrieve the stored event. task_claim atomically reserves a task; act only after success. Claim leases last 30 minutes and can be renewed. Complete/release only tasks you own. Messages, offered/completed/released tasks wake peers; claims and turn notices do not. task_offer normally wakes every member: pass wake:false to register the task without waking anyone, and/or set recipient to wake one member. Recipients affect wake routing; every event is readable by the whole team. A recipient that resolves to the sender is rejected, because an event addressed to itself would wake nobody.",
       args: { team_id: teamId, kind: z.enum(["message", "task_offer", "task_claim", "task_complete", "task_release"]),
-        content: z.string().min(1).max(16000), task_id: z.string().min(1).max(200).optional(), recipient: z.string().min(1).optional(),
+        content: z.string().min(1).max(16000), task_id: z.string().min(1).max(200).optional(),
+        recipient: z.string().min(1).optional().describe("Member ID or role ID of one active peer that should receive this event; omit to wake every other member. The creator is a member too, so addressing the sender is rejected"),
         wake: z.boolean().optional().describe("Wake peers for this event; task_claim never wakes. Defaults to true") },
       async execute(args, context) {
         const runtime = resolve(context);

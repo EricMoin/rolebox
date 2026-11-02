@@ -159,4 +159,28 @@ describe("team tool receipts", () => {
 
     expect(f.runtime.status(f.context, team.id)).toEqual(before);
   });
+
+  it("rejects an event addressed to its own sender without recording it and still accepts a peer recipient", async () => {
+    const f = setup();
+    const { value: team } = await f.create();
+    const { value: peer } = await f.call<TeamMember>("team_add", { team_id: team.id, role_id: "reviewer" });
+    const sender = team.members[0].id;
+    const before = f.runtime.status(f.context, team.id);
+
+    await expect(f.call("team_send_event", {
+      team_id: team.id, kind: "task_offer", content: "Self-addressed offer", recipient: sender,
+    })).rejects.toThrow("Event recipient is the sender; omit recipient to wake every other member, or name the peer that should receive this event");
+    await expect(f.call("team_send_event", {
+      team_id: team.id, kind: "message", content: "Self-addressed message", recipient: "developer",
+    })).rejects.toThrow("Event recipient is the sender; omit recipient to wake every other member, or name the peer that should receive this event");
+
+    expect(f.runtime.status(f.context, team.id)).toEqual(before);
+
+    const { value: receipt } = await f.call<EventReceipt>("team_send_event", {
+      team_id: team.id, kind: "message", content: "Peer delivery", recipient: "reviewer",
+    });
+    expect(receipt).toMatchObject({ type: "message", sender, recipient: peer.id });
+    const { value: state } = await f.call<TeamState>("team_status", { team_id: team.id, after_seq: receipt.seq - 1 });
+    expect(state.events).toEqual([{ ...receipt, content: "Peer delivery" }]);
+  });
 });

@@ -254,6 +254,7 @@ export class TeamRuntime {
       if (input.recipient) {
         const target = state.members.find(m => m.status === "active" && (m.id === input.recipient || m.roleId === input.recipient));
         if (!target) throw new Error("Recipient is not an active team member");
+        if (target.id === member.id) throw new Error("Event recipient is the sender; omit recipient to wake every other member, or name the peer that should receive this event");
         recipient = target.id;
       }
       let taskId = input.task_id;
