@@ -698,14 +698,22 @@ const MAX_FOLLOW_PASSES = 6;
 /** An open log file: the descriptor, and the identity read FROM that descriptor. */
 interface OpenLogFile {
   readonly fd: number;
-  readonly dev: number;
-  readonly ino: number;
+  readonly identity: string;
   readonly sizeBytes: number;
 }
 
-/** The key two names for the SAME file share, so a rename keeps its offset. */
-function identityKey(entry: { readonly dev: number; readonly ino: number }): string {
-  return entry.dev + ":" + entry.ino;
+/**
+ * The key two handles on the SAME file share, so a rename keeps its offset.
+ *
+ * WHY BIGINT, NOT THE NUMBERS. Node's numeric `Stats.dev`/`Stats.ino` are
+ * JS numbers, and Windows NTFS file IDs are 64-bit and exceed 2^53: the
+ * round-trip collapses distinct files onto the same value (nodejs/node#12115),
+ * so two different files can report one key. The follower's offset ledger would
+ * then treat a rotated copy as the file it already read and replay it from
+ * offset 0. BigInt keeps every bit, so unequal IDs never share a key.
+ */
+export function fileIdentityKey(dev: bigint, ino: bigint): string {
+  return dev + ":" + ino;
 }
 
 /**
@@ -721,12 +729,15 @@ function openLogFile(path: string): OpenLogFile | undefined {
   let fd: number | undefined;
   try {
     fd = openSync(path, "r");
-    const info = fstatSync(fd);
+    const info = fstatSync(fd, { bigint: true });
     if (!info.isFile()) {
       closeSync(fd);
       return undefined;
     }
-    return { fd, dev: info.dev, ino: info.ino, sizeBytes: info.size };
+    // BigInt stats, because the identity must not round (see
+    // {@link fileIdentityKey}). A file size is far below 2^53, so the byte
+    // count is safe as a number.
+    return { fd, identity: fileIdentityKey(info.dev, info.ino), sizeBytes: Number(info.size) };
   } catch {
     if (fd !== undefined) {
       try {
@@ -887,7 +898,7 @@ export function followLogRecords(
     for (const path of queryPaths(query)) {
       const opened = openLogFile(path);
       if (opened === undefined) continue;
-      remember(identityKey(opened), opened.sizeBytes);
+      remember(opened.identity, opened.sizeBytes);
       closeQuietly(opened.fd);
     }
   };
@@ -912,7 +923,7 @@ export function followLogRecords(
       for (const path of queryPaths(query)) {
         const opened = openLogFile(path);
         if (opened === undefined) continue;
-        const identity = identityKey(opened);
+        const identity = opened.identity;
         try {
           const carried = state.get(identity);
           // A carried offset means this file was already known — under this name

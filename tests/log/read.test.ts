@@ -29,6 +29,7 @@ import {
   type LogQuery,
   type LogRecord,
 } from "../../src/log/index.ts";
+import { fileIdentityKey } from "../../src/log/read.ts";
 import { createFileSink } from "../../src/log/sinks/file.ts";
 import { beginLogTest, endLogTest, makeRecord, setLogEnv } from "../helpers/log.ts";
 
@@ -435,6 +436,18 @@ describe("readLogRecords", () => {
     expect(newest.truncated).toBe(true);
     expect(readLogRecords({ logDir: state.dir, limit: 2 }).records.map((r) => r.time)).toEqual([100, 200]);
     expect(readLogRecords({ logDir: state.dir, limit: 0 }).records).toEqual([]);
+  });
+});
+
+describe("fileIdentityKey", () => {
+  it("keeps distinct Windows file IDs above 2^53 apart", () => {
+    // Windows NTFS file IDs are 64-bit and exceed 2^53, so Node's numeric
+    // dev/ino collapse two distinct files onto the same Number; the follower's
+    // offset ledger is keyed on this exact key, so the files stay distinct.
+    const left = 9851624184963316n;
+    const right = 9851624184963317n;
+    expect(Number(left)).toBe(Number(right));
+    expect(fileIdentityKey(0n, left)).not.toBe(fileIdentityKey(0n, right));
   });
 });
 

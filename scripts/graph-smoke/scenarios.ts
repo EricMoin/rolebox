@@ -80,7 +80,8 @@ export async function controlScenarios(options: {
   writeFileSync(join(options.workspace, `${host}.approval.release`), "ready");
   await eventually(() => read(`${host}.approval`), graph => graph?.phase === "complete", `${host} approved worker did not finish`);
 
-  const status = await call("graph_status", { graph_id: `${host}.approval`, scope: "all", format: "json", include_history: true });
+  // The raw store view includes prompts and the default status view omits them by design, so the agreement assertion requests them.
+  const status = await call("graph_status", { graph_id: `${host}.approval`, scope: "all", format: "json", include_history: true, include_prompt: true });
   const audit = await call("graph_audit", {});
   assert.deepEqual(status.runs, JSON.parse(JSON.stringify(read(`${host}.approval`)?.runs)));
   assert.deepEqual(audit.entries.find((entry: any) => entry.graphId === `${host}.approval`)?.graph, JSON.parse(JSON.stringify(read(`${host}.approval`))));

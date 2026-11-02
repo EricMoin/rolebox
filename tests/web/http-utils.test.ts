@@ -37,6 +37,10 @@ afterEach(() => {
 // -----------------------------------------------------------------------
 
 describe("TokenBucket", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("provides tokens up to the rate limit immediately", async () => {
     const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
@@ -50,43 +54,63 @@ describe("TokenBucket", () => {
   });
 
   it("exhaustion causes acquire to wait for token refill", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
-    // Rate = 600/min = 10 per second, capacity = 1
-    // After consuming the only token, next acquire waits ~100ms for 1 refill
+    // Rate = 600/min = 10 per second, capacity = 600.
     const bucket = new TokenBucket(600);
-    // Consume all tokens (capacity = 600). We'll consume all but wait for refill.
-    // Simpler: use capacity = 1 by consuming 600 times... no, that's a lot.
-    // Better approach: TokenBucket(600) gives 600 tokens. After 600 acquires (0), wait.
+    // Under fake time the drain is microtask-only: Date never moves, so the
+    // bucket is left with EXACTLY zero tokens and the measured acquire below
+    // has to wait a whole refill window instead of racing a slow runner.
     for (let i = 0; i < 600; i++) {
       await bucket.acquire();
     }
-    // All tokens consumed. Next acquire must wait.
+
     const start = Date.now();
-    await bucket.acquire();
-    const elapsed = Date.now() - start;
-    // At 600/min (10/sec), 1 token refills in ~100ms
-    expect(elapsed).toBeGreaterThanOrEqual(80);
+    let settled = false;
+    const pending = bucket.acquire().then(() => {
+      settled = true;
+    });
+
+    // At 600/min one token refills in 100 ms. One tick earlier the acquire is
+    // still pending — the invariant the wall-clock version could not observe.
+    await vi.advanceTimersByTimeAsync(99);
+    expect(settled).toBe(false);
+
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(settled).toBe(true);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(100);
   });
 
   it("tokens refill gradually over time", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
-    // Rate = 1200/min = 20 per second
-    // Consume initial tokens, then measure refill for 2 tokens
+    // Rate = 1200/min = 20 per second, capacity = 1200.
     const bucket = new TokenBucket(1200);
     for (let i = 0; i < 1200; i++) {
       await bucket.acquire();
     }
-    // Consumed all 1200. Wait briefly to accumulate tokens.
+
     const start = Date.now();
-    await bucket.acquire(); // wait for 1 token
-    const elapsed = Date.now() - start;
-    // 1200/min = 20/sec → 1 token = 50ms
-    expect(elapsed).toBeGreaterThanOrEqual(40);
+    let settled = false;
+    const pending = bucket.acquire().then(() => {
+      settled = true;
+    });
+
+    // 1200/min = 20/sec → one token in 50 ms; at 49 ms it must still wait.
+    await vi.advanceTimersByTimeAsync(49);
+    expect(settled).toBe(false);
+
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(settled).toBe(true);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(50);
   });
 
   it("serializes concurrent acquires so each respects the refill window", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
     // Rate = 600/min = 10/sec: one token refills every ~100 ms, capacity 600.
@@ -98,10 +122,22 @@ describe("TokenBucket", () => {
     // Four concurrent callers must wait for their own refill window instead of
     // all waking at once and driving the bucket negative.
     const start = Date.now();
-    await Promise.all([bucket.acquire(), bucket.acquire(), bucket.acquire(), bucket.acquire()]);
-    const elapsed = Date.now() - start;
+    const settled = [false, false, false, false];
+    const pending = settled.map((_, index) =>
+      bucket.acquire().then(() => {
+        settled[index] = true;
+      }),
+    );
 
-    expect(elapsed).toBeGreaterThanOrEqual(350);
+    // By 399 ms three callers have each taken one serialized 100 ms window and
+    // the fourth is still waiting — they cannot all have woken together.
+    await vi.advanceTimersByTimeAsync(399);
+    expect(settled).toEqual([true, true, true, false]);
+
+    await vi.runAllTimersAsync();
+    await Promise.all(pending);
+    expect(settled).toEqual([true, true, true, true]);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(400);
   }, 10000);
 });
 
