@@ -418,6 +418,33 @@ export class TeamRuntime {
     } finally { this.endControl(id, token); }
   }
 
+  /**
+   * Best-effort workspace repair for peers created before the host recorded
+   * their workspace (or by a host that never did).
+   *
+   * A DSH peer is created through the host agent factory, which does not run
+   * the gateway accounting that lists a session under its Workspace, so a
+   * team's peers can stay outside every workspace group. Only managed peers
+   * with a bound session are repaired: the creator is a user session and is
+   * never re-attached, and a removed member keeps the placement it had. A host
+   * reject is logged and the sweep continues; team state is never mutated.
+   */
+  async adoptSessions(): Promise<void> {
+    const session = this.options.session;
+    if (!session.attachWorkspace) return;
+    for (const state of this.store.list()) {
+      if (state.platformId !== this.options.platformId) continue;
+      for (const member of state.members) {
+        if (member.status !== "active" || !member.managed || !member.sessionId) continue;
+        try { await session.attachWorkspace(member.sessionId); }
+        catch (error) {
+          log.warn("Team peer workspace attach failed", { member: member.id, sessionId: member.sessionId,
+            error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }
+  }
+
   start(): void {
     if (this.timer || this.stopped) return;
     this.timer = setInterval(() => { void this.tick().catch(error => log.warn("Team reconciliation failed", { error: String(error) })); }, 1000);

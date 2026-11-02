@@ -32,6 +32,8 @@ function setup(memberProblem?: (roleId: string) => string | undefined,
   const messages = new Map<string, Message[]>();
   const statuses = new Map<string, SessionStatus>([["owner", { type: "busy" }]]);
   const prompts: Array<{ id: string; text: string }> = [];
+  const attached: string[] = [];
+  let attachFailure: string | undefined;
   let nextSession = 0;
   let accept = true;
   let aborted = true;
@@ -52,6 +54,7 @@ function setup(memberProblem?: (roleId: string) => string | undefined,
     async status(id: string) { return statuses.get(id) ?? null; },
     async messages(id: string) { return messages.get(id) ?? []; },
     async abort(id: string) { await onAbort?.(id); if (aborted) statuses.set(id, { type: "idle" }); return aborted; },
+    async attachWorkspace(id: string) { attached.push(id); if (attachFailure === id) throw new Error("Workspace registry unavailable"); },
   } as unknown as ISessionClient;
   function make(platformId = "opencode") {
     const runtime = new TeamRuntime({ directory, platformId, session, roles: () => roles, canPollStatus: true,
@@ -81,8 +84,9 @@ function setup(memberProblem?: (roleId: string) => string | undefined,
       { info: { id: messageId, sessionID: id, role: "idle", finish: "failed", error: { message: reason, code: "MODEL_ERROR" },
         time: { created: 1, completed: 2 } }, parts: [] }]);
   }
-  return { runtime, team, make, finish, fail, wake, wakePeer, prompts, messages, statuses, directory,
+  return { runtime, team, make, finish, fail, wake, wakePeer, prompts, messages, statuses, directory, attached,
     accept(value: boolean) { accept = value; }, abort(value: boolean) { aborted = value; },
+    failAttach(id: string) { attachFailure = id; },
     onAbort(hook: (id: string) => void | Promise<void>) { onAbort = hook; } };
 }
 
@@ -258,6 +262,42 @@ describe("durable team runtime", () => {
     const otherHost = f.make("other");
     expect(() => otherHost.add(owner, f.team.id, "designer")).toThrow("another host");
     expect(() => otherHost.send(owner, f.team.id, { kind: "message", content: "collision" })).toThrow("another host");
+  });
+
+  it("repairs workspace grouping for active managed peers only", async () => {
+    const f = setup();
+    f.runtime.add(owner, f.team.id, "designer");
+    const reviewer = f.runtime.add(owner, f.team.id, "reviewer");
+    await f.wakePeer();
+    f.finish("peer-1"); f.finish("peer-2");
+    await f.runtime.tick();
+    expect(f.runtime.status(owner, f.team.id).members.map(member => member.sessionId)).toEqual(["owner", "peer-1", "peer-2"]);
+
+    // A removed member keeps its session id in the store, and a re-added role
+    // has no session until the host creates one.
+    await f.runtime.remove(owner, f.team.id, reviewer.id);
+    await f.runtime.resume(owner, f.team.id);
+    expect(f.runtime.add(owner, f.team.id, "reviewer").sessionId).toBeUndefined();
+
+    await f.runtime.adoptSessions();
+
+    expect(f.attached).toEqual(["peer-1"]);
+  });
+
+  it("continues workspace repair after a host rejection and skips other platforms", async () => {
+    const f = setup();
+    f.runtime.add(owner, f.team.id, "designer");
+    f.runtime.add(owner, f.team.id, "reviewer");
+    await f.wakePeer();
+    expect(f.runtime.status(owner, f.team.id).members.map(member => member.sessionId)).toEqual(["owner", "peer-1", "peer-2"]);
+
+    // A runtime for another host platform must not touch these teams.
+    await f.make("other").adoptSessions();
+    expect(f.attached).toEqual([]);
+
+    f.failAttach("peer-1");
+    await f.runtime.adoptSessions();
+    expect(f.attached).toEqual(["peer-1", "peer-2"]);
   });
 
   it("broadcasts departure, releases claims, and retains a closed team's history", async () => {

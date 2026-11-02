@@ -45,6 +45,9 @@ async function eventually(check: () => boolean | Promise<boolean>) {
 }
 
 function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean; flush?: boolean; guard?: boolean; collision?: boolean;
+  workspaceRegistry?: boolean;
+  agentPresets?: boolean;
+  agentPresetsFailResolve?: boolean;
   agentDefaultModel?: { provider: string; model: string; reasoningEffort?: string } } = {}) {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
   const tools = new Map<string, DshToolDefinition>();
@@ -54,11 +57,16 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   const persisted = new Map<string, { cwd: string; events: DshSessionEventLike[] }>();
   const live = new Map<string, DshTeamAgent>();
   const guards: Array<Parameters<NonNullable<DshPluginContext["tools"]["guard"]>>[0]> = [];
-  const created: Array<{ id: string; provider?: string; model?: string; prompt: unknown }> = [];
+  const created: Array<{ id: string; provider?: string; model?: string; prompt: unknown;
+    meta: { cwd: string; agentPreset?: string } }> = [];
   const resumed: string[] = [];
   const sent: Array<{ id: string; text: string }> = [];
   const disposed: string[] = [];
   const spawnToolAvailability: boolean[] = [];
+  const workspaceResolveCalls: string[] = [];
+  const workspaceAttachCalls: Array<{ directory: string; sessionId: string }> = [];
+  const presetResolveCalls: Array<string | undefined> = [];
+  const presetMountCalls: Array<{ ctx: unknown; id?: string }> = [];
   let disposalBarrier: Promise<void> | undefined;
   const emit = (event: string, ...args: unknown[]) => { for (const listener of listeners.get(event) ?? []) listener(...args); };
   const makeSession = (id: string, directory: string, initial: DshSessionEventLike[] = []): DshSessionLike => {
@@ -110,14 +118,38 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
       emit("session/disposed", agent.session);
     } };
   };
+  // Optional Workspace registry: a host WITHOUT it is the compatibility case
+  // covered by every existing fixture. Opting in models a DSH profile where the
+  // agent factory does not run the gateway session.create workspace accounting.
+  const workspaceRegistry = options.workspaceRegistry ? {
+    async resolveByPath(path: string) {
+      workspaceResolveCalls.push(path);
+      return { async attachSession(sessionId: string) { workspaceAttachCalls.push({ directory: path, sessionId }); } };
+    },
+  } : undefined;
+  // Optional agent-preset registry: hosts WITHOUT it are the compatibility case
+  // covered by every default fixture (the host keeps its process-wide
+  // composition). Opting in models the DSH Web profile, where the agent factory
+  // does not run the gateway's per-conversation preset composition.
+  const agentPresets = options.agentPresets ? {
+    async resolve(id?: string) {
+      presetResolveCalls.push(id);
+      if (options.agentPresetsFailResolve) throw new Error("Agent preset registry unavailable");
+      return { id: id ?? "standard" };
+    },
+    async mount(ctx: unknown, id?: string) {
+      presetMountCalls.push({ ctx, id });
+      return { id: id ?? "standard" };
+    },
+  } : undefined;
   const agents: DshTeamAgents = {
     get: id => live.get(id),
     async create(input) {
       spawnToolAvailability.push(tools.has("team_create") || tools.has("rb_team_create"));
       const agent = makeAgent(makeSession(input.sessionId, input.meta.cwd));
-      input.setup({}, agent);
+      await input.setup({ sessionId: input.sessionId }, agent);
       created.push({ id: agent.id, provider: input.agentOptions?.provider, model: input.agentOptions?.model,
-        prompt: sections.find(section => section.name === "rolebox:role")?.text({ agent }) });
+        prompt: sections.find(section => section.name === "rolebox:role")?.text({ agent }), meta: input.meta });
       return publish(agent);
     },
     async resume(input) {
@@ -125,7 +157,7 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
       const saved = persisted.get(input.resumeSessionId);
       if (!saved) throw new Error("Missing persisted session");
       const agent = makeAgent(makeSession(input.resumeSessionId, saved.cwd, saved.events));
-      input.setup({}, agent);
+      await input.setup({ sessionId: input.resumeSessionId }, agent);
       resumed.push(agent.id);
       return publish(agent);
     },
@@ -161,6 +193,8 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
     ...(options.prompt === false ? {} : { systemPrompt }),
     get(name) {
       if (name === "agents") return agents;
+      if (name === "workspaceRegistry") return workspaceRegistry;
+      if (name === "agentPresets") return agentPresets;
       if (name === "systemPrompt") return options.prompt === false ? undefined : systemPrompt;
       if (name === "agentLoop") return options.loop === false ? undefined : { createAgent() {}, resume() {} };
       if (name === "agentDefaultModel") {
@@ -190,6 +224,7 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   const finish = (agent: DshTeamAgent, text = "Turn completed") => (agent as DshTeamAgent & { finish(text: string): void }).finish(text);
   const fail = (agent: DshTeamAgent, text: string) => (agent as DshTeamAgent & { fail(text: string): void }).fail(text);
   return { ctx, tools, live, owner, call, finish, fail, created, resumed, sent, disposed, persisted, listeners, spawnToolAvailability,
+    workspaceResolveCalls, workspaceAttachCalls, presetResolveCalls, presetMountCalls,
     delayDisposal: (barrier: Promise<void>) => { disposalBarrier = barrier; } };
 }
 
@@ -230,7 +265,7 @@ describe("DSH team entry", () => {
   });
 
   it("uses the trusted session role and workspace and creates a correctly configured peer", async () => {
-    const fixture = host();
+    const fixture = host({ workspaceRegistry: true });
     const owner = fixture.owner("owner");
     const other = fixture.owner("other", "workspace-b");
     const plugin = await boot(fixture);
@@ -253,6 +288,11 @@ describe("DSH team entry", () => {
     expect(fixture.created[0]!.model).toBe("designer-model");
     expect(fixture.created[0]!.prompt).toContain("designer specialist");
     expect(fixture.sent.find(message => message.id === fixture.created[0]!.id)!.text).toContain("Design and build a page");
+    // The peer is created through the host agent factory, so the team adapter
+    // attaches it to the Workspace that owns the creator's directory.
+    await eventually(() => fixture.workspaceAttachCalls.length === 1);
+    expect(fixture.workspaceResolveCalls).toEqual([realpathSync(join(root, "workspace-a"))]);
+    expect(fixture.workspaceAttachCalls[0]).toEqual({ directory: realpathSync(join(root, "workspace-a")), sessionId: fixture.created[0]!.id });
     const peer = fixture.live.get(fixture.created[0]!.id)!;
     expect(plugin.getActiveRole(peer.id)).toBe("designer");
     fixture.finish(peer, "Use the design system spacing");
@@ -265,8 +305,45 @@ describe("DSH team entry", () => {
     expect(status.events.some(event => event.type === "turn_completed" && event.content.includes("spacing"))).toBe(false);
   });
 
+  it("composes a created peer with the host's default agent preset", async () => {
+    const fixture = host({ agentPresets: true });
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Build", goal: "Work together" }, owner) as TeamState;
+    await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the design" }, owner);
+    await eventually(() => fixture.created.length === 1 && fixture.presetMountCalls.length === 1);
+
+    const peerId = fixture.created[0]!.id;
+    expect(fixture.presetResolveCalls).toEqual([undefined]);
+    expect(fixture.created[0]!.meta.agentPreset).toBe("standard");
+    expect(fixture.presetMountCalls).toEqual([{ ctx: { sessionId: peerId }, id: "standard" }]);
+  });
+
+  it("fails peer creation when the host default agent preset cannot be resolved", async () => {
+    const fixture = host({ agentPresets: true, agentPresetsFailResolve: true });
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Build", goal: "Work together" }, owner) as TeamState;
+    await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the design" }, owner);
+    // A failed default preset resolution must fail the spawn, not silently
+    // create a peer without the host's capability set.
+    await eventually(async () => {
+      const status = await fixture.call("team_status", { team_id: team.id }, owner) as TeamState;
+      return status.status === "paused" && (status.members.find(member => member.roleId === "designer")?.error ?? "")
+        .includes("Agent preset registry unavailable");
+    });
+
+    expect(fixture.created).toHaveLength(0);
+    expect(fixture.presetResolveCalls).toEqual([undefined]);
+    expect(fixture.presetMountCalls).toEqual([]);
+  });
+
   it("restores the existing peer after plugin restart and disposes its handles", async () => {
-    const fixture = host();
+    const fixture = host({ workspaceRegistry: true });
     const owner = fixture.owner("owner");
     const first = await boot(fixture);
     await first.activateRole("developer", owner.id);
@@ -284,6 +361,11 @@ describe("DSH team entry", () => {
     const second = await boot(fixture);
     await eventually(() => fixture.resumed.includes(peerId) && fixture.sent.some(message => message.id === peerId && message.text.includes("next iteration")));
     expect(fixture.created).toHaveLength(1);
+    // Restoring the workspace runtime at boot repairs a peer the host never
+    // grouped: creation attached it once, boot recovery attached it again.
+    await eventually(() => fixture.workspaceAttachCalls.filter(call => call.sessionId === peerId).length === 2);
+    expect(fixture.workspaceAttachCalls.filter(call => call.sessionId === peerId)
+      .every(call => call.directory === realpathSync(join(root, "workspace-a")))).toBe(true);
     expect(fixture.spawnToolAvailability).toEqual([true, true]);
     await stop(second);
     expect(fixture.disposed.filter(id => id === peerId)).toHaveLength(2);

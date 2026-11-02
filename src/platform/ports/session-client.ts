@@ -119,4 +119,14 @@ export interface ISessionClient {
    * for removed members and deleted teams on subsequent ticks.
    */
   forget?(id: string): Promise<void>;
+
+  /**
+   * Attach a session rolebox created to the host's workspace/grouping
+   * accounting, so it is listed with the workspace whose directory it runs in.
+   * Implemented only by platforms that keep such an accounting (DSH
+   * Workspaces); a host without one omits the method and leaves its sessions
+   * where it put them. Best effort: a host that cannot attach rejects, and the
+   * peer keeps running.
+   */
+  attachWorkspace?(id: string): Promise<void>;
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createSubLogger } from "../../../logger.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type { Message, SessionInfo, SessionStatus } from "../../types.ts";
 import { getSystem } from "../../system/index.ts";
@@ -13,6 +14,24 @@ export interface DshTeamAgentOptions {
   model?: string;
   reasoningEffort?: string;
   maxTokens?: number;
+}
+
+/**
+ * The host agent composition resolved for one team peer.
+ *
+ * A host that composes agents through an agent-preset registry (the DSH Web
+ * profile) exposes a per-agent capability set: the preset's child plugin rows
+ * supply the tools, prompt sections and loops of a new conversation. A peer is
+ * created through the agent factory, which — unlike the gateway session path —
+ * does not run that composition, so the adapter records the preset identity on
+ * the session header and asks the host to mount it into the peer's own scoped
+ * agent context before its first turn.
+ */
+export interface DshPeerComposition {
+  /** Host preset identity written to the peer's session header and descriptor. */
+  presetId: string;
+  /** Mount the preset's composition into the unpublished peer's agent context. */
+  mount(agentCtx: unknown): Promise<void>;
 }
 
 interface TeamPrompt {
@@ -52,14 +71,14 @@ export interface DshTeamAgentHandle {
   dispose(): Promise<void>;
 }
 
-type AgentSetup = (context: unknown, agent: DshTeamAgent) => void;
+type AgentSetup = (context: unknown, agent: DshTeamAgent) => void | Promise<void>;
 
 /** DSH's registry delegates create/resume to the mounted agent-loop factory. */
 export interface DshTeamAgents {
   get(id: string): DshTeamAgent | undefined;
   create(options: {
     sessionId: string;
-    meta: { cwd: string };
+    meta: { cwd: string; agentPreset?: string };
     agentOptions?: DshTeamAgentOptions;
     setup: AgentSetup;
     signal: AbortSignal;
@@ -88,6 +107,24 @@ export interface DshTeamSessionAdapterOptions {
   resolveRole(roleId: string): { agentOptions?: DshTeamAgentOptions } | undefined;
   /** Read resident or persisted history without creating a live agent. */
   readExecutionEvents(id: string): Promise<readonly DshSessionEventLike[] | undefined>;
+  /**
+   * DSH Workspace attach seam: group the peer session under the Workspace that
+   * owns the adapter's directory. Optional — a host without a Workspace
+   * registry leaves the peer where the agent factory put it.
+   */
+  attachWorkspace?: (sessionId: string) => Promise<void>;
+  /**
+   * Host agent-composition seam: resolve the agent preset a peer records and
+   * mounts before its first turn — the host's per-agent capability set.
+   *
+   * The argument is the preset recorded on the session header when resuming;
+   * `undefined` on creation asks for the host default. Returning `undefined`
+   * keeps the host's process-wide composition, which is the only behavior on
+   * hosts without an agent-preset registry (headless/minimal profile). A
+   * rejection fails creation/resume: a peer that silently loses its capability
+   * set is the defect this seam exists to prevent.
+   */
+  composePeer?: (presetId: string | undefined) => Promise<DshPeerComposition | undefined>;
 }
 
 interface Descriptor {
@@ -97,6 +134,8 @@ interface Descriptor {
   directory: string;
   createdAt: number;
   agentOptions?: DshTeamAgentOptions;
+  /** Host agent preset this peer records and mounts; absent on preset-free hosts. */
+  agentPreset?: string;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -151,6 +190,12 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
   private readonly forgetting = new Map<string, Promise<void>>();
   private readonly requestOptions = new Map<string, { agent: DshTeamAgent; options?: DshTeamAgentOptions }>();
   private readonly creating = new Set<Promise<SessionInfo | null>>();
+  /**
+   * Team channel. Deliberately not named `_log`: the base adapter already owns
+   * a private `_log`, and a subclass cannot redeclare a base class private
+   * field.
+   */
+  private readonly _teamLog = createSubLogger("dsh-team-session");
   private stopped = false;
 
   constructor(private readonly options: DshTeamSessionAdapterOptions) {
@@ -175,7 +220,10 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     }
     if (!record(data) || data.version !== 1 || data.sessionId !== id || data.directory !== this.directory
       || typeof data.roleId !== "string" || !data.roleId || !Number.isSafeInteger(data.createdAt) || (data.createdAt as number) < 0
-      || (data.agentOptions !== undefined && !record(data.agentOptions))) throw new Error("Invalid DSH team session descriptor");
+      || (data.agentOptions !== undefined && !record(data.agentOptions))
+      || (data.agentPreset !== undefined && (typeof data.agentPreset !== "string" || !data.agentPreset))) {
+      throw new Error("Invalid DSH team session descriptor");
+    }
     return data as unknown as Descriptor;
   }
 
@@ -208,8 +256,8 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     }
   }
 
-  private setup(descriptor: Descriptor, resume: boolean): AgentSetup {
-    return (_context, agent) => {
+  private setup(descriptor: Descriptor, resume: boolean, composition?: DshPeerComposition): AgentSetup {
+    return async (context, agent) => {
       if (this.stopped) throw new Error("DSH team adapter is disposed");
       if (agent.id !== descriptor.sessionId || resolve(sessionDirectory(agent.session) ?? "") !== this.directory) {
         throw new Error("DSH team session identity or workspace changed");
@@ -217,6 +265,10 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
       this.options.bindRole(descriptor.sessionId, descriptor.roleId);
       // A replay is authorized by TeamRuntime's new delivery, not by an old inbox.
       if (resume) removePendingTeamDeliveries(agent);
+      // Compose the peer's own capability set before publication, exactly as the
+      // host's gateway does for a new conversation. A rejection rolls the
+      // unpublished agent back and fails the spawn instead of degrading silently.
+      await composition?.mount(context);
     };
   }
 
@@ -233,17 +285,25 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     // refuse it here so the runtime reports the role instead of a silent no-op.
     if (!role?.agentOptions?.provider || !role.agentOptions.model) return null;
     const id = `rolebox-team-${randomUUID()}`;
-    const descriptor: Descriptor = { version: 1, sessionId: id, roleId: input.agent,
-      directory: this.directory, createdAt: Date.now(), agentOptions: role.agentOptions };
     if (!this.leases.acquire(id)) return null;
     try {
+      // Resolve the host composition BEFORE the descriptor is written: a peer
+      // that silently loses its capability set must fail creation instead.
+      const composition = await this.options.composePeer?.(undefined);
+      const descriptor: Descriptor = { version: 1, sessionId: id, roleId: input.agent,
+        directory: this.directory, createdAt: Date.now(), agentOptions: role.agentOptions,
+        ...(composition ? { agentPreset: composition.presetId } : {}) };
       this.saveDescriptor(descriptor);
       this.options.bindRole(id, descriptor.roleId);
-      const handle = await materialize(signal => this.options.agents.create({ sessionId: id, meta: { cwd: this.directory },
-        agentOptions: descriptor.agentOptions, setup: this.setup(descriptor, false), signal }));
+      const handle = await materialize(signal => this.options.agents.create({ sessionId: id,
+        meta: { cwd: this.directory, ...(composition ? { agentPreset: composition.presetId } : {}) },
+        agentOptions: descriptor.agentOptions, setup: this.setup(descriptor, false, composition), signal }));
       this.handles.set(id, handle);
       if (this.stopped) { await handle.dispose(); this.handles.delete(id); throw new Error("DSH team adapter is disposed"); }
       await this.flush(handle.agent.session);
+      // The peer exists and is durable; grouping it is best effort, so a
+      // Workspace failure must not undo or fail the creation.
+      await this.attachWorkspace(id);
       return this.info(descriptor, sessionEvents(handle.agent.session));
     } catch (error) {
       const handle = this.handles.get(id);
@@ -303,13 +363,19 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     }
     const loading = Promise.resolve().then(async () => {
       try {
-        if (changed) {
-          descriptor.agentOptions = agentOptions;
+        // Resolve the recorded preset (or the host default) BEFORE resuming; a
+        // host rejection aborts this resume and releases the lease below.
+        const composition = await this.options.composePeer?.(descriptor.agentPreset);
+        const composed = composition !== undefined && descriptor.agentPreset !== composition.presetId;
+        if (changed || composed) {
+          // One rewrite carries both a repaired model and the resolved preset.
+          if (changed) descriptor.agentOptions = agentOptions;
+          if (composition) descriptor.agentPreset = composition.presetId;
           this.saveDescriptor(descriptor);
         }
         this.options.bindRole(id, descriptor.roleId);
         const handle = await materialize(signal => this.options.agents.resume({ resumeSessionId: id, agentOptions: descriptor.agentOptions,
-          setup: this.setup(descriptor, true), signal }));
+          setup: this.setup(descriptor, true, composition), signal }));
         this.handles.set(id, handle);
         if (this.stopped) { await handle.dispose(); this.handles.delete(id); throw new Error("DSH team adapter is disposed"); }
         await this.flush(handle.agent.session);
@@ -387,6 +453,22 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     }).finally(() => { this.forgetting.delete(id); });
     this.forgetting.set(id, forgetting);
     return forgetting;
+  }
+
+  /**
+   * Attach a team peer session to the host's workspace/grouping accounting.
+   *
+   * DSH creates durable peers through the agent factory, which skips the
+   * gateway `session.create` path that records a session under its Workspace,
+   * so the host seam is asked to do the same accounting here. Best effort: a
+   * host that cannot attach is logged and the peer keeps running.
+   */
+  async attachWorkspace(id: string): Promise<void> {
+    if (!this.options.attachWorkspace) return;
+    try { await this.options.attachWorkspace(id); }
+    catch (error) {
+      this._teamLog.warn("Team session workspace attach failed", { sessionId: id, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   private async events(id: string): Promise<readonly DshSessionEventLike[] | undefined> {

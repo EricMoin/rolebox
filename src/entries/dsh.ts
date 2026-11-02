@@ -658,6 +658,94 @@ function probeAgentRegistry(
   return undefined;
 }
 
+/** Minimal structural dsh Workspace (`@deepseek-ai/dsh-workspace`), duck-typed. */
+interface DshWorkspaceLike {
+  /** Attach a session id to this workspace's grouping accounting. */
+  attachSession(sessionId: string): Promise<void>;
+}
+
+/** Minimal structural dsh Workspace registry — path lookup only. */
+interface DshWorkspaceRegistryLike {
+  /** The workspace record whose directory is `path`, when one is registered. */
+  resolveByPath(path: string): Promise<DshWorkspaceLike | undefined>;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh Workspace registry
+ * (`ctx.get("workspaceRegistry")`, `@deepseek-ai/dsh-workspace`).
+ *
+ * The service is OPTIONAL: a headless profile has no Workspace registry, so
+ * this probe returns `undefined` and a team peer keeps whatever placement the
+ * host's agent factory gave it — the same graceful path as
+ * {@link probeAgentRegistry}. It is read through the named-service resolver
+ * `ctx.get("workspaceRegistry")` (a sibling-plugin fiber's service is invisible
+ * to the property-resolver walk) and accepted only when it exposes a callable
+ * `resolveByPath`. Never injected via the `inject` roster — an optional service
+ * must not gate plugin activation.
+ */
+function probeWorkspaceRegistry(
+  ctx: DshPluginContext,
+): DshWorkspaceRegistryLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  let service: unknown;
+  try {
+    service = ctx.get("workspaceRegistry");
+  } catch {
+    return undefined;
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { resolveByPath?: unknown }).resolveByPath === "function"
+  ) {
+    return service as DshWorkspaceRegistryLike;
+  }
+  return undefined;
+}
+
+/** Minimal structural dsh agent-preset registry (`@deepseek-ai/dsh-agent-preset-registry`). */
+interface DshAgentPresetRegistryLike {
+  /** Resolve an identity without starting an Agent; omit `id` for the default. */
+  resolve(id?: string): Promise<{ id: string }>;
+  /** Bind an unpublished Agent to the preset, mounting its scoped composition. */
+  mount(agentCtx: unknown, id?: string): Promise<{ id: string }>;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh agent-preset registry
+ * (`ctx.get("agentPresets")`, `@deepseek-ai/dsh-agent-preset-registry`).
+ *
+ * The service is OPTIONAL: the Web profile mounts it and composes each new
+ * conversation from a preset (the per-agent capability set — tools, prompt
+ * sections, loops), while headless/minimal profiles have no preset registry.
+ * This probe returns `undefined` there and a team peer keeps the host's
+ * process-wide composition, the same graceful path as
+ * {@link probeWorkspaceRegistry}. It is read through the named-service resolver
+ * `ctx.get("agentPresets")` and accepted only when both `resolve` and `mount`
+ * are callable. Never injected via the `inject` roster — an optional service
+ * must not gate plugin activation.
+ */
+function probeAgentPresets(
+  ctx: DshPluginContext,
+): DshAgentPresetRegistryLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  let service: unknown;
+  try {
+    service = ctx.get("agentPresets");
+  } catch {
+    return undefined;
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { resolve?: unknown }).resolve === "function" &&
+    typeof (service as { mount?: unknown }).mount === "function"
+  ) {
+    return service as DshAgentPresetRegistryLike;
+  }
+  return undefined;
+}
+
 /**
  * Bound a `notice` source summary to the dsh context-summary cap
  * `CONTEXT_SUMMARY_MAX_CHARS` (120): the first line trimmed, ellipsized when
@@ -1760,6 +1848,21 @@ export async function apply(
   // keeps its documented no-op and the graph engine's F6 notifier logs the
   // degraded reminder — never a crash, never gating boot.
   const agentRegistry = probeAgentRegistry(ctx);
+  // Optional host grouping seam (`ctx.get("workspaceRegistry")`) — probed
+  // structurally, exactly like ctx.agents. A peer is created through the agent
+  // factory, which does not run the gateway session.create accounting that
+  // lists a session under its Workspace, so this registry is handed to the team
+  // session adapter to attach a created peer to the workspace that owns its
+  // directory. Absent (headless/minimal profile) → peers stay where the host
+  // put them.
+  const workspaceRegistry = probeWorkspaceRegistry(ctx);
+  // Optional host agent-composition seam (`ctx.get("agentPresets")`). The Web
+  // profile mounts a preset registry and gives each new conversation its
+  // capability set from a preset; the agent factory a team peer uses does not
+  // run that composition, so the resolved preset is recorded on the peer's
+  // header and mounted before its first turn. Absent (headless/minimal
+  // profile) → peers keep the host's process-wide composition.
+  const agentPresets = probeAgentPresets(ctx);
   const promptInjector = buildAgentPromptInjector(agentRegistry);
   const graphNotifyWired = promptInjector !== undefined;
   const sessionAdapter = new DshSessionAdapter(ctx.sessions, {
@@ -1870,6 +1973,38 @@ export async function apply(
         roleOf: sessionId => activeRole.get(sessionId),
         resolveRole: roleId => resolveTeamRole(roleId),
         readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, sessionPersistence, id),
+        // A peer is created through the agent factory, which skips the gateway
+        // session.create accounting; attach it to the Workspace that owns this
+        // adapter's (already realpath'd) directory. Best effort: the adapter
+        // logs and swallows a host rejection.
+        ...(workspaceRegistry ? { attachWorkspace: async (sessionId: string) => {
+          const owner = await workspaceRegistry.resolveByPath(workspace);
+          await owner?.attachSession(sessionId);
+        } } : {}),
+        // The host's per-agent capability set. Resolve the preset the peer will
+        // record (the host default on creation) and mount it before its first
+        // turn, exactly as the gateway does for a new conversation. Every
+        // resolution and mount failure propagates: a peer that silently loses
+        // its capability set is the defect this seam exists to prevent. The one
+        // exception is a recorded preset that no longer resolves (deleted or
+        // renamed): it falls back to the host default so an existing team stays
+        // resumable, and a failing fallback propagates too.
+        ...(agentPresets ? { composePeer: async (presetId: string | undefined) => {
+          let id: string;
+          if (presetId === undefined) {
+            // Creation asks for the host default; failing here fails the spawn.
+            id = (await agentPresets.resolve()).id;
+          } else {
+            try {
+              id = (await agentPresets.resolve(presetId)).id;
+            } catch (error) {
+              log.warn("dsh team agent preset unavailable; using the host default", { agentPreset: presetId,
+                error: error instanceof Error ? error.message : String(error) });
+              id = (await agentPresets.resolve()).id;
+            }
+          }
+          return { presetId: id, mount: async (agentCtx: unknown) => { await agentPresets.mount(agentCtx, id); } };
+        } } : {}),
       });
       const runtime = new TeamRuntime({ directory: workspace, platformId: "dsh", session,
         roles: () => resolvedRoles, canPollStatus: true, memberProblem,
@@ -1881,6 +2016,12 @@ export async function apply(
       entry = { runtime, session };
       teamRuntimes.set(workspace, entry);
       if (teamReady) runtime.start();
+      // Repair peers created before the host recorded their workspace (or by a
+      // host that never did). Entries are cached per workspace, so this runs
+      // once per workspace — on team_create and on boot recovery. Never
+      // awaited: a grouping repair must not delay or fail team tooling.
+      void runtime.adoptSessions().catch(error =>
+        log.warn("dsh team workspace repair failed", { error: error instanceof Error ? error.message : String(error) }));
     }
     return entry.runtime;
   }

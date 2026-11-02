@@ -160,3 +160,14 @@ lease. Peers created or resumed by rolebox are disposed. When DSH has restored a
 peer itself, the host keeps that session and pending user input; rolebox clears
 queued team deliveries before releasing the team identity. Cleanup waits while
 another running host holds the peer lease, and failed cleanup is retried.
+
+On DSH a peer session is created through the host agent factory, so rolebox
+attaches it to the Workspace that owns its directory; this is best effort, and a
+host without a Workspace registry leaves peers ungrouped. Peers created by older
+builds are repaired when the team's workspace runtime is restored at boot.
+
+On hosts that compose agents through agent presets (the DSH Web profile), rolebox
+resolves the host's default agent preset for each peer, records it on the peer
+session, and mounts it before the peer's first turn, so a peer starts with the
+same capability set as a new conversation. A host without an agent-preset
+registry keeps its process-wide composition.

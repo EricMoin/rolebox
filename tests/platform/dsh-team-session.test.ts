@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
@@ -29,6 +29,13 @@ function fixture() {
   const created: Array<Parameters<DshTeamAgents["create"]>[0]> = [];
   const resumed: Array<Parameters<DshTeamAgents["resume"]>[0]> = [];
   const cleared: string[] = [];
+  const attachCalls: string[] = [];
+  const composeCalls: Array<string | undefined> = [];
+  const mounted: Array<{ presetId: string; context: unknown }> = [];
+  const contexts = new Map<string, unknown>();
+  let attachAccepted = true;
+  let composeAccepted = true;
+  let mountAccepted = true;
   let flushAccepted = true;
   let cancellationAccepted = true;
   let disposalAccepted = true;
@@ -72,7 +79,9 @@ function fixture() {
       created.push(options);
       const session = makeSession(options.sessionId);
       const made = makeAgent(session);
-      options.setup({}, made.agent);
+      const context = { agentContextFor: session.id };
+      contexts.set(session.id, context);
+      await options.setup(context, made.agent);
       expect(roles.get(session.id)).toBe("designer");
       sessions.set(session.id, session);
       agents.set(session.id, made.agent);
@@ -90,7 +99,9 @@ function fixture() {
       const made = makeAgent(session);
       pending.get(session.id)!.push({ id: "stale", role: "user", content: [{ type: "text", text: "[rolebox-team stale] old queued turn" }],
         source: { kind: "rolebox", form: "notice", summary: "old" } });
-      options.setup({}, made.agent);
+      const context = { agentContextFor: session.id };
+      contexts.set(session.id, context);
+      await options.setup(context, made.agent);
       sessions.set(session.id, session);
       agents.set(session.id, made.agent);
       idle.set(session.id, made.setIdle);
@@ -108,8 +119,26 @@ function fixture() {
     roleOf(id: string) { return roles.get(id); },
     resolveRole(role: string) { return role === "designer" ? { agentOptions: designerOptions } : undefined; },
     async readExecutionEvents(id: string) { return stored.get(id); },
+    async attachWorkspace(id: string) {
+      attachCalls.push(id);
+      if (!attachAccepted) throw new Error("Workspace registry unavailable");
+    },
   };
-  const makeAdapter = () => { const adapter = new DshTeamSessionAdapter(options); cleanups.push(() => adapter.dispose()); return adapter; };
+  const composePeer = async (presetId: string | undefined) => {
+    composeCalls.push(presetId);
+    if (!composeAccepted) throw new Error("Agent preset registry unavailable");
+    return { presetId: "standard", mount: async (context: unknown) => {
+      if (!mountAccepted) throw new Error("Agent preset mount failed");
+      mounted.push({ presetId: "standard", context });
+    } };
+  };
+  const makeAdapter = (attach = true, compose = false) => {
+    const adapter = new DshTeamSessionAdapter({ ...options,
+      ...(attach ? {} : { attachWorkspace: undefined }),
+      ...(compose ? { composePeer } : {}) });
+    cleanups.push(() => adapter.dispose());
+    return adapter;
+  };
   function complete(id: string, reason = "completed") {
     const session = sessions.get(id)!;
     session.append("turn/start", { turn: 1 });
@@ -125,8 +154,12 @@ function fixture() {
     return requestHooks.get(id)!.reduceRight<() => Promise<DshTeamAgentOptions>>((next, listener) => () => listener({}, next), seed)();
   }
   return { directory, sessions, store, agents, registry, roles, pending, created, resumed, cleared, stored, makeAdapter, complete, requestOptions,
+    attachCalls, composeCalls, mounted, contexts,
     setFlush(value: boolean) { flushAccepted = value; }, setCancellation(value: boolean) { cancellationAccepted = value; },
     setDisposal(value: boolean) { disposalAccepted = value; },
+    setAttach(value: boolean) { attachAccepted = value; },
+    setCompose(value: boolean) { composeAccepted = value; },
+    setMount(value: boolean) { mountAccepted = value; },
     setRoleOptions(value: { provider?: string; model?: string } | undefined) { designerOptions = value; } };
 }
 
@@ -140,6 +173,102 @@ describe("DSH team execution sessions", () => {
     expect(f.created[0].meta).toEqual({ cwd: f.directory });
     expect(f.stored.has(session!.id)).toBe(true);
     expect(await adapter.status(session!.id)).toEqual({ type: "idle" });
+  });
+
+  it("attaches a created peer session to its workspace exactly once", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const session = await adapter.create({ directory: f.directory, agent: "designer" });
+
+    expect(session).not.toBeNull();
+    expect(f.attachCalls).toEqual([session!.id]);
+  });
+
+  it("does not fail peer creation when the host cannot attach it to a workspace", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    f.setAttach(false);
+
+    const session = await adapter.create({ directory: f.directory, agent: "designer" });
+
+    expect(session).not.toBeNull();
+    expect(f.stored.has(session!.id)).toBe(true);
+  });
+
+  it("resolves workspace attachment when the host has no grouping accounting", async () => {
+    const f = fixture(); const adapter = f.makeAdapter(false);
+
+    await expect(adapter.attachWorkspace("rolebox-team-00000000-0000-0000-0000-000000000000")).resolves.toBeUndefined();
+    expect(f.attachCalls).toEqual([]);
+  });
+
+  it("composes a created peer with the host default preset before creation returns", async () => {
+    const f = fixture(); const adapter = f.makeAdapter(true, true);
+    const session = await adapter.create({ directory: f.directory, agent: "designer" });
+
+    expect(session).not.toBeNull();
+    expect(f.composeCalls).toEqual([undefined]);
+    expect(f.created[0].meta).toEqual({ cwd: f.directory, agentPreset: "standard" });
+    expect(JSON.parse(readFileSync(join(f.directory, ".rolebox", "team-sessions", `${session!.id}.json`), "utf8")).agentPreset)
+      .toBe("standard");
+    expect(f.mounted).toEqual([{ presetId: "standard", context: f.contexts.get(session!.id) }]);
+  });
+
+  it("resumes a peer with its recorded preset and mounts it", async () => {
+    const f = fixture(); const first = f.makeAdapter(true, true);
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    await first.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    f.complete(id); await first.messages(id); await first.dispose();
+    const restored = f.makeAdapter(true, true);
+
+    await restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team second]" }] });
+
+    expect(f.composeCalls).toEqual([undefined, "standard"]);
+    expect(f.mounted.map(entry => entry.presetId)).toEqual(["standard", "standard"]);
+    expect(f.mounted[1].context).toBe(f.contexts.get(id));
+    expect(f.resumed).toHaveLength(1);
+  });
+
+  it("persists the resolved preset into a descriptor created before presets existed", async () => {
+    const f = fixture(); const first = f.makeAdapter(true, false);
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    expect(JSON.parse(readFileSync(path, "utf8")).agentPreset).toBeUndefined();
+    await first.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    f.complete(id); await first.messages(id); await first.dispose();
+    const restored = f.makeAdapter(true, true);
+
+    await restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team second]" }] });
+
+    expect(f.composeCalls).toEqual([undefined]);
+    expect(f.resumed).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path, "utf8")).agentPreset).toBe("standard");
+  });
+
+  it("rejects a descriptor whose agent preset is not a non-empty string", async () => {
+    const f = fixture(); const adapter = f.makeAdapter(true, true);
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    const descriptor = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+
+    for (const agentPreset of ["", 7, null]) {
+      writeFileSync(path, JSON.stringify({ ...descriptor, agentPreset }));
+      await expect(adapter.status(id)).rejects.toThrow("Invalid DSH team session descriptor");
+    }
+  });
+
+  it("fails peer creation when the host composition rejects or its mount fails", async () => {
+    const f = fixture();
+    f.setCompose(false);
+    const adapter = f.makeAdapter(true, true);
+
+    await expect(adapter.create({ directory: f.directory, agent: "designer" }))
+      .rejects.toThrow("Agent preset registry unavailable");
+    expect(f.sessions.size).toBe(0);
+    expect(f.stored.size).toBe(0);
+
+    f.setCompose(true); f.setMount(false);
+    await expect(adapter.create({ directory: f.directory, agent: "designer" })).rejects.toThrow("Agent preset mount failed");
+    expect(f.sessions.size).toBe(0);
+    expect(f.stored.size).toBe(0);
   });
 
   it("queues separate waking turns and preserves only actually claimed delivery markers", async () => {
