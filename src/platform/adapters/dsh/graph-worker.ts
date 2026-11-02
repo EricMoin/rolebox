@@ -14,6 +14,7 @@ import type { DshContentBlock } from "./agent-registrar.ts";
 import { readDshSessionEvents, type DshEventSource } from "./session-events.ts";
 import type { DshWorkerExecutorFactory, DshWorkerToolExecution, DshWorkerToolExecutor } from "./worker-executor.ts";
 import type { DshSystemPromptRegistry } from "./system-prompt.ts";
+import { installDshOutcomeSubmissionRepair } from "./outcome-submission-repair.ts";
 
 export const DSH_GRAPH_WORKER_GRANT: readonly GraphToolName[] = Object.freeze([
   "graph_submit_outcome",
@@ -27,7 +28,10 @@ function message(error: unknown): string {
 
 export interface DshWorkerAgent {
   readonly id?: string;
-  readonly session?: DshEventSource & { readonly id?: string };
+  readonly session?: DshEventSource & {
+    readonly id?: string;
+    append?(type: "user/message", data: unknown, intent: { surfaceOp: "append" }): unknown;
+  };
   readonly ctx?: { readonly systemPrompt?: Pick<DshSystemPromptRegistry, "section">; readonly tools?: {
     /** Published rc3 uses presentAs; newer source hosts use setExecutor. */
     presentAs?(mode: "native"): () => void;
@@ -284,6 +288,8 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     return decision;
   });
   if (stop) disposers.push(stop);
+  const repair = installDshOutcomeSubmissionRepair(subscribe, isWorker);
+  if (repair) disposers.push(repair);
   return {
     isWorker,
     toolGrantOf: grantOf,

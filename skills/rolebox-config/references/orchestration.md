@@ -110,6 +110,23 @@ presentation configuration. Codex MCP cannot configure Codex's native workers.
 Worker instructions should use available native tools and the dedicated outcome
 submission instead of inventing shell or file wrapper APIs.
 
+On DSH, a model response rejected as `MALFORMED_RESPONSE` specifically because
+`graph_submit_outcome` contains invalid JSON gets up to two submission repairs
+per worker turn. The host keeps the same session, step and graph attempt, adds
+the failed argument draft with its credential redacted to that worker's context,
+and asks it to correct the submission without repeating completed work. The
+worker must reuse the original handoff credential; acceptance gates still run
+normally. These repairs do not create graph executions or consume additional
+`max_executions`, but model requests still consume tokens. This is automatic,
+with no graph/role setting; restart the DSH plugin to load an updated build.
+
+Recovery requires the host's request-error hook and writable session message
+surface, and a diagnostic carrying the failed arguments (at most 131,072 UTF-16
+code units). Cancellation, other tool failures, transport errors and output truncation
+are not covered. After the repair limit the host's normal error handling applies;
+do not assume a failed attempt was accepted. For large reports, keep submissions
+concise and reference existing artifacts where the declared contract permits.
+
 ### Operator-installed graph policy
 
 These are startup environment variables, not fields that a graph or worker may
