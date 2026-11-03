@@ -79,7 +79,7 @@ dsh checkout root:
 | 3. Subagent provider | `SubagentCapabilities`, `SubagentProvider`, `ResolvedSubagentStartRequest.descriptor`, `ContinuableCreateRequest` / `ContinuableCreateSpec`; `SubagentRuntime` | `packages/subagent/subagent/src/types.ts`; `packages/subagent/subagent/src/index.ts`; `packages/subagent/subagent/src/descriptor.ts` |
 | 4. Session store / events | `SessionStore`, `Session`, `SessionEvent`, known-event catalog | `packages/core/session/src/index.ts`; `packages/core/session/src/types.ts`; `packages/core/session/src/known-event-types.ts` |
 | 5. Cordis Config / StandardSchema | `Plugin.Base.Config` = `StandardSchemaV1` | `vendor/cordis/src/registry.ts`; `vendor/cordis/src/context.ts`; `vendor/cordis/src/service.ts` |
-| 6. Bundle patch + client envelope/slots | `EntryOptions`; profile boot; slot contracts; client module registry | `vendor/loader/src/config/entry.ts`; `vendor/include/src/index.ts`; `packages/boot/app-boot/src/{profile.ts,index.ts}`; `packages/client/ui-conversation/src/client/contract/slots.ts`; `packages/client/ui-settings/src/client/contract/slots.ts`; `packages/client/ui-sidebar-right/src/client/contract/slots.ts`; `packages/client/ui-sidebar-right/src/client/tab-registry.ts`; `packages/client/modules/src/index.ts`; `packages/client/tsdown.client.ts` |
+| 6. Bundle patch + client envelope/slots | `EntryOptions`; profile boot; slot contracts; client module registry | `vendor/loader/src/config/entry.ts`; `vendor/include/src/index.ts`; `packages/boot/app-boot/src/{profile.ts,index.ts}`; `packages/client/ui-conversation/src/client/contract/slots.ts`; `packages/client/ui-settings/src/client/contract/slots.ts`; `packages/client/modules/src/index.ts`; `packages/client/tsdown.client.ts` |
 
 Conformance of these seams to the checkout is enforced by the read-only drift
 detector `scripts/verify-dsh-contract.ts` (§9). Run against the checkout, it
@@ -928,11 +928,11 @@ The role-switch UI ships as two halves: a **host route** on dsh's own web server
 mounts the role-switch chip into the web app). Both surfaces are verified
 against the `0.1.5-rc.1` source checkout. The monitoring surface ships through the same two
 halves: two read-only endpoints added to the `/rolebox` host API (§4.4.6) and a
-**right-Sidebar page tab** contributed by the same client bundle (§4.4.7), whose
+**session Conversation view** contributed by the same client bundle (§4.4.7), whose
 settings-panel counterpart is the "Rolebox" page listing the loaded roles.
 The log view is the third such surface: a read-only `GET /rolebox/logs` view
 endpoint (§4.4.6, its own `/rolebox/logs` prefix registration, so the
-run-console route is untouched) and a second right-Sidebar page tab (§4.4.7).
+run-console route is untouched) and a second Conversation view (§4.4.7).
 Its entry wiring is MOUNTED — `src/entries/dsh.ts` registers the route under
 the same `webServer` probe as the composed one, and §4.4.6 states the mounted
 behavior.
@@ -1162,12 +1162,14 @@ composed handler serving both surfaces, and `tests/dsh-plugin.test.ts` includes
 a duplicate-rejecting registrar double (mirroring the real host) proving exactly
 one `/rolebox` registration happens.
 
-- **`GET /rolebox/status`** — composite runtime snapshot:
+- **`GET /rolebox/status?sessionId=<id>`** — composite runtime snapshot; the
+  Conversation view supplies its session id to filter graphs and loops. Omitting
+  the query preserves the workspace-wide inventory:
   - **loop summary** — `LoopCoordinator.getAllLoopStates()` (`src/loop/coordinator.ts`,
     `Map<string, LoopState>`: per-loop round state, status, termination);
-  - **engine graph snapshot** — `readLiveEngineGraphs(stateDir)` (`src/cli/commands/monitor/monitor-reader-engine.ts`,
-    `EngineGraphSnapshot[]`: live in-memory graph registry rows — the same feed
-    the monitor TUI reads);
+  - **engine graph snapshot** — `readLiveEngineGraphs(stateDir, sessionId)` (`src/cli/commands/monitor/monitor-reader-engine.ts`,
+    `EngineGraphSnapshot[]`: native persisted graph records, filtered by durable
+    invocation origin when a session is supplied);
   - **sessions** — count + most recent ids from `DshSessionStoreLike.list()`;
   - **per-session active role** — `DshRoleSwitcher.getActive(sessionId)` (`src/platform/adapters/dsh/role-switcher.ts`,
     the session's active role id or `null` for the base agent).
@@ -1197,13 +1199,11 @@ the registration constraint below.
 **Error contract** — the same stable JSON error shape as the role-switch route
 (§4.4.1, `web-role-switch-route.ts`): every non-2xx response is JSON
 with `{ "ok": false, "error": string }`. The monitor handler itself emits
-`404` (unknown route under `/rolebox`), `405` (known path, wrong method), and
+`400` (empty or repeated `sessionId`), `404` (unknown route under `/rolebox`), `405` (known path, wrong method), and
 `500` (unexpected failure — the handler never rejects; every branch is guarded
 so a failing handler yields stable JSON instead of a bare socket teardown).
-`400` and `413` are NOT part of the monitor surface: both endpoints are pure
-`GET` reads that never buffer a request body (unlike `POST /rolebox/roles/switch`,
-which owns the 64 KiB body cap), so those two role-switch codes cannot fire
-here. Both endpoints have no mutation surface.
+Both endpoints remain read-only and never buffer a request body. The session
+filter does not narrow the workspace session census or dispatch metrics.
 
 **The log view route (`GET /rolebox/logs`).** A third read-only surface, built
 on the same structural host-route pattern:
@@ -1241,18 +1241,16 @@ request by the composed one (see `docs/logging.md`, "The live view").
 drives the mounted handler (`GET` = `200` view JSON, `POST` = `405`);
 `tests/dsh-cordis-e2e.test.ts` pins the two-route table on a real cordis boot.
 
-#### 4.4.7 Client entries: the `settings.section` "Rolebox" page and the right-Sidebar tabs
+#### 4.4.7 Client entries: Rolebox settings and session Conversation views
 
 The client bundle now contributes **five** surfaces — the role-switch chip
 (`conversation.input.right`, §4.4.4), the "Rolebox" settings page, the
 monitoring tab, the log view tab, and one keyed transcript row per rolebox tool
 name (`tool.call.toolview`, §4.4.7(d)) — and `apply()` returns one disposer that
-tears every one of them down: the role-chip declaration wait, the settings
-declaration wait, the two tab-type registrations
-(`ctx.sidebarRightTabs.register`), the two tab-body declaration waits (both
-keyed into the SAME `sidebar.right.pane.tab` seat under their own type ids),
-the tool-row dictionaries and the tool-row declaration waits,
-`src/platform/adapters/dsh/web-ui/client.ts`.
+tears every one of them down: the role-chip and settings declaration waits,
+the two `conversation.view` declaration waits, the tool dictionaries and the
+tool-row declaration waits. Only `slots` and `locale` services are required;
+right-Sidebar services are not used.
 
 **(a) The `settings.section` page — "Rolebox" (what roles are loaded)**
 
@@ -1262,8 +1260,7 @@ the canonical QueueDock registrant posture (§4.4.3):
 ```ts
 ctx.slots.inject("settings.section", () =>
   ctx.slots.register(
-    { name: "settings.section", id: "rolebox", order: 90, label: "Rolebox",
-      inject: () => ({ openMonitor }) },
+    { name: "settings.section", id: "rolebox", order: 90, label: "Rolebox" },
     RoleboxRolesPanel,
   ),
 );
@@ -1295,17 +1292,8 @@ shell owns the open state.
   `scope: 'root'` slot means the inject factory receives **no definite session
   id** — unlike the session-scoped `conversation.input.right` (§4.4.4, whose
   inject factory resolves `(sessionId) => ({ sessionId })`).
-- **Inject face** — the entry passes the zero-argument face
-  `() => ({ openMonitor })`, the shape the shipped registrants use
-  (`inject: sectionInjected`,
-  `source:packages/client/ui-agent-preset/src/client/index.ts:215-222`).
-  `openMonitor` calls `ctx.sidebarRight.openTab("rolebox-monitor")` and returns
-  `null` on success or a short user-facing line when that call throws (no
-  session surface is mounted —
-  `source:packages/client/ui-sidebar-right/src/client/service.ts:537-544`),
-  mirroring ui-plan's `exitPlanMode: () => string | null` error-line convention
-  (`source:packages/client/ui-plan/src/client/index.ts:105-110`). The page
-  renders the line on its status seat; it is never thrown.
+- **Navigation** — the default settings page points to the Rolebox view beside
+  Chat and Trajectory. No Sidebar-opening callback is injected.
 - **The page** (`src/platform/adapters/dsh/web-ui/rolebox-roles-panel.tsx` +
   `rolebox-roles-panel.css.ts`) fetches the loaded-role list from
   `GET /rolebox/roles` (the bare array served by the §4.4.1 prefix route)
@@ -1327,88 +1315,35 @@ shell owns the open state.
   effect never fires, the page does not mount, and the plugin stays healthy —
   the role chip and the monitoring tab are unaffected.
 
-**(b) The right-Sidebar monitoring tab (live session evidence)**
+**(b) Session Conversation views with the original panel content**
 
-Monitoring is live, session-scoped evidence, so it belongs beside the
-conversation rather than inside settings. The web app exposes two third-party
-sidebar seats: `sidebar.panellist` — a **root-scoped** list of global panel
-icons, declared by `@deepseek-ai/dsh-client-ui-sidebar`
-(`source:packages/client/ui-sidebar/src/client/contract/slots.ts:34`) — and
-`sidebar.right.pane.tab`, the **session-scoped** keyed seat for right-Sidebar
-page bodies. The session-scoped one is the right home: a page tab is opened and
-read in the context of one session, exactly like the loops, engine graphs and
-metrics it shows, whereas the settings page answers the static catalogue
-question "what roles are loaded".
-
-A right-Sidebar page type registers in two stages, mirrored from
-`@deepseek-ai/dsh-client-ui-plan`'s preview type
-(`source:packages/client/ui-plan/src/client/index.ts:65-69` and `:93-98`):
+`conversation.view` is a list slot with `scope: 'session'`. Its list entries
+appear as view tabs beside Chat and Trajectory; the host supplies the standard
+`sessionId`, owns view selection and handles header overflow.
 
 ```ts
-ctx.sidebarRightTabs.register({
-  id: "rolebox-monitor", kind: "rolebox-monitor", title: () => "Rolebox",
-  guide: [{ id: "monitor", order: 20, title: () => "Rolebox",
-            description: () => "Live rolebox monitoring: loops, engine graphs, metrics and sessions." }],
-});
-ctx.slots.inject("sidebar.right.pane.tab", () =>
+ctx.slots.inject("conversation.view", () =>
   ctx.slots.register(
-    { name: "sidebar.right.pane.tab", key: "rolebox-monitor" },
+    { name: "conversation.view", id: "rolebox-monitor", order: 30, label: "Rolebox" },
     RoleboxMonitorPanel,
+  ),
+);
+ctx.slots.inject("conversation.view", () =>
+  ctx.slots.register(
+    { name: "conversation.view", id: "rolebox-logs", order: 40, label: "Logs" },
+    RoleboxLogsPanel,
   ),
 );
 ```
 
-The **log view** is the same two stages a second time in the same seat — its own
-type (`id`/`kind` `rolebox-logs`, title "Logs", its own guide entry) and its own
-body keyed `rolebox-logs` for `RoleboxLogsPanel`
-(`src/platform/adapters/dsh/web-ui/rolebox-logs-panel.tsx` +
-`rolebox-logs-panel.css.ts`). One seat, two independently keyed bodies: neither
-type can blank the other's pane, and a failed registration of one is reported
-without costing the other (both bodies install before their types).
+The bodies retain the monitoring and log content, using their existing bounded
+scrolling layout in the Conversation view. The monitor graph picker selects one
+current-session graph while retaining the original attention, ledger, session,
+loop and metrics sections. Refreshes retain a manual graph selection; changing
+sessions clears the displayed snapshot and discards late responses.
 
-- **The seat** — `sidebar.right.pane.tab` is declared keyed and session-scoped
-  by `@deepseek-ai/dsh-client-ui-sidebar-right`
-  (`source:packages/client/ui-sidebar-right/src/client/contract/slots.ts:50-58`):
-  `{ kind: 'keyed'; scope: 'session'; hookContext: TabHookContext; inject:
-  SidebarRightTabInjected }` — "One tab's body, dispatched with the `id` of the
-  type in force for `tab.kind` … A kind with no type in force renders the
-  owner's 'nothing can view this' notice rather than an empty pane." The body
-  registration carries **no inject face**: a page body needs none of the tab's
-  runtime data and may render global data (ui-plan's `PlanPreview` body
-  registers the same way). The seat IS session-scoped, though, so the framework
-  also hands the body the standard session kit; `RoleboxMonitorPanelProps`
-  therefore accepts the optional `sessionId` that kit carries
-  (`source:packages/client/ui-session/src/client/index.ts:162`) and uses it for
-  exactly one thing — marking, and ordering, the session the user is looking at
-  in the roster. Absent, the roster still renders.
-- **The type registry** — `ctx.sidebarRightTabs` is the
-  `SidebarRightTabRegistry` provided by `@deepseek-ai/dsh-client-ui-sidebar-right`
-  (`source:packages/client/ui-sidebar-right/src/client/index.ts:109-110`).
-  `SidebarRightTabDefinition`
-  (`source:packages/client/ui-sidebar-right/src/client/tab-registry.ts:91-134`)
-  carries `id` (this implementation's identity AND the key its body registers
-  under in the seat above), `kind` (what `openTab` names), `title(address)`
-  and the optional `guide` entries
-  (`source:.../tab-registry.ts:61-80`); omitting `patterns` makes the type a
-  **page type**, opened by `kind` and recognizing no resource address.
-  `register` returns the idempotent disposer the plugin collects
-  (`source:.../tab-registry.ts:248`). Because the type is registered eagerly
-  rather than declaration-waited, the plugin's `inject` roster is
-  `["slots", "sidebarRightTabs", "sidebarRight"]`: activation waits on the
-  right-Sidebar faces — the accepted cost of contributing a page type.
-- **Opening it** — `ctx.sidebarRight.openTab(kind)`
-  (`source:packages/client/ui-sidebar-right/src/client/service.ts:150-171`)
-  opens the type in force for the mounted session's right Sidebar and expands
-  the column in the same step; it **throws** when no session surface is mounted
-  (`source:.../service.ts:296-299` → `:537-544`). The shipped guide page lists
-  every registered type's `guide` entries and picking one calls
-  `openTab(kind, { replaceTab: true })`
-  (`source:packages/client/ui-sidebar-right/src/client/tabs/guide/GuideBody.tsx:80-99`)
-  — the standard discovery path for a page type, so the tab is reachable without
-  the settings page (the settings page's "Open monitor" control is the
-  cross-surface shortcut).
 - **The body** (`src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx` +
-  `rolebox-monitor-panel.css.ts`) fetches `GET /rolebox/status` and
+  `rolebox-monitor-panel.css.ts`) fetches `GET /rolebox/status?sessionId=<id>` and
   `GET /rolebox/metrics` same-origin (relative paths on the dsh web server)
   and renders the run console with loading/error/empty states. It reads those
   two payloads in the shape the route actually composes — `loops: { count,
@@ -1418,9 +1353,9 @@ without costing the other (both bodies install before their types).
   revision read `loops` as a bare array or a keyed map and
   `sessions.recentIds`; against the real route that silently dropped the whole
   Loops section and reduced the roster to a count.) Top-down it renders: the
-  verdict band, the session roster (docked session first, then the store's most
-  recent, then by id), one ledger block per engine graph (identity and state, a
-  one-cell-per-node strip, the run's readings, the node ledger) and one row per
+  verdict band, the selected graph (topology, identity, state, readings and node
+  ledger), the workspace session roster (current session first, then the
+  store's most recent, then by id), and one row per
   loop (round, round time, elapsed, mode, dispatched rounds, worker session and
   the loop's own `errorReason`), then the metric groups with label chips and
   `avg/p50/p95/n` histograms. An empty metrics snapshot states its reason
@@ -1434,11 +1369,20 @@ without costing the other (both bodies install before their types).
   on screen behind a disabled Refresh. A failed status read keeps its message
   and its Retry control in the BODY, whether or not the metrics seat answered:
   partial data must never cost the user their way back. The role-reload control
-  is **not** here any more (it moved to (a)). The chrome is built for a narrow
-  docked column: 8px horizontal padding, a header grid whose title track is
-  `minmax(0, 1fr)`, wrapping fact rows, a full-width status line, `title`
-  recovery on every truncating value, no fixed width that could overflow the
-  pane, and single-column sections. The body keeps its own `<h2>Rolebox</h2>`
+  is **not** here any more (it moved to (a)). The chrome fills the available
+  Conversation width with 8px horizontal padding and single-column sections.
+  Headers, status text, role labels and identifier rows wrap to their actual
+  available width. Session and task ids remain complete in the roster, node
+  facts, loops and attention list. Graph state rows, loop progress, metric values
+  and histogram buckets also fit the actual column width. The Conversation owns
+  vertical scrolling; the monitor root has no independent scrollport or scroll
+  containment. Wide topology figures and expanded native JSON records keep
+  horizontal scrolling local while passing vertical wheel input to the
+  Conversation. The browser layout regression runs with
+  `ROLEBOX_DSH_WEB_LAYOUT_LIVE=1 npm test -- tests/platform/dsh-web-ui-monitor-layout.test.ts`;
+  it uses the installed host's active Conversation CSS and checks full, sparse,
+  loading, empty and error states, expanded lists, wheel input and keyboard
+  scrolling. The body keeps its own `<h2>Rolebox</h2>`
   heading so its sections stay named in the accessibility tree under the tab
   chip.
 - **Visual system: glyph lane, chip, strip** — three repeated units carry the
@@ -2184,15 +2128,10 @@ It asserts, per seam:
 - the cordis `Plugin.Base.Config` slot (must stay a `StandardSchemaV1`);
 - the `dsh.bundle.patch` row shape (every row key must be a loader
   `EntryOptions` member);
-- the three client slot keys rolebox contributes into
-  (`conversation.input.right`, `settings.section`,
-  `sidebar.right.pane.tab`) — the third keyed by the monitoring tab type's
-  `id` — plus the tab-type registration behind it: the client's
-  `ctx.sidebarRightTabs.register(...)` call must exist, dsh must still declare
-  `SidebarRightTabRegistry.register`, and every member of the
-  `DshSidebarRightTabDefinition` mirror must still be declared by dsh's
-  `SidebarRightTabDefinition`
-  (`packages/client/ui-sidebar-right/src/client/tab-registry.ts`).
+- the four client slot keys rolebox contributes into
+  (`conversation.input.right`, `settings.section`, `conversation.view`,
+  `tool.call.toolview`). Conversation views use list ids and labels rather than
+  Sidebar tab-type registrations.
 
 **Invocation (developer-local by design).** It is NOT wired into CI and never
 vendors or clones dsh:
@@ -2210,9 +2149,7 @@ DSH_SOURCE_DIR=/path/to/harness-source node --import tsx scripts/verify-dsh-cont
   `packages/core/session/src/index.ts`, `vendor/cordis/src/registry.ts`,
   `vendor/loader/src/config/entry.ts`,
   `packages/client/ui-conversation/src/client/contract/slots.ts`,
-  `packages/client/ui-settings/src/client/contract/slots.ts`,
-  `packages/client/ui-sidebar-right/src/client/contract/slots.ts`,
-  `packages/client/ui-sidebar-right/src/client/tab-registry.ts`).
+  `packages/client/ui-settings/src/client/contract/slots.ts`).
 
 Run this gate against the checkout before/after a dsh version bump; every
 citation in this document should also be re-checked at that time.

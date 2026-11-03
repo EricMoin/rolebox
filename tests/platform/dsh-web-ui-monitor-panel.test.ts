@@ -298,11 +298,11 @@ globalThis.fetch = ((input: unknown, init?: RequestInit) => {
   if (cfg.gate) {
     return new Promise<Response>((resolve) => {
       pendingGates.push(() =>
-        resolve(fakeResponse(200, url === panel.STATUS_ENDPOINT ? cfg.status : cfg.metrics)),
+        resolve(fakeResponse(200, new URL(url, "http://localhost").pathname === panel.STATUS_ENDPOINT ? cfg.status : cfg.metrics)),
       );
     });
   }
-  if (url === panel.STATUS_ENDPOINT) {
+  if (new URL(url, "http://localhost").pathname === panel.STATUS_ENDPOINT) {
     if (!cfg.statusOk) return Promise.resolve(fakeResponse(500, { ok: false, error: "boom" }));
     return Promise.resolve(fakeResponse(200, cfg.status));
   }
@@ -583,6 +583,24 @@ describe("RoleboxMonitorPanel", () => {
   });
 
   describe("API contract", () => {
+    it("keeps the restored monitor layout and graph switching scoped to this session", async () => {
+      cfg.status = { ...STATUS_BODY, engineGraphs: [GRAPH, { ...GRAPH, graphId: "another-graph" }] };
+      mountPanel({ sessionId: CURRENT_SESSION });
+      await settle();
+      expect(calls).toContain("GET /rolebox/status?sessionId=" + CURRENT_SESSION);
+      expect(calls).toContain("GET /rolebox/metrics");
+      expect(byClass("rolebox-monitor-session-row").length).toBeGreaterThan(0);
+      expect(byClass("rolebox-monitor-graph")).toHaveLength(1);
+      const picker = byClass("rolebox-monitor-graph-select")[0]!;
+      (picker.props.onChange as (event: { currentTarget: { value: string } }) => void)({
+        currentTarget: { value: "another-graph" },
+      });
+      expect(textOf(byClass("rolebox-monitor-graph-id")[0]!)).toBe("another-graph");
+      click(refreshButton());
+      await settle();
+      expect(byClass("rolebox-monitor-graph-select")[0]!.props.value).toBe("another-graph");
+    });
+
     it("declares the same-origin monitoring endpoints and no reload endpoint", () => {
       expect(panel.STATUS_ENDPOINT).toBe("/rolebox/status");
       expect(panel.METRICS_ENDPOINT).toBe("/rolebox/metrics");
@@ -634,6 +652,9 @@ describe("RoleboxMonitorPanel", () => {
 
       const rows = byClass("rolebox-monitor-session-row");
       expect(rows).toHaveLength(3);
+      expect(byClass("rolebox-monitor-session-id").map((node) => textOf(node))).toEqual([
+        CURRENT_SESSION, RECENT_SESSION, OTHER_SESSION,
+      ]);
       // Where am I? The docked session leads and says so.
       expect(textOf(rows[0]!)).toContain("8e7a9623");
       expect(textOf(rows[0]!)).toContain("ai-designer");
@@ -643,7 +664,7 @@ describe("RoleboxMonitorPanel", () => {
       expect(textOf(rows[1]!)).toContain("latest");
       expect(textOf(rows[2]!)).toContain("573befaf");
       // The declared census is rendered as the section count.
-      expect(textOf(byClass("rolebox-monitor-section-count")[0]!)).toBe("3");
+      expect(textOf(byClass("rolebox-monitor-section-count")[1]!)).toBe("3");
       expect(textOf(byClass("rolebox-monitor-section-note")[0]!)).toContain("2 active roles");
     });
 
@@ -937,6 +958,7 @@ describe("RoleboxMonitorPanel", () => {
       expect(node.props.title).toContain("running");
       expect(within(node, "rolebox-monitor-tone-running")).toHaveLength(1);
       expect(factValue(node, "retries")).toBe("1");
+      expect(factValue(node, "session")).toBe(GRAPH.nodes[1]!.dispatchSessionId);
       expect(textOf(node)).toContain("42s");
 
       // Five nodes against a four-row cap: the rest stays one click away.
@@ -983,13 +1005,14 @@ describe("RoleboxMonitorPanel", () => {
       await settle();
 
       const loop = byClass("rolebox-monitor-loop")[0]!;
+      expect(textOf(within(loop, "rolebox-monitor-loop-id")[0]!)).toBe(LOOPS[0]!.originSessionId);
       expect(factValue(loop, "round")).toBe("2/5");
       expect(factValue(loop, "agent")).toBe("engineer");
       expect(factValue(loop, "mode")).toBe("inherit");
       expect(factValue(loop, "dispatched")).toBe("2");
       expect(factValue(loop, "elapsed")).toBe("5m");
       expect(factValue(loop, "round time")).toBe("42s");
-      expect(factValue(loop, "worker")).toBe("22222222…");
+      expect(factValue(loop, "worker")).toBe(LOOPS[0]!.activeWorkerSessionId);
       expect(textOf(loop)).toContain("awaiting_worker");
     });
 
@@ -1572,9 +1595,8 @@ describe("RoleboxMonitorPanel", () => {
       // Tighter horizontal padding than the settings page.
       const rootBlock = /\.rolebox-monitor\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
       expect(rootBlock).toContain("padding: 12px 8px");
-      // The header's first track may shrink to nothing; the control never does.
       const headerBlock = /\.rolebox-monitor-header\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
-      expect(headerBlock).toContain("minmax(0, 1fr)");
+      expect(headerBlock).toContain("flex-wrap: wrap");
       // Every multi-item chrome row wraps instead of overflowing.
       for (const cls of [
         "rolebox-monitor-graph-head",
@@ -1592,6 +1614,14 @@ describe("RoleboxMonitorPanel", () => {
       // The panel fills its pane; nothing hard-codes a width that could
       // overflow the ~280px minimum content column.
       expect(cssText).toContain("width: 100%");
+      const panelBlock = /\.rolebox-monitor-panel\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(panelBlock).not.toContain("max-width:");
+      for (const name of ["session-id", "node-id", "loop-id", "graph-id", "fact-value"]) {
+        const block = new RegExp("(?:^|\\n)\\.rolebox-monitor-" + name + "\\s*\\{([^}]*)\\}", "s").exec(cssText)?.[1] ?? "";
+        expect(block).toContain("overflow-wrap: anywhere");
+        expect(block).not.toContain("text-overflow: ellipsis");
+        expect(block).not.toContain("white-space: nowrap");
+      }
       const fixedWidths = [...cssText.matchAll(/[;{\s]width:\s*(\d+)px/g)].map((m) =>
         Number(m[1]),
       );
@@ -1599,24 +1629,12 @@ describe("RoleboxMonitorPanel", () => {
       expect(fixedWidths.every((width) => width <= 280)).toBe(true);
     });
 
-    it("bounds the pane root as the tab body's own scroller", () => {
-      // The host's right Sidebar wraps EVERY tab body in a pane-height
-      // clipping box (`.tabBody`: height 100%, min-height 0, overflow hidden),
-      // so a tab-body ROOT is expected to be bounded and to scroll INSIDE
-      // itself, exactly as the host's own tabs do. Without these declarations
-      // the console grew to its natural height — measured 5145px inside an
-      // 855px tab body — so everything past the first viewport was clipped
-      // away and unreachable at ANY scroll position.
+    it("leaves vertical scrolling to the Conversation view", () => {
       const rootBlock = /\.rolebox-monitor\s*\{([^}]*)\}/s.exec(css.monitorCss)?.[1] ?? "";
-      // height + min-height bound the root to the host's clipped .tabBody.
-      expect(rootBlock).toContain("height: 100%");
-      expect(rootBlock).toContain("min-height: 0");
-      // The pane is its own scroller instead of a static block.
-      expect(rootBlock).toContain("overflow-y: auto");
-      // Paint containment is load-bearing: without it this pane's scrollable
-      // overflow propagated into the host's `.paneBody` and left a 4153px
-      // phantom scroll range whose scrollbar dragged the pane out of view.
-      expect(rootBlock).toContain("contain: paint");
+      expect(rootBlock).not.toContain("height: 100%");
+      expect(rootBlock).not.toContain("overflow-y: auto");
+      expect(rootBlock).not.toContain("contain: paint");
+      expect(css.monitorCss).not.toContain("overscroll-behavior: contain");
     });
 
     it("ships namespaced monitor rules with only --dsw-* tokens", () => {
@@ -1664,7 +1682,7 @@ describe("RoleboxMonitorPanel", () => {
 
       // The banned formula: "AAA · BBB · CCC" as a heading or metadata run.
       // Labelled facts and prose are how this surface states readings.
-      expect(bodyText()).not.toContain("·");
+      for (const graph of byClass("rolebox-monitor-graph")) expect(textOf(graph)).not.toContain("·");
       expect(textOf(byClass("rolebox-monitor-attention")[0]!)).not.toContain("·");
     });
   });
@@ -1961,8 +1979,8 @@ describe("RoleboxMonitorPanel", () => {
 
       const counts = byClass("rolebox-monitor-section-count");
       expect(counts).toHaveLength(4);
-      expect(textOf(counts[0]!)).toBe("3"); // sessions
-      expect(textOf(counts[1]!)).toBe("1"); // engine graphs
+      expect(textOf(counts[0]!)).toBe("1"); // engine graphs
+      expect(textOf(counts[1]!)).toBe("3"); // sessions
       expect(textOf(counts[2]!)).toBe("1"); // loops
       expect(textOf(counts[3]!)).toBe("4"); // metrics (1 counter + 2 gauges + 1 histogram)
     });

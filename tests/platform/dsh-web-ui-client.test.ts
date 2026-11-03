@@ -1,47 +1,4 @@
-
-/**
- * dsh web-UI client plugin tests — the browser half of the web-UI slot
- * integration (`src/platform/adapters/dsh/web-ui/`).
- *
- * The plugin's `apply(ctx)` is exercised against fake `ctx.slots` /
- * `ctx.sidebarRightTabs` / `ctx.sidebarRight` / `ctx.locale` doubles (platform-
- * test convention: structural fakes, no `@deepseek-ai/*` imports). Verifies:
- *   - the plugin entry metadata: `name === 'rolebox'`,
- *     `inject === ['slots', 'sidebarRightTabs', 'sidebarRight', 'locale']`,
- *     `apply` is a function (and the default object export carries them)
- *   - the role-chip contribution: `ctx.slots.inject` is called with
- *     `'conversation.input.right'` (the composer tool-row seat left of the
- *     model selector), and the injected callback registers
- *     `{ name, id: 'rolebox', order: 40, locale: 'conversation' }` with the
- *     session-scoped inject factory resolving `{ sessionId }`
- *   - the settings contribution: `'settings.section'` is injected, and its
- *     callback registers `RoleboxRolesPanel` with `name`, `id: 'rolebox'`,
- *     `order: 90`, `label: 'Rolebox'` and an inject face exposing
- *     `openMonitor` — which opens the monitoring tab kind through
- *     `ctx.sidebarRight.openTab` and returns `null` (or a message when the
- *     face throws)
- *   - the right-Sidebar tab TYPE: `ctx.sidebarRightTabs.register` receives
- *     `{ id, kind, title, guide }` with no `patterns` (a page type), and the
- *     guide entry names loops / engine graphs / metrics / sessions
- *   - the right-Sidebar tab BODY: `'sidebar.right.pane.tab'` is injected and
- *     its callback registers `RoleboxMonitorPanel` keyed by the tab id
- *   - the Tool-call rows: the locale dictionaries land in the tool namespace
- *     BEFORE the rows, every rolebox wire name gets its own keyed
- *     `tool.call.toolview` entry carrying the shared `RoleboxToolRow`, and
- *     host-owned names (`web_search`, `web_fetch`, `session_search`) are left
- *     to the host card
- *   - the returned disposer tears down every registration (the declaration
- *     waits, the tab types, the dictionaries and the tool rows)
- *   - the dock module's same-origin API contract (`GET /rolebox/roles`,
- *     `POST /rolebox/roles/switch`)
- *
- * React is not installed yet (subtask 3 adds the devDeps) — the `react`
- * module surface (and the JSX runtime the transpiler emits for the .tsx
- * components) is stubbed via `mock.module` BEFORE the client entry is
- * imported, so the component modules load without a react install.
- *
- * @module
- */
+/** Browser plugin registration and lifecycle contracts. */
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -127,40 +84,6 @@ function createFakeSlots() {
   return { slots, injected, registered, injectedDisposers };
 }
 
-/** Fake `ctx.sidebarRightTabs` double capturing the registered tab type. */
-function createFakeSidebarRightTabs() {
-  const registered: Array<Record<string, unknown>> = [];
-  let disposed = 0;
-  const sidebarRightTabs = {
-    register(definition: unknown) {
-      registered.push((definition ?? {}) as Record<string, unknown>);
-      return () => {
-        disposed += 1;
-      };
-    },
-  };
-  return { sidebarRightTabs, registered, disposed: () => disposed };
-}
-
-/** Fake `ctx.sidebarRight` double recording `openTab` kinds. */
-function createFakeSidebarRight() {
-  const opened: string[] = [];
-  let failure: Error | null = null;
-  const sidebarRight = {
-    openTab(kind: string) {
-      if (failure !== null) throw failure;
-      opened.push(kind);
-    },
-  };
-  return {
-    sidebarRight,
-    opened,
-    failWith(error: Error) {
-      failure = error;
-    },
-  };
-}
-
 /** Fake `ctx.locale` double capturing namespace registrations and disposal. */
 function createFakeLocale() {
   const registered: Array<{
@@ -182,10 +105,8 @@ function createFakeLocale() {
 /** A complete fake client context. */
 function createFakeContext() {
   const slots = createFakeSlots();
-  const tabs = createFakeSidebarRightTabs();
-  const right = createFakeSidebarRight();
   const locale = createFakeLocale();
-  return { slots, tabs, right, locale };
+  return { slots, locale };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -193,27 +114,19 @@ function createFakeContext() {
 describe("dsh web-UI client plugin entry", () => {
   it("exports the plugin metadata", () => {
     expect(client.name).toBe("rolebox");
-    // The client cordis enforces inject-gated service access: reading
-    // `ctx.slots` / `ctx.sidebarRight*` in apply() requires declaring them
-    // ("cannot get property ... without inject" otherwise) — mirrors
-    // dsh-client-ui-plan's roster.
-    expect(client.inject).toEqual(["slots", "sidebarRightTabs", "sidebarRight", "locale"]);
+    expect(client.inject).toEqual(["slots", "locale"]);
     expect(typeof client.apply).toBe("function");
     // object plugin shape (default export) carries the same metadata
     expect(client.default.name).toBe("rolebox");
-    expect(client.default.inject).toEqual(["slots", "sidebarRightTabs", "sidebarRight", "locale"]);
+    expect(client.default.inject).toEqual(["slots", "locale"]);
     expect(typeof client.default.apply).toBe("function");
   });
 
   it("registers the role chip in the composer tool row", () => {
     const { slots, injected, registered } = createFakeSlots();
-    const tabs = createFakeSidebarRightTabs();
-    const right = createFakeSidebarRight();
     const locale = createFakeLocale();
     const disposer = client.apply({
       slots,
-      sidebarRightTabs: tabs.sidebarRightTabs,
-      sidebarRight: right.sidebarRight,
       locale: locale.locale,
     });
 
@@ -246,137 +159,34 @@ describe("dsh web-UI client plugin entry", () => {
     expect(typeof disposer).toBe("function");
   });
 
-  it("registers the Rolebox settings page with an openMonitor inject face", () => {
+  it("registers settings without the obsolete Sidebar shortcut", () => {
     const ctx = createFakeContext();
-    const disposer = client.apply({
-      slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
-      locale: ctx.locale.locale,
+    client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale });
+    ctx.slots.injected.find((entry) => entry.key === "settings.section")!.callback();
+    expect(ctx.slots.registered[0]).toMatchObject({
+      options: { name: "settings.section", id: "rolebox", order: 90, label: "Rolebox" },
+      component: roles.RoleboxRolesPanel,
     });
-
-    const settingsInject = ctx.slots.injected.find((i) => i.key === "settings.section");
-    expect(settingsInject).toBeDefined();
-    settingsInject!.callback();
-    expect(ctx.slots.registered).toHaveLength(1);
-
-    const call = ctx.slots.registered[0]!;
-    expect(call.options.name).toBe("settings.section");
-    expect(call.options.id).toBe("rolebox");
-    expect(call.options.order).toBe(90);
-    expect(call.options.label).toBe("Rolebox");
-    expect(call.component).toBe(roles.RoleboxRolesPanel);
-
-    // scope 'root' slot: the inject face takes no session id and exposes the
-    // tab-opening business face the page's "Open monitor" control consumes.
-    const face = call.options.inject as () => { openMonitor: () => string | null };
-    expect(typeof face).toBe("function");
-    const business = face();
-    expect(typeof business.openMonitor).toBe("function");
-    expect(business.openMonitor()).toBeNull();
-    expect(ctx.right.opened).toEqual([client.MONITOR_TAB_KIND]);
-
-    // A host without a mounted session surface throws; the face converts that
-    // into a user-facing line instead of letting it escape the click handler.
-    ctx.right.failWith(new Error("sidebarRight: no session surface is mounted"));
-    const failure = business.openMonitor();
-    expect(typeof failure).toBe("string");
-    expect(failure).toContain("no session surface is mounted");
-
-    expect(typeof disposer).toBe("function");
+    expect(ctx.slots.registered[0]!.options.inject).toBeUndefined();
   });
 
-  it("registers the right-Sidebar monitoring tab type with a guide entry", () => {
+  it("places the original monitor and logs bodies in Conversation view tabs", () => {
     const ctx = createFakeContext();
-    client.apply({
-      slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
-      locale: ctx.locale.locale,
-    });
-
-    // The types are registered eagerly (not declaration-waited): a page type
-    // must exist before any openTab call can name its kind. The run console and
-    // the log view are SIBLING types, so the monitor definition is looked up by
-    // id rather than by position.
-    expect(ctx.tabs.registered).toHaveLength(2);
-    const definition = ctx.tabs.registered.find((entry) => entry.id === "rolebox-monitor")!;
-    expect(definition.id).toBe("rolebox-monitor");
-    expect(definition.kind).toBe("rolebox-monitor");
-    // A page type: no resource globs.
-    expect(definition.patterns).toBeUndefined();
-    const title = definition.title as (address: string) => string;
-    expect(typeof title).toBe("function");
-    expect(title("")).toBe("Rolebox");
-
-    const guide = definition.guide as Array<Record<string, unknown>>;
-    expect(guide).toHaveLength(1);
-    const entry = guide[0]!;
-    expect(typeof entry.id).toBe("string");
-    expect(typeof entry.order).toBe("number");
-    expect((entry.title as () => string)()).toBe("Rolebox");
-    const description = (entry.description as () => string)();
-    for (const word of ["loops", "engine graphs", "metrics", "sessions"]) {
-      expect(description.toLowerCase()).toContain(word);
-    }
-  });
-
-  it("registers the right-Sidebar log view tab type with its own guide entry", () => {
-    const ctx = createFakeContext();
-    client.apply({
-      slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
-      locale: ctx.locale.locale,
-    });
-
-    const definition = ctx.tabs.registered.find((entry) => entry.id === client.LOGS_TAB_ID)!;
-    expect(definition).toBeDefined();
-    expect(definition!.kind).toBe(client.LOGS_TAB_KIND);
-    // A page type: no resource globs.
-    expect(definition!.patterns).toBeUndefined();
-    expect((definition!.title as () => string)()).toBe(client.LOGS_TAB_TITLE);
-
-    const guide = definition!.guide as Array<Record<string, unknown>>;
-    expect(guide).toHaveLength(1);
-    const entry = guide[0]!;
-    expect((entry.title as () => string)()).toBe(client.LOGS_TAB_TITLE);
-    const description = (entry.description as () => string)();
-    for (const word of ["log", "level", "channel", "source"]) {
-      expect(description.toLowerCase()).toContain(word);
-    }
-  });
-
-  it("registers the log view tab body keyed by the logs tab id, beside the monitor body", () => {
-    const ctx = createFakeContext();
-    client.apply({
-      slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
-      locale: ctx.locale.locale,
-    });
-
-    // ONE keyed seat, two bodies: the seat is declared once and each tab type
-    // registers its own body under its own id.
-    const seatInjections = ctx.slots.injected.filter(
-      (entry) => entry.key === "sidebar.right.pane.tab",
-    );
-    expect(seatInjections).toHaveLength(2);
-    for (const injection of seatInjections) injection.callback();
-
-    const keys = ctx.slots.registered
-      .filter((call) => call.options.name === "sidebar.right.pane.tab")
-      .map((call) => call.options.key);
-    expect(keys).toEqual([client.MONITOR_TAB_ID, client.LOGS_TAB_ID]);
-
-    const logsBody = ctx.slots.registered.find(
-      (call) => call.options.key === client.LOGS_TAB_ID,
-    )!;
-    expect(logsBody).toBeDefined();
-    expect(logsBody!.component).toBe(logs.RoleboxLogsPanel);
-    // A page body needs no inject face and no locale.
-    expect(logsBody!.options.inject).toBeUndefined();
-    expect(logsBody!.options.locale).toBeUndefined();
+    client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale });
+    const views = ctx.slots.injected.filter((entry) => entry.key === "conversation.view");
+    expect(views).toHaveLength(2);
+    for (const entry of views) entry.callback();
+    expect(ctx.slots.registered).toEqual([
+      {
+        options: { name: "conversation.view", id: "rolebox-monitor", order: 30, label: "Rolebox" },
+        component: monitor.RoleboxMonitorPanel,
+      },
+      {
+        options: { name: "conversation.view", id: "rolebox-logs", order: 40, label: "Logs" },
+        component: logs.RoleboxLogsPanel,
+      },
+    ]);
+    expect(ctx.slots.injected.some((entry) => entry.key.startsWith("sidebar."))).toBe(false);
   });
 
   it("declares the same-origin logs route on the log view panel", () => {
@@ -385,53 +195,13 @@ describe("dsh web-UI client plugin entry", () => {
     expect(logs.BUFFER_LIMIT).toBeGreaterThan(0);
   });
 
-  it("registers the monitoring tab body keyed by the tab id", () => {
+  it("tears down every declaration wait and the dictionaries", () => {
     const ctx = createFakeContext();
-    client.apply({
-      slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
-      locale: ctx.locale.locale,
-    });
-
-    const bodyInject = ctx.slots.injected.find((i) => i.key === "sidebar.right.pane.tab");
-    expect(bodyInject).toBeDefined();
-    bodyInject!.callback();
-    expect(ctx.slots.registered).toHaveLength(1);
-
-    const call = ctx.slots.registered[0]!;
-    expect(call.options.name).toBe("sidebar.right.pane.tab");
-    // The keyed seat dispatches on the tab type's implementation id.
-    expect(call.options.key).toBe("rolebox-monitor");
-    expect(call.component).toBe(monitor.RoleboxMonitorPanel);
-    // A page body needs none of the tab runtime props and no locale: no
-    // inject face is declared for it.
-    expect(call.options.inject).toBeUndefined();
-    expect(call.options.locale).toBeUndefined();
-  });
-
-  it("tears down every registration through the returned disposer", () => {
-    const ctx = createFakeContext();
-    const disposer = client.apply({
-      slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
-      locale: ctx.locale.locale,
-    }) as () => void;
-
-    // Four declaration waits (dock, settings, monitor body, logs body), both
-    // tab types, the tool-row dictionaries, and ONE declaration wait per
-    // rolebox tool name.
-    const declarationWaits = 4 + descriptors.ROLEBOX_TOOL_VIEW_NAMES.length;
-    expect(ctx.slots.injected).toHaveLength(declarationWaits);
-    expect(ctx.tabs.registered).toHaveLength(2);
-    expect(ctx.slots.injectedDisposers).toEqual(Array(declarationWaits).fill(0));
-    expect(ctx.tabs.disposed()).toBe(0);
-    expect(ctx.locale.disposed()).toBe(0);
-
-    disposer();
-    expect(ctx.slots.injectedDisposers).toEqual(Array(declarationWaits).fill(1));
-    expect(ctx.tabs.disposed()).toBe(2);
+    const dispose = client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale }) as () => void;
+    const waits = 4 + descriptors.ROLEBOX_TOOL_VIEW_NAMES.length;
+    expect(ctx.slots.injected).toHaveLength(waits);
+    dispose();
+    expect(ctx.slots.injectedDisposers).toEqual(Array(waits).fill(1));
     expect(ctx.locale.disposed()).toBe(1);
   });
 
@@ -439,8 +209,6 @@ describe("dsh web-UI client plugin entry", () => {
     const ctx = createFakeContext();
     client.apply({
       slots: ctx.slots.slots,
-      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-      sidebarRight: ctx.right.sidebarRight,
       locale: ctx.locale.locale,
     });
 
@@ -513,66 +281,21 @@ describe("dsh web-UI client plugin entry", () => {
     expect(calls).toContainEqual({ key: "count.nodes", params: { n: 1 } });
   });
 
-  it("keeps the tab body registered when a sibling contribution fails", () => {
-    // A duplicate id/kind throws out of `sidebarRightTabs.register`
-    // (tab-registry.ts:235-247), which a double activation produces on its own.
-    // If that throw escaped `apply`, the LATER body registration would never
-    // run and a tab that is already open would render the host's
-    // "这类内容还没有可用的查看方式。" notice with nothing to explain it.
+  it("keeps the views when a sibling contribution fails", () => {
     const ctx = createFakeContext();
-    ctx.tabs.sidebarRightTabs.register = () => {
-      throw new Error('sidebarRight: tab type id "rolebox-monitor" is taken');
+    const inject = ctx.slots.slots.inject;
+    ctx.slots.slots.inject = (key, callback) => {
+      if (key === "settings.section") throw new Error("settings unavailable");
+      return inject(key, callback);
     };
-    const warnings: string[] = [];
-    const realWarn = console.warn;
-    console.warn = (message?: unknown) => {
-      warnings.push(String(message));
-    };
-
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const disposer = client.apply({
-        slots: ctx.slots.slots,
-        sidebarRightTabs: ctx.tabs.sidebarRightTabs,
-        sidebarRight: ctx.right.sidebarRight,
-        locale: ctx.locale.locale,
-      });
-
-      // Every declaration-waited contribution is still installed.
-      for (const key of [
-        "conversation.input.right",
-        "settings.section",
-        "sidebar.right.pane.tab",
-      ]) {
-        expect(ctx.slots.injected.some((entry) => entry.key === key)).toBe(true);
-      }
-
-      // …and BOTH tab bodies actually register when their seat is declared,
-      // even though both types threw: the bodies are keyed independently, so
-      // one type failing can never cost the other body its registration.
-      const seatInjections = ctx.slots.injected.filter(
-        (entry) => entry.key === "sidebar.right.pane.tab",
-      );
-      for (const injection of seatInjections) injection.callback();
-      const bodies = ctx.slots.registered.filter(
-        (call) => call.options.name === "sidebar.right.pane.tab",
-      );
-      expect(bodies.map((call) => call.options.key)).toEqual([
-        client.MONITOR_TAB_ID,
-        client.LOGS_TAB_ID,
-      ]);
-      expect(bodies[0]!.component).toBe(monitor.RoleboxMonitorPanel);
-      expect(bodies[1]!.component).toBe(logs.RoleboxLogsPanel);
-
-      // The failure is reported rather than swallowed, and the fiber still
-      // returns a disposer that tears down what DID register.
-      expect(warnings.some((line) => line.includes("monitor tab type"))).toBe(true);
-      expect(warnings.some((line) => line.includes("logs tab type"))).toBe(true);
-      expect(typeof disposer).toBe("function");
-      disposer!();
-      expect(ctx.slots.injectedDisposers.some((count) => count > 0)).toBe(true);
-    } finally {
-      console.warn = realWarn;
-    }
+      const dispose = client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale });
+      for (const view of ctx.slots.injected.filter((entry) => entry.key === "conversation.view")) view.callback();
+      expect(ctx.slots.registered.map((entry) => entry.options.id)).toEqual([client.MONITOR_VIEW_ID, client.LOGS_VIEW_ID]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("settings unavailable"));
+      dispose!();
+    } finally { warn.mockRestore(); }
   });
 
   it("declares the same-origin rolebox API contract on the dock module", () => {

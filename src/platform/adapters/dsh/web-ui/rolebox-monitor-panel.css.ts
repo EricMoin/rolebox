@@ -1,7 +1,5 @@
 /**
- * RoleboxMonitorPanel CSS — the rolebox RUN CONSOLE as a dsh RIGHT-SIDEBAR TAB
- * BODY (`sidebar.right.pane.tab` seat, keyed by the `rolebox-monitor` tab
- * type).
+ * RoleboxMonitorPanel CSS — the run console in the session Conversation view.
  *
  * The console answers, in order, "does anything need me?", "where am I?", "what
  * is each run doing?" and "what broke?". Its visual system rests on three
@@ -23,10 +21,8 @@
  * nested boxes, and the single raised surface is the attention band while it is
  * alarming — which is exactly what makes it the focal point.
  *
- * NARROW-COLUMN CHROME: this body is docked in the right Sidebar, which can be
- * narrowed to roughly 280px of content. Every reading lane WRAPS, every
- * identifier truncates with a `title` recovery, and nothing here sets a fixed
- * width.
+ * The console fills the Conversation view. Rows wrap to their available
+ * width, and identifiers remain complete even in a narrow column.
  *
  * Design posture:
  *   - Verdict first. `.rolebox-monitor-attention` is the panel's only focal
@@ -65,31 +61,13 @@
 export const monitorCss = `
 .rolebox-monitor {
   box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  flex: 1 0 auto;
   padding: 12px 8px;
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-xs-13);
-
-  /* ── Bounded scroller: the host's tab-body contract ──────────────────────
-     The right Sidebar wraps EVERY tab body in a pane-height clipping box
-     (the host's .tabBody: height 100%, min-height 0, overflow hidden), so a
-     tab body ROOT is expected to be bounded and to scroll INSIDE itself,
-     exactly as the host's own tabs do. This console was instead a static
-     block of natural height: measured 5145px inside that 855px tab body, so
-     everything past the first viewport was clipped away and unreachable at
-     ANY scroll position. */
-  /* Bound the root to the host's clipped .tabBody (855px) instead of letting
-     it grow to its content height. */
-  height: 100%;
-  min-height: 0;
-  /* The pane becomes its own scroller — the host's tab-body contract. */
-  overflow-y: auto;
-  /* A wheel at the end of the pane must not chain to the host pane beneath it. */
-  overscroll-behavior: contain;
-  /* Paint containment stops THIS pane's scrollable overflow from propagating
-     into the host's .paneBody (overflow: auto): measured live, the host
-     otherwise kept a 4153px phantom scroll range whose scrollbar dragged the
-     pane out of view and showed blank. With containment that range went to 0. */
-  contain: paint;
+  overflow-wrap: anywhere;
 
   --rolebox-surface: var(--dsw-specific-tip, rgb(245, 246, 247));
   --rolebox-surface-hover: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
@@ -132,10 +110,7 @@ export const monitorCss = `
 
 .rolebox-monitor-panel {
   width: 100%;
-  /* A docked panel can be dragged very wide, and a console is not a document:
-     past this measure the reading lanes would trail off into empty space
-     instead of staying a block you can take in at one glance. */
-  max-width: 680px;
+  min-width: 0;
 }
 
 /* ── Glyphs and type ──────────────────────────────────────────────────── */
@@ -204,14 +179,14 @@ export const monitorCss = `
   gap: var(--rolebox-space-1, 4px) var(--rolebox-space-2, 8px);
   padding-bottom: var(--rolebox-space-2, 8px);
   border-bottom: 1px solid var(--rolebox-border-subtle, rgba(0, 0, 0, 0.04));
-  display: grid;
-  /* The title track may shrink to nothing; the control never does. */
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
 }
 
 .rolebox-monitor-title-row {
   min-width: 0;
+  flex: 1 1 14rem;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 2px var(--rolebox-space-2, 8px);
@@ -223,16 +198,16 @@ export const monitorCss = `
   margin: 0;
   color: var(--rolebox-ink, rgb(15, 17, 21));
   font: var(--dsw-font-s-strong-14);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* How updates arrive, and when the snapshot was taken. Not a live region: the
    verdict seat announces, and a ticking timestamp beside it would drown it. */
 .rolebox-monitor-live {
   min-width: 0;
+  max-width: 100%;
   align-items: center;
+  flex-wrap: wrap;
   gap: 5px;
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
   font: var(--dsw-font-xxxs-11);
@@ -339,10 +314,9 @@ export const monitorCss = `
 
 .rolebox-monitor-status {
   min-width: 0;
-  grid-column: 1 / -1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  overflow: hidden;
+  flex: 1 1 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
   font: var(--dsw-font-xxxs-11);
 }
@@ -375,16 +349,15 @@ export const monitorCss = `
   flex: none;
   max-width: 100%;
   align-items: center;
-  height: 20px;
-  padding: 0 7px;
+  min-height: 20px;
+  padding: 2px 7px;
   border-radius: var(--rolebox-radius-chip, 6px);
   background: var(--rolebox-surface-hover, rgba(38, 49, 72, 0.06));
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
   font: var(--dsw-font-xxs-12);
   display: inline-flex;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .rolebox-monitor-chip-failed {
@@ -429,9 +402,8 @@ export const monitorCss = `
   min-width: 0;
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
   font: var(--dsw-font-xxxs-11);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ── The glyph lane ───────────────────────────────────────────────────── */
@@ -449,6 +421,7 @@ export const monitorCss = `
 
 .rolebox-monitor-fact {
   min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 5px;
   display: inline-flex;
@@ -487,6 +460,7 @@ export const monitorCss = `
 /* ── Verdict band ─────────────────────────────────────────────────────── */
 
 .rolebox-monitor-attention {
+  grid-template-columns: minmax(0, 1fr);
   box-sizing: border-box;
   gap: var(--rolebox-space-2, 8px);
   padding: var(--rolebox-space-3, 12px);
@@ -533,6 +507,7 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-attention-list {
+  grid-template-columns: minmax(0, 1fr);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -559,20 +534,21 @@ export const monitorCss = `
   font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px;
   line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ── Body and section heads ───────────────────────────────────────────── */
 
 .rolebox-monitor-body {
+  grid-template-columns: minmax(0, 1fr);
   padding-top: var(--rolebox-space-3, 12px);
   display: grid;
   gap: var(--rolebox-space-6, 24px);
 }
 
 .rolebox-monitor-section {
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   display: grid;
   gap: var(--rolebox-space-2, 8px);
@@ -627,6 +603,7 @@ export const monitorCss = `
 /* ── Sessions ─────────────────────────────────────────────────────────── */
 
 .rolebox-monitor-session-list {
+  grid-template-columns: minmax(0, 1fr);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -655,22 +632,22 @@ export const monitorCss = `
 
 .rolebox-monitor-session-glyph {
   flex: none;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   place-items: center;
   display: grid;
 }
 
 .rolebox-monitor-session-id {
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 30ch;
+  max-width: 100%;
   color: var(--rolebox-ink, rgb(15, 17, 21));
   font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px;
   line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .rolebox-monitor-session-marker {
@@ -684,11 +661,22 @@ export const monitorCss = `
 /* ── Engine graphs ────────────────────────────────────────────────────── */
 
 .rolebox-monitor-graph {
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   padding-top: var(--rolebox-space-3, 12px);
   border-top: 1px solid var(--rolebox-border-hairline, rgba(0, 0, 0, 0.1));
   display: grid;
   gap: var(--rolebox-space-2, 8px);
+}
+
+.rolebox-monitor-graph > details {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.rolebox-monitor-graph pre {
+  max-width: 100%;
+  overflow: auto;
 }
 
 .rolebox-monitor-graph-head {
@@ -707,14 +695,16 @@ export const monitorCss = `
   font-size: 13px;
   font-weight: 500;
   line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .rolebox-monitor-graph-state {
-  flex: none;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--rolebox-space-2, 8px);
   display: inline-flex;
 }
@@ -723,8 +713,8 @@ export const monitorCss = `
    never a sample. Hue is one channel of four — height, hollowness and dash
    pattern carry the rest, because the blocked amber does not clear 3:1. */
 .rolebox-monitor-strip {
+  min-width: 0;
   display: flex;
-  gap: 2px;
   height: 8px;
   margin: var(--rolebox-space-1, 4px) 0;
 }
@@ -732,7 +722,7 @@ export const monitorCss = `
 .rolebox-monitor-strip-cell {
   box-sizing: border-box;
   flex: 1 1 0;
-  min-width: 3px;
+  min-width: 0;
   border-radius: var(--rolebox-radius-mark, 2px);
   background: var(--rolebox-mark-done, rgb(84, 85, 87));
 }
@@ -766,19 +756,47 @@ export const monitorCss = `
 
 .rolebox-monitor-strip-pending {
   background: transparent;
-  border: 1px solid var(--rolebox-ink-faint, rgb(84, 85, 87));
+  outline: 1px solid var(--rolebox-ink-faint, rgb(84, 85, 87));
+  outline-offset: -1px;
 }
 
 .rolebox-monitor-strip-unknown {
   background: transparent;
-  border: 1px dashed var(--rolebox-ink-faint, rgb(84, 85, 87));
+  outline: 1px dashed var(--rolebox-ink-faint, rgb(84, 85, 87));
+  outline-offset: -1px;
 }
 
 /* ── Engine-graph topology ──────────────────────────────────────────────
    The node-and-edge figure. Every BOX coordinate comes from
    graph-topology.ts as an SVG attribute, so a rule in this section carries
-   colour, stroke, dash and opacity only. A rank wider than the docked sidebar
+   colour, stroke, dash and opacity only. A rank wider than the available view
    SCROLLS inside the canvas instead of being squeezed below legibility. */
+.rolebox-monitor-graph-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.rolebox-monitor-graph-select {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--rolebox-border-strong, rgba(0, 0, 0, 0.12));
+  border-radius: var(--rolebox-radius-control, 8px);
+  color: inherit;
+  background: var(--rolebox-surface, rgb(245, 246, 247));
+  font: inherit;
+}
+
+.rolebox-monitor-graph-select:focus-visible {
+  outline: 2px solid var(--rolebox-focus-ring, rgb(65, 118, 230));
+  outline-offset: 2px;
+}
+
 .rolebox-monitor-graph-canvas {
   box-sizing: border-box;
   min-width: 0;
@@ -792,7 +810,7 @@ export const monitorCss = `
 
 .rolebox-monitor-graph-svg {
   display: block;
-  /* A figure narrower than the docked pane sits in the MIDDLE of its row
+  /* A figure narrower than the view sits in the MIDDLE of its row
      instead of hugging the left: the svg keeps its intrinsic (legible) size
      and the free space is split evenly. A figure wider than the pane still
      scrolls, because the canvas is the overflow container. */
@@ -971,11 +989,14 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-node-group {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   display: grid;
   gap: var(--rolebox-space-1, 4px);
 }
 
 .rolebox-monitor-node-list {
+  grid-template-columns: minmax(0, 1fr);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -983,6 +1004,7 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-node-row {
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   padding: var(--rolebox-space-1, 4px) 0;
   border-top: 1px solid var(--rolebox-border-subtle, rgba(0, 0, 0, 0.04));
@@ -1004,8 +1026,8 @@ export const monitorCss = `
 
 .rolebox-monitor-node-glyph {
   flex: none;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   place-items: center;
   display: grid;
 }
@@ -1017,9 +1039,8 @@ export const monitorCss = `
   font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px;
   line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .rolebox-monitor-node-time {
@@ -1033,11 +1054,13 @@ export const monitorCss = `
 /* ── Loops ────────────────────────────────────────────────────────────── */
 
 .rolebox-monitor-loop-list {
+  grid-template-columns: minmax(0, 1fr);
   display: grid;
   gap: var(--rolebox-space-3, 12px);
 }
 
 .rolebox-monitor-loop {
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   display: grid;
   gap: var(--rolebox-space-1, 4px);
@@ -1053,8 +1076,8 @@ export const monitorCss = `
 
 .rolebox-monitor-loop-glyph {
   flex: none;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   place-items: center;
   display: grid;
 }
@@ -1066,9 +1089,8 @@ export const monitorCss = `
   font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px;
   line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .rolebox-monitor-loop-bar {
@@ -1084,6 +1106,9 @@ export const monitorCss = `
    progress is not a state. */
 .rolebox-monitor-progress {
   flex: none;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
   display: inline-flex;
@@ -1102,6 +1127,8 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-progress-text {
+  min-width: 0;
+  max-width: 100%;
   margin-left: var(--rolebox-space-1, 4px);
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
   font: var(--dsw-font-xxxs-strong-11);
@@ -1126,8 +1153,8 @@ export const monitorCss = `
 
 .rolebox-monitor-error-glyph {
   flex: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   color: var(--rolebox-ink-danger, rgb(236, 19, 19));
   display: grid;
   place-items: center;
@@ -1142,6 +1169,7 @@ export const monitorCss = `
 /* ── Metrics ──────────────────────────────────────────────────────────── */
 
 .rolebox-monitor-metric-group {
+  grid-template-columns: minmax(0, 1fr);
   display: grid;
   gap: var(--rolebox-space-1, 4px);
 }
@@ -1152,6 +1180,7 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-metric-list {
+  grid-template-columns: minmax(0, 1fr);
   display: grid;
 }
 
@@ -1180,7 +1209,9 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-metric-value {
-  flex: none;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
   margin-left: auto;
   color: var(--rolebox-ink, rgb(15, 17, 21));
   font: var(--dsw-font-xxs-strong-12);
@@ -1188,6 +1219,7 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-metric-extra {
+  grid-template-columns: minmax(0, 1fr);
   flex: 1 1 100%;
   min-width: 0;
   display: grid;
@@ -1196,22 +1228,23 @@ export const monitorCss = `
 
 /* The distribution strip: one bar per non-empty bucket, width proportional to
    the observations that landed in it. The lengths are data, not design — the
-   one place the component sets an inline length. */
+   gaps shrink with the bucket count so the strip fits the available width. */
 .rolebox-monitor-chart {
+  grid-template-columns: minmax(0, 1fr);
   display: grid;
   gap: 3px;
 }
 
 .rolebox-monitor-chart-bars {
+  min-width: 0;
   align-items: flex-end;
-  gap: 2px;
   height: 8px;
   display: flex;
 }
 
 .rolebox-monitor-chart-bar {
-  flex: 1 1 2px;
-  min-width: 2px;
+  flex: 1 1 0;
+  min-width: 0;
   height: 100%;
   border-radius: 1px;
   background: var(--rolebox-mark-done, rgb(84, 85, 87));
@@ -1229,7 +1262,8 @@ export const monitorCss = `
 .rolebox-monitor-more {
   box-sizing: border-box;
   justify-self: start;
-  height: 24px;
+  max-width: 100%;
+  min-height: 24px;
   padding: 0 var(--rolebox-space-2, 8px);
   border: 1px solid var(--rolebox-border-strong, rgba(0, 0, 0, 0.12));
   border-radius: var(--rolebox-radius-chip, 6px);
@@ -1268,6 +1302,7 @@ export const monitorCss = `
   color: var(--rolebox-ink, rgb(15, 17, 21));
   font: var(--dsw-font-xs-13);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--rolebox-space-3, 12px);
 }
@@ -1298,6 +1333,7 @@ export const monitorCss = `
 /* The empty state wears a face: a bare sentence reads as a failure, and this
    console must be legible as CALM when nothing is happening. */
 .rolebox-monitor-empty {
+  grid-template-columns: minmax(0, 1fr);
   display: grid;
   justify-items: center;
   gap: var(--rolebox-space-1, 4px);
@@ -1340,11 +1376,13 @@ export const monitorCss = `
 }
 
 .rolebox-monitor-skeleton {
+  grid-template-columns: minmax(0, 1fr);
   display: grid;
   gap: var(--rolebox-space-6, 24px);
 }
 
 .rolebox-monitor-skeleton-card {
+  grid-template-columns: minmax(0, 1fr);
   box-sizing: border-box;
   display: grid;
   gap: var(--rolebox-space-2, 8px);
@@ -1489,6 +1527,8 @@ export const monitorClass = {
   stripStopped: "rolebox-monitor-strip-stopped",
   stripPending: "rolebox-monitor-strip-pending",
   stripUnknown: "rolebox-monitor-strip-unknown",
+  graphPicker: "rolebox-monitor-graph-picker",
+  graphSelect: "rolebox-monitor-graph-select",
   graphCanvas: "rolebox-monitor-graph-canvas",
   graphSvg: "rolebox-monitor-graph-svg",
   graphBand: "rolebox-monitor-graph-band",

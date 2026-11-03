@@ -680,6 +680,23 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
       expect(graph).toBeDefined();
       expect(graph!.phase).toBe("executing");
       expect(graph!.nodeStatusCounts.running).toBe(1);
+      await application.tools.graph_declare_and_start({ declaration: {
+        version: 3, name: "other-session-graph", nodes: [
+          { id: "work", agent: "agent-a", prompt: "Work", outcomes: [{ id: "done" }] },
+        ], edges: [],
+      } }, "other-session");
+      const scoped = json<{ engineGraphs: Array<{ graphId: string }> }>(
+        await invoke(handler, "GET", "/rolebox/status?sessionId=parent"),
+      );
+      expect(scoped.engineGraphs.map((item) => item.graphId)).toEqual(["persisted-graph"]);
+      const empty = json<{ engineGraphs: unknown[]; loops: { count: number } }>(
+        await invoke(handler, "GET", "/rolebox/status?sessionId=new-session"),
+      );
+      expect(empty.engineGraphs).toEqual([]);
+      expect(empty.loops.count).toBe(0);
+      for (const query of ["sessionId=", "sessionId=parent&sessionId=other-session"]) {
+        expect((await invoke(handler, "GET", "/rolebox/status?" + query)).status).toBe(400);
+      }
     } finally {
       application?.close();
       if (previousDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;

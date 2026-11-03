@@ -8,11 +8,9 @@
  * description), its model and mode (or the explicit fallbacks the definition
  * implies) and its catalog configuration (`tools` policy and `maxSteps`).
  * Live SESSION monitoring deliberately does NOT live here any more: it moved to
- * a right-Sidebar page tab ({@link RoleboxMonitorPanel}, registered by
+ * a Conversation view ({@link RoleboxMonitorPanel}, registered by
  * `client.ts`), because monitoring is session-scoped evidence that belongs
- * beside the conversation. The header's "Open monitor" control bridges the two
- * through the `{ openMonitor }` inject face the settings entry passes
- * (see `client.ts`).
+ * beside the conversation. The header points to the Rolebox tab beside Chat and Trajectory.
  *
  * The page:
  *
@@ -110,11 +108,10 @@ export interface RoleboxRoleDto {
  *
  *   - `close` — the owner-share seat of the settings panel
  *     (`SettingsSectionOwnerProps`); the "Open monitor" control closes the
- *     settings shell before opening the right-Sidebar tab, so the tab is not
+ *     settings shell before opening the monitoring view, so the tab is not
  *     opened underneath a covering panel.
- *   - `openMonitor` — the entry's injected business face (`client.ts` passes
- *     `inject: () => ({ openMonitor })`): opens the monitoring tab in the
- *     mounted session's right Sidebar. It returns `null` on success and a
+ *   - `openMonitor` — an optional navigation callback for custom consumers: opens the monitoring tab in the
+ *     mounted session. It returns `null` on success and a
  *     short user-facing line when no session surface is mounted; the line is
  *     rendered on the status seat, never thrown.
  *   - `t` — the locale seat (declared for structural completeness). The panel
@@ -124,7 +121,7 @@ export interface RoleboxRoleDto {
 export interface RoleboxRolesPanelProps {
   /** Owner-share seat: closes the settings panel. */
   close?: () => void;
-  /** Injected face: opens the right-Sidebar monitoring tab (error line or null). */
+  /** Optional callback to open the monitoring view (error line or null). */
   openMonitor?: () => string | null;
   /** Locale seat; accepted, unused (hardcoded English copy). */
   t?: (key: string, params?: Record<string, unknown>) => string;
@@ -604,13 +601,19 @@ export function RoleboxRolesPanel(props: RoleboxRolesPanelProps) {
           )}
           Reload roles
         </button>
-        <button
-          type="button"
-          className={rolesClass.openMonitor}
-          onClick={openMonitorTab}
-        >
-          Open monitor
-        </button>
+        {props.openMonitor ? (
+          <button
+            type="button"
+            className={rolesClass.openMonitor}
+            onClick={openMonitorTab}
+          >
+            Open monitor
+          </button>
+        ) : (
+          <span className={rolesClass.description}>
+            Open the Rolebox tab next to Chat and Trajectory to monitor this session.
+          </span>
+        )}
         {/* The live region is a text seat and never wraps a control: an
             announced control would be re-read on every refresh. */}
         <span

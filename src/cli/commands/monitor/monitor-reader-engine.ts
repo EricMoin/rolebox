@@ -60,15 +60,15 @@ function workspaceOf(stateDirectory: string): string {
     ? dirname(dirname(stateDirectory)) : stateDirectory;
 }
 
-export function readEngineGraphs(stateDirectory: string): EngineGraphSnapshot[] {
-  const result = queryGraphs(graphStoreRoot(getDataDir(), workspaceOf(stateDirectory)));
+export function readEngineGraphs(stateDirectory: string, sessionId?: string): EngineGraphSnapshot[] {
+  const result = queryGraphs(graphStoreRoot(getDataDir(), workspaceOf(stateDirectory)), sessionId);
   if (result.blocked !== undefined) throw new Error(`Graph monitor: ${result.blocked}`);
   if (result.refused.length) throw new Error(`Graph monitor: ${result.refused.map((item) => `${item.graphId}: ${item.reason}`).join("; ")}`);
   return result.graphs.map(projectEngineGraph);
 }
 
-export function readLiveEngineGraphs(stateDir?: string): EngineGraphSnapshot[] {
-  return readEngineGraphs(stateDir ?? process.cwd());
+export function readLiveEngineGraphs(stateDir?: string, sessionId?: string): EngineGraphSnapshot[] {
+  return readEngineGraphs(stateDir ?? process.cwd(), sessionId);
 }
 
 function isStaleTerminalGraph(snapshot: EngineGraphSnapshot, now: number): boolean {

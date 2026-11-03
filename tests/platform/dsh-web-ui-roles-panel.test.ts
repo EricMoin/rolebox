@@ -704,13 +704,11 @@ describe("RoleboxRolesPanel", () => {
       expect(statusSeat().props.title).toContain("no session surface is mounted");
     });
 
-    it("is harmless without a close / openMonitor face", async () => {
+    it("points to the Conversation view when no navigation face is supplied", async () => {
       mountPanel();
       await settle();
-
-      click(openMonitorButton());
-      expect(textOf(statusSeat())).toContain("Loaded 2 roles");
-      expect(statusSeat().props.className).not.toContain("rolebox-roles-status-error");
+      expect(byClass("rolebox-roles-open-monitor")).toHaveLength(0);
+      expect(textOf(tree)).toContain("Open the Rolebox tab next to Chat and Trajectory");
     });
   });
 
@@ -734,14 +732,14 @@ describe("RoleboxRolesPanel", () => {
       // Exactly one live region.
       expect(allNodes().filter((node) => node.props.role === "status")).toHaveLength(1);
 
-      for (const button of [refreshButton(), reloadButton(), openMonitorButton()]) {
+      for (const button of [refreshButton(), reloadButton()]) {
         expect(button.type).toBe("button");
         expect(button.props.type).toBe("button");
       }
       // Keyboard-reachable: every control is focusable by default (a button)
       // and none is hidden from the tab order.
       expect(
-        [refreshButton(), reloadButton(), openMonitorButton()].every(
+        [refreshButton(), reloadButton()].every(
           (button) => button.props.tabIndex === undefined,
         ),
       ).toBe(true);

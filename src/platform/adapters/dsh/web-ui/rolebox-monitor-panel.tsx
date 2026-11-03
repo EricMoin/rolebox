@@ -1,93 +1,12 @@
 /**
- * RoleboxMonitorPanel — the rolebox RUN CONSOLE as a dsh RIGHT-SIDEBAR TAB BODY
- * (browser half).
+ * Session Conversation view for rolebox graphs and loops.
  *
- * The page is a right-Sidebar page type: `client.ts` registers the type in
- * `ctx.sidebarRightTabs` (id/kind `rolebox-monitor`) and this component as
- * its BODY in the keyed `'sidebar.right.pane.tab'` seat under the type's
- * `id`. The user opens it from the right-Sidebar guide capsule ("Rolebox") or
- * from the Rolebox settings page's "Open monitor" control
- * (`ctx.sidebarRight.openTab`). Monitoring is live, session-scoped evidence,
- * so it belongs BESIDE the conversation — the sidebar tab — while the
- * `settings.section` page answers the static question "what roles are
- * loaded" (`rolebox-roles-panel.tsx`). This body consumes none of the tab's
- * business data; it renders global rolebox state.
+ * The host supplies sessionId through conversation.view. Status requests scope
+ * graphs and loops to that session; the session census and metrics are workspace
+ * references. A labelled native select chooses one graph's topology and ledger.
+ * Change signals refresh the snapshot while preserving the selected graph.
  *
- * ── What this surface is for ──────────────────────────────────────────────
- * A developer glancing right from their conversation asks, in order:
- *
- *   1. is anything running, and is anything waiting on ME?
- *   2. which session am I in, and as which role?
- *   3. what is each run doing right now — which node, which round, for how
- *      long, at what cost?
- *   4. if something broke, WHAT broke and why?
- *
- * The console therefore reads top-down as VERDICT → IDENTITY → EVIDENCE →
- * REFERENCE, and every section is a LEDGER (aligned rows) rather than a card:
- * one hairline-separated block per object, one row per unit of work. It is
- * deliberately denser than the settings page — this surface is an instrument,
- * and a monitoring instrument that hides its readings behind a click is a
- * decoration.
- *
- * ── Wire contract (the shape the panel actually receives) ─────────────────
- * `GET /rolebox/status` is composed by `web-rolebox-monitor-route.ts`:
- *
- *     { ok, loops: { count, states: LoopSummaryDto[] },
- *       engineGraphs: EngineGraphSnapshot[],
- *       sessions: { count, mostRecentId, activeRoles } }
- *
- * The previous revision of this panel read `loops` as a bare array or a
- * keyed map and `sessions.recentIds`, so against the real backend the Loops
- * section never mounted and the session roster degraded to a bare count. Both
- * seats are now read in BOTH their real and their tolerant legacy shapes (see
- * {@link extractLoops} / {@link extractSessions}), and the fields the wire
- * carries but nothing rendered — per-loop error reason, round and run timing,
- * worker session, tree parentage, cancel requests; per-graph node ledger,
- * frontier, start time and staleness — are rendered.
- *
- * `GET /rolebox/metrics` returns `metrics.snapshot()` verbatim: named
- * counters, gauges and histograms whose KEYS may carry Prometheus-style labels
- * (`name{agent=x}`) and whose histograms carry `buckets/sum/count`. The
- * panel parses the key (as the TUI monitor and CLI already do), labels the
- * readings, and derives `avg/p50/p95/n` from the buckets. An empty snapshot
- * is NOT a silent section: the registry is gated by `ROLEBOX_METRICS`, so an
- * empty payload renders the reason instead of vanishing.
- *
- * ── Design posture ────────────────────────────────────────────────────────
- *   - Verdict first. {@link renderAttentionBand} is the first child of the
- *     body and the panel's only focal point.
- *   - State is never coloured text. The host palette measures
- *     `state-success-primary` at 2.09:1 and `state-warn-primary` at 1.99:1 as
- *     marks on their own tints — both fail 3:1 for non-text. A state is
- *     therefore a tint fill plus the normalised state WORD, with the raw
- *     backend phase/status string always in the DOM beside it, so nobody has
- *     to memorise the engine vocabulary and an unrecognised value degrades to
- *     a neutral chip rather than to a false success or failure.
- *   - Facts, not sentences. Counts are rendered as labelled fields
- *     (`Failed 1`), never glued into one dotted metadata line, so the eye can
- *     scan the label column and the value column independently.
- *   - Nothing is invented. Every number comes from the payload; the exact
- *     value of every rounded reading (`1.2k`, `3m`) rides a `title`.
- *     "All clear" is claimed only when every phase was actually read.
- *   - Live work leads. Node and session ledgers sort what is RUNNING, BLOCKED
- *     or FAILED above what is finished or queued, and cap the rest behind an
- *     accessible disclosure, so the common case (a long graph, one hot node)
- *     is one glance instead of one scroll.
- *
- * The component accepts the framework's `sessionId` standard prop (session
- * scope) so the roster can mark and lead with the session the user is looking
- * at; it degrades silently when the host does not supply one.
- *
- * CHROME FOR A NARROW COLUMN: the right Sidebar can be docked narrow (about
- * 280px of content). Every chrome row wraps or truncates with a `title`
- * recovery, padding is tighter than the settings page's, and the sections stay
- * strictly single-column.
- *
- * This module is BROWSER code: it must not import node builtins, and it uses
- * the browser `fetch` global with relative (same-origin) paths. The shared
- * formatters it imports are pure module-level functions from `src/utils`.
- *
- * @module
+ * Browser-only: imports must not pull in node builtins or the logging kernel.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -108,7 +27,6 @@ import {
 } from "../../../../utils/text-format.ts";
 import {
   formatDuration,
-  shortSessionId,
 } from "../../../../utils/display-helpers.ts";
 
 // ── Endpoint contract ──────────────────────────────────────────────────────
@@ -632,23 +550,9 @@ export const GRAPH_QUIET_MS = 120_000;
 
 // ── Props ──────────────────────────────────────────────────────────────────
 
-/**
- * Props of the docked tab body.
- *
- * The body is registered into the keyed `'sidebar.right.pane.tab'` seat with
- * no inject face, so the framework hands it the standard session-scope kit plus
- * the entry's empty business face. `sessionId` is the one standard prop this
- * component reads: marking the session the user is actually looking at (and
- * leading the roster with it) is the difference between a list of ids and an
- * answer to "where am I". It is optional here so a host that supplies a
- * narrower seat still renders the panel.
- *
- * `t` is declared (optional) only for structural completeness: the panel
- * renders hardcoded English text (this plugin registers no locale
- * dictionaries, and unknown keys must not be routed through `t`).
- */
+/** Session-scope standard props supplied by conversation.view. */
 export interface RoleboxMonitorPanelProps {
-  /** Session the panel is docked beside (session-scope standard prop). */
+  /** Session selected in the Conversation. */
   sessionId?: string;
   /** Locale seat (accepted, not used — hardcoded English copy). */
   t?: (key: string, params?: Record<string, unknown>) => string;
@@ -795,22 +699,9 @@ function domIdPart(value: string): string {
   return safe === "" ? "graph" : safe;
 }
 
-/**
- * Shorten an identifier for a narrow column.
- *
- * dsh session ids are `session-<uuid>`; stripping the constant prefix and
- * keeping the first eight uuid characters is what distinguishes two sessions at
- * a glance, which the generic {@link shortSessionId} cannot do (it would render
- * every dsh session as "ses…" plus a five-character tail). Every other shape
- * falls through to the shared helper. The full id always rides the `title`.
- */
-function shortId(id: string | undefined): string {
-  if (id === undefined || id === "") return "unknown";
-  if (id.startsWith("session-")) {
-    const rest = id.slice("session-".length);
-    return rest.slice(0, 8) + "\u2026";
-  }
-  return shortSessionId(id);
+/** Identifiers stay complete; the layout wraps them to the available width. */
+function displayId(id: string | undefined): string {
+  return id === undefined || id === "" ? "unknown" : id;
 }
 
 /**
@@ -972,7 +863,7 @@ function extractSessions(body: unknown): MonitorSessionsDto {
 interface SessionRow {
   id: string;
   role: string | null;
-  /** The session this panel is docked beside. */
+  /** The session selected in the Conversation. */
   current: boolean;
   /** The session the store last touched. */
   mostRecent: boolean;
@@ -982,7 +873,7 @@ interface SessionRow {
  * Build the session roster from the sessions seat plus the panel's own session.
  *
  * Ordering answers the developer's first question ("where am I?") before the
- * historical one: the docked session leads, the most recently touched session
+ * historical one: the current session leads, the most recently touched session
  * follows, and the remainder is ordered by id so successive refreshes do not
  * shuffle the list under the cursor. Ties are impossible: ids are unique.
  */
@@ -1357,7 +1248,7 @@ function renderFact(fact: MetaFact, key: string) {
     <div className={monitorClass.fact} key={key} title={described}>
       {fact.state !== undefined && (
         <span className={monitorClass.factIcon} aria-hidden="true">
-          <StateGlyph state={fact.state} />
+          <StateGlyph state={fact.state} size={14} />
         </span>
       )}
       {fact.state === undefined && fact.icon !== undefined && (
@@ -1510,7 +1401,7 @@ function renderAttentionBand(attention: MonitorAttention) {
                 className={monitorClass.attentionItemLabel}
                 title={item.label}
               >
-                {item.label.startsWith("session-") ? shortId(item.label) : item.label}
+                {item.label}
               </span>
             </li>
           ))}
@@ -1689,8 +1580,8 @@ function renderTopologyMark(state: RoleboxRunState) {
  * The topology figure.
  *
  * An `svg` with intrinsic width/height and a matching `viewBox` — ATTRIBUTES,
- * never CSS px — inside a scroll container, so a rank wider than the docked
- * sidebar scrolls instead of shrinking below legibility. The sheet centres the
+ * never CSS px — inside a scroll container, so a rank wider than the view
+ * scrolls instead of shrinking below legibility. The sheet centres the
  * figure in its row with `margin-inline: auto`, so a narrow figure no longer
  * hugs the left of a wide pane. Bands first, then edges, then boxes: a loop
  * field sits behind the drawing, an edge crosses over it, and a node box is
@@ -1966,7 +1857,11 @@ function renderGraphBlock(
         renderTopologyFigure(graph, topology)
       ) : (
         nodes.length > 0 && (
-          <div className={monitorClass.strip} aria-hidden="true">
+          <div
+            className={monitorClass.strip}
+            aria-hidden="true"
+            style={{ gap: "min(2px, " + 20 / nodes.length + "%)" }}
+          >
             {nodes.map((node, index) => (
               <span
                 className={
@@ -2132,7 +2027,7 @@ function renderNodeRow(node: MonitorGraphNodeDto, now: number, index: number) {
     node.dispatchSessionId
       ? {
           label: "session",
-          value: shortId(node.dispatchSessionId),
+          value: displayId(node.dispatchSessionId),
           title: node.dispatchSessionId,
           icon: "session",
         }
@@ -2140,7 +2035,7 @@ function renderNodeRow(node: MonitorGraphNodeDto, now: number, index: number) {
     node.dispatchTaskId
       ? {
           label: "task",
-          value: shortId(node.dispatchTaskId),
+          value: displayId(node.dispatchTaskId),
           title: node.dispatchTaskId,
           icon: "task",
         }
@@ -2238,7 +2133,7 @@ function renderLoopRow(loop: MonitorLoopDto, now: number) {
     loop.activeWorkerSessionId
       ? {
           label: "worker",
-          value: shortId(loop.activeWorkerSessionId),
+          value: displayId(loop.activeWorkerSessionId),
           title: loop.activeWorkerSessionId,
           icon: "session",
         }
@@ -2246,7 +2141,7 @@ function renderLoopRow(loop: MonitorLoopDto, now: number) {
     loop.parentLoopId
       ? {
           label: "parent loop",
-          value: shortId(loop.parentLoopId),
+          value: displayId(loop.parentLoopId),
           title: loop.parentLoopId,
           icon: "branch",
         }
@@ -2254,7 +2149,7 @@ function renderLoopRow(loop: MonitorLoopDto, now: number) {
     loop.activeWorkerTaskId
       ? {
           label: "task",
-          value: shortId(loop.activeWorkerTaskId),
+          value: displayId(loop.activeWorkerTaskId),
           title: loop.activeWorkerTaskId,
           icon: "task",
         }
@@ -2271,7 +2166,7 @@ function renderLoopRow(loop: MonitorLoopDto, now: number) {
           <StateGlyph state={state} />
         </span>
         <span className={monitorClass.loopId} title={loop.originSessionId}>
-          {shortId(loop.originSessionId)}
+          {displayId(loop.originSessionId)}
         </span>
         {renderChip(state)}
       </div>
@@ -2384,7 +2279,10 @@ function renderDistribution(buckets: Record<string, number>, samples: number) {
       aria-hidden="true"
       title={formatCount(samples) + " samples, ≤" + duration(last)}
     >
-      <span className={monitorClass.chartBars}>
+      <span
+        className={monitorClass.chartBars}
+        style={{ gap: "min(2px, " + 20 / perBucket.length + "%)" }}
+      >
         {perBucket.map((bucket) => (
           <span
             className={monitorClass.chartBar}
@@ -2536,7 +2434,7 @@ function renderSessionSection(
                 <Icon name={row.current ? "session" : "sessions"} size={14} />
               </span>
               <span className={monitorClass.sessionId} title={row.id}>
-                {shortId(row.id)}
+                {displayId(row.id)}
               </span>
               {renderTextChip(
                 row.role ?? "base",
@@ -2573,18 +2471,25 @@ function renderSessionSection(
 // ── The panel ──────────────────────────────────────────────────────────────
 
 /**
- * The run console: fetches `GET /rolebox/status` and `GET /rolebox/metrics`
- * on mount (and on every manual refresh), then renders the verdict, the session
- * roster, one ledger block per engine graph, one row per loop, and the metric
+ * The run console: fetches scoped status and workspace metrics, then renders
+ * the verdict, the selected graph, the session roster, each loop, and metric
  * readings — with loading / error / empty states that say what is missing and
  * why. It never polls: the freshness stamp is the snapshot's own time, and
  * every duration in the body is relative to that moment, so nothing on screen
  * silently ages.
  *
- * @param props - docked tab-body props (see {@link RoleboxMonitorPanelProps}).
+ * @param props - Conversation view props (see {@link RoleboxMonitorPanelProps}).
  */
 export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
-  const [statusBody, setStatusBody] = useState<MonitorStatusBody | null>(null);
+  const [snapshot, setSnapshot] = useState<{
+    sessionId: string | undefined;
+    body: MonitorStatusBody;
+  } | null>(null);
+  const statusBody = snapshot?.sessionId === props.sessionId ? snapshot?.body ?? null : null;
+  const [selection, setSelection] = useState<{
+    sessionId: string | undefined;
+    graphId: string | undefined;
+  } | null>(null);
   const [metricsBody, setMetricsBody] = useState<MonitorMetricsBody | null>(null);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<PanelStatus>({
@@ -2707,7 +2612,9 @@ export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
         // optional, status is the page — so they settle separately: a metrics
         // hiccup must not blank a console whose status seat answered.
         const [statusSeat, metricsSeat] = await Promise.all([
-          readSeat(STATUS_ENDPOINT),
+          readSeat(props.sessionId === undefined
+            ? STATUS_ENDPOINT
+            : STATUS_ENDPOINT + "?sessionId=" + encodeURIComponent(props.sessionId)),
           readSeat(METRICS_ENDPOINT),
         ]);
         if (cancelled) return;
@@ -2730,7 +2637,15 @@ export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
         }
 
         const nextStatus = statusSeat.body as MonitorStatusBody;
-        setStatusBody(nextStatus);
+        setSnapshot({ sessionId: props.sessionId, body: nextStatus });
+        const nextGraphs = extractGraphs(nextStatus);
+        setSelection((previous) => ({
+          sessionId: props.sessionId,
+          graphId: previous?.sessionId === props.sessionId &&
+            nextGraphs.some((graph) => graph.graphId === previous?.graphId)
+            ? previous?.graphId
+            : nextGraphs[0]?.graphId,
+        }));
         setLoadedAt(now);
         lastLoadRef.current = now;
         // The seat is the live region, and it carries the VERDICT alone. The
@@ -2764,12 +2679,15 @@ export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [refreshToken]);
+  }, [refreshToken, props.sessionId]);
 
   // Defensive normalization — each seat guards its payload, so a partial
   // backend renders the sections it has.
   const loops = extractLoops(statusBody);
   const graphs = extractGraphs(statusBody);
+  const selectedGraph = graphs.find((graph) =>
+    selection?.sessionId === props.sessionId && graph.graphId === selection?.graphId,
+  ) ?? graphs[0];
   const sessions = extractSessions(statusBody);
   const counters = extractMetrics(metricsBody, "counters");
   const gauges = extractMetrics(metricsBody, "gauges");
@@ -2780,7 +2698,7 @@ export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
    * Sessions the PAYLOAD names.
    *
    * Deliberately not `sessionRows.length`: the roster always carries the
-   * session this panel is docked beside (the framework hands the body that id),
+   * session selected in the Conversation (the framework hands the body that id),
    * so counting its rows would make "nothing is reporting" and "the load
    * failed" unreachable for every real session — the failed state's Retry
    * control included. A response with no session census is empty data.
@@ -2894,9 +2812,7 @@ export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
             refresh must not re-announce itself. */}
         {renderAttentionBand(attention)}
 
-        {renderSessionSection(sessionRows, census, isExpanded, toggleGroup)}
-
-        {graphs.length > 0 && (
+        {statusBody !== null && (
           <section
             className={monitorClass.section}
             aria-labelledby="rolebox-monitor-graphs-title"
@@ -2904,14 +2820,42 @@ export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
             {renderSectionTitle(
               "rolebox-monitor-graphs-title",
               "graphs",
-              "Engine graphs",
+              props.sessionId === undefined ? "Engine graphs" : "Session graphs",
               formatCount(graphs.length),
             )}
-            {graphs.map((graph) =>
-              renderGraphBlock(graph, now, isExpanded, toggleGroup),
+            {selectedGraph ? (
+              <>
+                <div className={monitorClass.graphPicker}>
+                  <label htmlFor="rolebox-monitor-graph-select">Graph</label>
+                  <select
+                    id="rolebox-monitor-graph-select"
+                    className={monitorClass.graphSelect}
+                    title={selectedGraph.graphId}
+                    value={selectedGraph.graphId ?? ""}
+                    onChange={(event: { currentTarget: { value: string } }) =>
+                      setSelection({ sessionId: props.sessionId, graphId: event.currentTarget.value })
+                    }
+                  >
+                    {graphs.map((graph) => (
+                      <option key={graph.graphId} value={graph.graphId ?? ""}>
+                        {(graph.graphId ?? "unnamed graph") + " · " +
+                          (graph.phase ?? "unknown") + " · " +
+                          (graph.nodeCount ?? extractNodes(graph).length) + " nodes"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {renderGraphBlock(selectedGraph, now, isExpanded, toggleGroup)}
+              </>
+            ) : (
+              <p className={monitorClass.sectionNote}>
+                No graphs in this session yet. Graphs declared from this conversation appear here.
+              </p>
             )}
           </section>
         )}
+
+        {renderSessionSection(sessionRows, census, isExpanded, toggleGroup)}
 
         {loops.length > 0 && (
           <section

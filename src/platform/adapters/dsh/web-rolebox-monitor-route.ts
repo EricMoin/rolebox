@@ -416,7 +416,13 @@ export class DshRoleboxMonitorWebRoute {
       }
       const sub = path.slice(ROLEBOX_MONITOR_ROUTE_PREFIX.length); // e.g. "/status"
 
-      if (method === "GET" && sub === "/status") return this.serveStatus(res);
+      if (method === "GET" && sub === "/status") {
+        const sessionIds = url.searchParams.getAll("sessionId");
+        if (sessionIds.length > 1 || sessionIds[0]?.trim() === "") {
+          return sendJson(res, 400, errorBody("Expected one non-empty sessionId"));
+        }
+        return this.serveStatus(res, sessionIds[0]);
+      }
       if (method === "GET" && sub === "/metrics") return this.serveMetrics(res);
       if (method === "GET" && sub === EVENTS_SUB_PATH) {
         return this.serveEvents(req, res);
@@ -453,8 +459,9 @@ export class DshRoleboxMonitorWebRoute {
    * engine-graph snapshots, and the session census with per-session active
    * roles.
    */
-  private serveStatus(res: ServerResponse): void {
-    const loopStates = this.loopCoordinator.getAllLoopStates();
+  private serveStatus(res: ServerResponse, sessionId?: string): void {
+    const loopStates = [...this.loopCoordinator.getAllLoopStates().values()]
+      .filter((state) => sessionId === undefined || state.originSessionId === sessionId);
     const sessions = this.store.list();
     const activeRoles: Record<string, string | null> = {};
     for (const session of sessions) {
@@ -464,10 +471,10 @@ export class DshRoleboxMonitorWebRoute {
     const body: DshRoleboxStatusBody = {
       ok: true,
       loops: {
-        count: loopStates.size,
-        states: [...loopStates.values()].map(toLoopSummary),
+        count: loopStates.length,
+        states: loopStates.map(toLoopSummary),
       },
-      engineGraphs: readLiveEngineGraphs(stateDirFor(this.workspaceDir)),
+      engineGraphs: readLiveEngineGraphs(stateDirFor(this.workspaceDir), sessionId),
       sessions: {
         count: sessions.length,
         mostRecentId: mostRecentSessionId(this.store) ?? null,

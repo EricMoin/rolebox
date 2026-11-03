@@ -182,6 +182,29 @@ previous selection. Some
 hosts reload roles and aliases automatically; restart when their reload behavior
 is unavailable or unclear. Native skill catalogs may also require a host reload.
 
+## DSH Web UI
+
+Rolebox and Logs appear as session Conversation view tabs after Chat and
+Trajectory. The monitor keeps the original monitoring layout: attention status,
+selected graph topology and node ledger, workspace session roster, loops and
+metrics. The graph picker switches among the current session's graphs and
+preserves the selected graph during refresh. Session changes load that session's
+graphs and loops without showing the previous session's snapshot.
+
+The monitor keeps the existing ledger layout and fills the available Conversation
+width. The Conversation owns vertical scrolling: mouse-wheel and keyboard page
+scrolling work over the ledger, topology and expanded records. Session and task
+identifiers, graph names, status text, role labels, errors and metric readings
+wrap to the available column width. Progress and distribution strips fit narrow
+columns even with many nodes or buckets. Wide topology figures and expanded
+native records keep their own horizontal scrollbar without blocking vertical
+wheel scrolling.
+Its topology is a read-only diagram. Workspace sessions and dispatch metrics
+retain their original scope. Settings → Rolebox still manages loaded roles and role reloads; it points
+to the Rolebox Conversation tab for monitoring. No additional role fields are
+required. Restart DSH and refresh the web page after updating the built bundle.
+On narrow headers, DSH may place additional views in More.
+
 ## Logs and diagnosis
 
 `rolebox logs` reads rolebox's structured logs; `rolebox monitor` opens the TUI.

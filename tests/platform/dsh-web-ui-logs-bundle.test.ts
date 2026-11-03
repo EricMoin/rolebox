@@ -104,8 +104,6 @@ function evaluateBundle(code: string): {
 /** A structural ctx double: declarations exist, so every inject callback runs now. */
 function createFakeClientContext() {
   const registered: Array<{ options: Record<string, unknown>; component: unknown }> = [];
-  const tabTypes: Array<Record<string, unknown>> = [];
-  const opened: string[] = [];
   const ctx = {
     slots: {
       inject: (_key: string, callback: () => unknown) => {
@@ -117,19 +115,9 @@ function createFakeClientContext() {
         return () => undefined;
       },
     },
-    sidebarRightTabs: {
-      register: (definition: Record<string, unknown>) => {
-        tabTypes.push(definition);
-        return () => undefined;
-      },
-    },
-    sidebarRight: {
-      openTab: (kind: string) => {
-        opened.push(kind);
-      },
-    },
+    locale: { register: () => () => undefined },
   };
-  return { ctx, registered, tabTypes, opened };
+  return { ctx, registered };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -172,42 +160,21 @@ describe("dsh web client bundle probe (target: browser)", () => {
     expect(typeof exports.apply).toBe("function");
     expect(exports.name).toBe("rolebox");
     expect(Array.isArray(exports.inject)).toBe(true);
-    expect(exports.LOGS_TAB_ID).toBe("rolebox-logs");
-    expect(exports.LOGS_TAB_KIND).toBe("rolebox-logs");
-    expect(exports.LOGS_TAB_TITLE).toBe("Logs");
-    expect(exports.MONITOR_TAB_ID).toBe("rolebox-monitor");
+    expect(exports.LOGS_VIEW_ID).toBe("rolebox-logs");
+    expect(exports.LOGS_VIEW_LABEL).toBe("Logs");
+    expect(exports.MONITOR_VIEW_ID).toBe("rolebox-monitor");
   });
 
-  it("registers the log view tab (body and type) when the evaluated bundle applies", () => {
+  it("registers the original panels as Conversation views in the shipped bundle", () => {
     const { exports } = evaluateBundle(bundleText);
-    const { ctx, registered, tabTypes } = createFakeClientContext();
-
+    const { ctx, registered } = createFakeClientContext();
     const dispose = (exports.apply as (context: unknown) => unknown)(ctx);
-    expect(typeof dispose).toBe("function");
-
-    // Four declarations were waited on and each registered its contribution.
-    const seatBodies = registered.filter(
-      (entry) => entry.options.name === "sidebar.right.pane.tab",
-    );
-    expect(seatBodies.map((entry) => entry.options.key)).toEqual([
-      "rolebox-monitor",
-      "rolebox-logs",
-    ]);
-    expect((seatBodies[1]!.component as { name?: string }).name).toBe("RoleboxLogsPanel");
-    expect(registered.some((entry) => entry.options.name === "conversation.input.right")).toBe(true);
-    expect(registered.some((entry) => entry.options.name === "settings.section")).toBe(true);
-
-    // Both page types, each with its own guide entry.
-    expect(tabTypes.map((definition) => definition.id)).toEqual([
-      "rolebox-monitor",
-      "rolebox-logs",
-    ]);
-    const logsType = tabTypes[1]!;
-    expect(logsType.kind).toBe("rolebox-logs");
-    expect((logsType.title as () => string)()).toBe("Logs");
-    expect((logsType.guide as unknown[]).length).toBe(1);
-
-    // The returned disposer tears the registrations down without throwing.
+    const views = registered.filter((entry) => entry.options.name === "conversation.view");
+    expect(views.map((entry) => entry.options.id)).toEqual(["rolebox-monitor", "rolebox-logs"]);
+    expect(views.map((entry) => entry.options.order)).toEqual([30, 40]);
+    expect((views[0]!.component as { name?: string }).name).toBe("RoleboxMonitorPanel");
+    expect((views[1]!.component as { name?: string }).name).toBe("RoleboxLogsPanel");
+    expect(bundleText).not.toContain("sidebar.right.pane.tab");
     expect(() => (dispose as () => void)()).not.toThrow();
   });
 
