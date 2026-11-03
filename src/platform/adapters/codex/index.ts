@@ -44,3 +44,16 @@ export type {
   CodexPluginBundleOptions,
   CodexPluginBundlePaths,
 } from "./plugin-bundle.ts";
+export {
+  codexAgentName,
+  collectCodexAgentDescriptors,
+  renderCodexAgent,
+  syncCodexAgents,
+} from "./agents.ts";
+export type {
+  CodexAgentDescriptor,
+  CodexAgentMappingOptions,
+  CodexAgentMappings,
+  SyncCodexAgentsOptions,
+  SyncCodexAgentsResult,
+} from "./agents.ts";

@@ -92,9 +92,12 @@ That role may snapshot a page and nothing else: the exact `browse_snapshot`
 entry wins over the `browse_*` prefix, and every other browse tool is denied.
 Prefix matching also covers future members of the family.
 
-Graph workers inherit the parent's authorized browser tools with native schemas
-shown by default. Node `tools` lists do not restrict access. Use observation and
-the actions the step needs, then `browse_close` to release the browser.
+On hosts that forward the family to workers, graph workers inherit the parent's
+authorized browser tools with native schemas shown by default. Node `tools` lists
+do not restrict access. Use observation and the actions the step needs, then
+`browse_close` to release the browser. Codex managed graph workers instead use
+native Codex task tools plus scoped rolebox resource reads and outcome submission;
+they do not receive outer-process `browse_*` tools through the dynamic callback bridge.
 
 Inherited access remains subject to host registration, role restrictions and
 the browse gate. It cannot enable an unregistered family or override a denial.
@@ -339,9 +342,10 @@ the saved path instead of pixels.
   their build is installed, and `browse_status` can only verify Chromium's
   presence, and only when `PLAYWRIGHT_BROWSERS_PATH` names the cache.
 - **The family is a local tool surface with no per-call approval.** Codex MCP
-  has no permission callback and no active rolebox role, so the global gate is
-  the whole policy there; DSH, Pi and OpenCode additionally apply role
-  restrictions.
+  has no rolebox permission-dialog callback. Its global gate controls registration,
+  and host-supplied thread identity attributes native-role restrictions per call.
+  Managed graph workers do not receive this family through dynamic callbacks.
+  DSH, Pi and OpenCode also apply their supported role restrictions.
 
 ## Tests
 

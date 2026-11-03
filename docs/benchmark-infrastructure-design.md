@@ -53,9 +53,9 @@
 | dsh（首发） | 复用角色激活与 graph 集成；专用取消路径要确认终态，新增顶层运行与 usage 契约 |
 | OpenCode（后续） | v1/v2 有不同能力，不能只按共同 `platformId` 缓存或比较；分别通过同一套适配器合约 |
 | Pi（后续） | 有专用 worker 路径，但通用能力声明没有 session create；adapter 应接入实际 worker 路径 |
-| Codex | 当前 rolebox 主要是 MCP 工具接入，没有完整 role/session/graph 执行入口；不能声称已经支持原生 role benchmark |
+| Codex | 已有原生公共角色映射、会话读取与受 sandbox 约束的 graph worker 执行入口；尚无 benchmark headless driver、激活回执和独立 usage 契约，不能据此声称已支持原生 role benchmark |
 
-Codex 或其他宿主未来可以增加独立 headless driver。只做 prompt 调用的适配器必须标记为 `prompt-only`，不与 `native-role` 的结果混为同一种评测。执行记录回放标记为 `replay`，它验证评分器或展示，不证明修改后的 role 表现。
+Codex 或其他宿主未来可以围绕实际运行时增加独立 headless benchmark driver。现有 Codex graph 集成只管理自身创建的 worker，不等于控制任意原生子代理，也不提供 benchmark 所需的完整计量和终态验收。只做 prompt 调用的适配器必须标记为 `prompt-only`，不与 `native-role` 的结果混为同一种评测。执行记录回放标记为 `replay`，它验证评分器或展示，不证明修改后的 role 表现。
 
 ### 2.1 dsh 首发的具体执行路径
 

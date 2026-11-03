@@ -18,7 +18,7 @@ Each target has a minimum version, and each minimum is a runtime contract rather
 | opencode 2.x | CLI and plugin API `2.0.18` | the `@opencode/plugin` peer range; loaded through `rolebox/server` |
 | [pi](https://pi.dev) | `0.86.0` | the `@earendil-works/pi-coding-agent` peer range |
 | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) | `0.2.1-alpha.3` | the subagent contract below |
-| Codex | none | the integration is an MCP server, so no versioned Codex package is involved |
+| Codex | capability-based; protocol checked against `0.166.0-alpha.5.1` | session tools need app-server; delegation also needs sandbox metadata, exec-server, environment binding and dynamic tools; no Codex npm dependency |
 
 rolebox's manifest also declares the `@deepseek-ai/cordis` peer (`4.0.2`) its dsh entry is built against.
 
@@ -44,9 +44,20 @@ On Pi, rolebox resolves its directories under the pi config directory (`$PI_CODI
 
 ## Codex parity status
 
-Rolebox's Codex integration (`src/platform/adapters/codex/`, served by `rolebox mcp` / `src/entries/codex.ts`) exposes the canonical tool intersection for a harness with no session client and no dispatch backend, plus `load_role_skill` — 18 tools. Parity is enforced by `tests/platform/codex-mcp.test.ts`; `tests/platform/codex-platform.test.ts` covers path resolution and registration detection, and `tests/cli/codex-sync.test.ts` covers the generated plugin bundle.
+Rolebox's Codex integration (`src/platform/adapters/codex/`, served by `rolebox mcp` /
+`src/entries/codex.ts`) supplies public native-agent files, scoped private-child
+execution, six session tools and five graph tools. It registers 29 base tools, or 64
+with both desktop and browser families. Protocol, sync and adapter tests cover native
+mapping, app-server transport, session projection and the shared graph application
+using local fixtures; they do not establish live model or OS sandbox behavior.
 
-On Codex, rolebox resolves its directories under the Codex home (`$CODEX_HOME` when set, otherwise `~/.codex`): roles load from `{cwd}/rolebox` when present, else `~/.codex/rolebox`; global skills resolve from `~/.codex/skills`. Deploy installed roles there with `rolebox sync codex`, which also writes the local plugin marketplace and registers it in `~/.codex/config.toml`. See [codex.md](codex.md).
+On Codex, roles load from `{cwd}/rolebox` when present, else `$CODEX_HOME/rolebox`
+(`~/.codex/rolebox` by default). CLI sync generates installed public roles under the
+Codex home's `agents/`; MCP boot exports workspace roles into `{cwd}/.codex/agents`.
+Private children are excluded from native global discovery. Restart Codex after sync
+or project-agent generation. Session forks and graph workers require current
+host-supplied sandbox metadata, and graph results are collected with `graph_status`
+rather than an automatic wakeup of a UI-owned chat. See [codex.md](codex.md).
 
 ## opencode v2
 
@@ -109,18 +120,24 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | asset_search / asset_inspect / asset_validate | ✓ | ✓ | ✓ |
 | reference_search / load_reference | ✓ | ✓ | ✓ |
 | load_role_skill | — (native skill tool) | ✓ | ✓ |
-| session_list / session_read / session_search / session_info / session_diff / session_fork | ✓ | ✓ | — (not over MCP) |
-| graph_declare / graph_submit_outcome / graph_status / graph_audit / graph_control | ✓ | ✓ | — (no host capability layer) |
-| task_search / task_budget / task_graph / task_chronology / task_export (task_retry withheld) | ✓ | ✓ | — (not over MCP) |
-| lsp_* (32 tools) | ✓ | ✓ | — (not over MCP) |
-| function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
+| session_list / session_read / session_search / session_info / session_diff / session_fork | ✓ | ✓ | ✓ (native threads; completed-turn forks) |
+| graph_declare / graph_submit_outcome / graph_status / graph_audit / graph_control | ✓ | ✓ | ✓ (managed app-server workers; native presentation) |
+| task_search / task_budget / task_graph / task_chronology / task_export (task_retry withheld) | ✓ | ✓ | — (not exposed) |
+| lsp_* (32 tools) | ✓ | ✓ | — (not exposed) |
+| function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not exposed) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
 | [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (default on) | ✓ (default on) |
 | [browse_* (23 tools)](browser-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (when the browseUse gate is on) | ✓ (when the browseUse gate is on) |
-| dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
+| dispatch_* / loop_* | — (withheld) | — (withheld) | — (not exposed) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
-The graph tools ship with every host that owns an outcome capability layer — dsh, Pi, and both opencode entries (1.x and v2). A dispatched worker's default graph face is `graph_submit_outcome`; command execution uses the host's native tools. Explicit discovery presentation adds `graph_worker_tools`; code presentation on supported hosts also adds `graph_worker_code`. These entries never grant graph control capabilities. See [worker tools](worker-tools.md) for the support matrix.
+The graph tools ship with dsh, Pi, Codex and both opencode entries (1.x and v2).
+A dispatched worker's default graph face is `graph_submit_outcome`; command execution
+uses the host's native tools. Explicit discovery presentation adds `graph_worker_tools`;
+code presentation on supported hosts also adds `graph_worker_code`. Codex supports
+native presentation only and exposes scoped resource readers alongside submission.
+Workers receive no graph control capabilities. See [worker tools](worker-tools.md)
+for the other hosts' presentation support.
 
 ## Computer use
 
@@ -140,7 +157,8 @@ separate user-controlled step. DSH/Pi prompt context and Codex MCP initialize
 instructions explain the available workflow. The family, per-host image
 transport, and platform requirements are documented in [computer-use.md](computer-use.md).
 
-Remaining platform-inherent gaps (hot reload, extensions, recovery engine, TUI) are explicit non-goals on Pi and Codex — see [limitations.md](limitations.md).
+Remaining service-stack gaps (hot reload, extensions, recovery engine, TUI) are
+explicitly documented for Pi and Codex — see [limitations.md](limitations.md).
 
 ## Browser use
 

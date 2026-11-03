@@ -114,14 +114,17 @@ export function dshCapabilities(): PlatformCapabilities {
 /**
  * Capabilities for the Codex platform.
  *
- * Codex drives rolebox over MCP only — a plugin bundle registering rolebox's
- * MCP server — so every host-integration capability is absent except
- * multi-step tool execution, which the MCP tool surface provides. That is
- * exactly {@link minimalCapabilities}'s shape, so this delegates instead of
- * duplicating a block that could drift.
+ * Session execution and event observation use the app-server adapter. Native
+ * UI conversations remain owned by Codex; these flags do not imply UI hooks
+ * or an in-session role switcher.
  */
 export function codexCapabilities(): PlatformCapabilities {
-  return minimalCapabilities("codex");
+  return {
+    platformId: "codex", hasBackgroundTasks: true, hasSessionFork: true,
+    hasSessionCreate: true, hasSessionAbort: true, hasAgentFileSync: true,
+    hasMultiStepTools: true, hasEventStream: true, hasSessionStatus: true,
+    hasRoleSwitch: false,
+  };
 }
 
 /**

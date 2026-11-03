@@ -883,6 +883,25 @@ describe("graph_control cancel — the durable intent and the platform delivery"
       fixture.host.close();
     }
   });
+  it("delivers a node timeout to its own execution without stopping another entry", async () => {
+    const fixture = await openCancelFixture(TWO_ENTRIES);
+    try {
+      fixture.platform.answer = { kind: "requested", reason: "interrupt requested" };
+      const answer = await control(fixture, {
+        graph_id: fixture.graphId, node_id: "alpha", command: "timeout", reason: "declared deadline expired",
+      }, "session.declarer");
+      expect(answer["kind"]).toBe("applied");
+      expect(fixture.platform.asked).toHaveLength(1);
+      expect(fixture.platform.asked[0]?.effect.attemptId).toBe("alpha#1");
+      const rows = readRows(fixture);
+      expect(decisionOf(rows, "alpha#1").command).toBe("timeout");
+      expect(rows.control).toBeUndefined();
+      expect(cancelRowOf(rows, "alpha#1")?.status).toBe("started");
+      expect(cancelRowOf(rows, "beta#1")).toBeUndefined();
+      expect(rows.events).toEqual([]);
+    } finally { fixture.host.close(); }
+  });
+
   it("delivers a budget-stop's stopping decision through the same platform path, keeping the command that stopped the run", async () => {
     // P3 item 3: a budget stop leaves the SAME kind of intent a cancel does — a
     // run-wide stopping decision plus one decision per in-flight attempt — so a

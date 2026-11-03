@@ -13,6 +13,7 @@ import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVars } from "../resolver/env-resolver.ts";
 import { resolveModel } from "../resolver/model-resolver.ts";
+import { subagentIdSlug } from "../utils/subagent-id.ts";
 import type { SubAgentConfig } from "../types.ts";
 import { ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
@@ -227,13 +228,14 @@ async function parseInlineSubagents(
       );
     }
 
-    if (seenSubagentNames.has(subagent.name)) {
+    const identity = subagentIdSlug(subagent.name);
+    if (seenSubagentNames.has(identity)) {
       log.info(
         `Duplicate subagent name "${subagent.name}" in "${roleId}": later definition wins`,
       );
-      validSubagents = validSubagents.filter((s) => s.name !== subagent.name);
+      validSubagents = validSubagents.filter((s) => subagentIdSlug(s.name) !== identity);
     }
-    seenSubagentNames.add(subagent.name);
+    seenSubagentNames.add(identity);
     validSubagents.push(subagent);
   }
 
@@ -319,11 +321,11 @@ async function discoverFileBasedSubagents(
     if (fileBasedNested.length > 0) {
       const nestedMap = new Map<string, SubAgentConfig>();
       for (const sa of fileBasedNested) {
-        nestedMap.set(sa.name, sa);
+        nestedMap.set(subagentIdSlug(sa.name), sa);
       }
       if (subagent.subagents) {
         for (const sa of subagent.subagents) {
-          nestedMap.set(sa.name, sa);
+          nestedMap.set(subagentIdSlug(sa.name), sa);
         }
       }
       subagent.subagents = Array.from(nestedMap.values());

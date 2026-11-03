@@ -7,20 +7,10 @@
  * and resolve roles, sync skill symlinks, assemble the canonical tool set —
  * then serves those tools over newline-delimited JSON-RPC until stdin closes.
  *
- * Tool surface (deliberately NOT expanded here): the canonical intersection set
- * that buildCanonicalTools() assembles for a harness with no session client and
- * no dispatch backend, plus load_role_skill, plus rolebox's computer-use family
- * by default, unless a host or config-file computerUse option disables it, plus
- * the browse_* family when its own gate resolves on (an explicit opt-in, or
- * AUTO with the optional playwright dependency installed). This transport has
- * no role and no permission prompt (docs/limitations.md: it carries no
- * `context.ask` callback), so both family gates here are the GLOBAL ones only —
- * a per-role grant cannot be resolved on stdio MCP, and none is invented.
- * There are no session_* tools (the stdio transport exposes no rolebox session
- * client) and no dispatch_/loop_/task_/graph_* tools — orchestration needs a
- * dispatch backend, which this entry does not construct, so
- * buildCanonicalTools() registers no graph_* tools either. No stubs stand in
- * for any of them.
+ * Native agent files map public roles; private children are graph execution
+ * targets. MCP metadata attributes each call to its Codex thread. A lazy
+ * app-server adapter supplies session browsing and sandboxed graph workers;
+ * workers submit through trusted dynamic-tool callbacks into this process.
  *
  * Run directly with `node dist/entries/codex.js`.
  * Importing the module does NOT start the server or read stdin; the module-level
@@ -34,15 +24,17 @@ import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { createLoadRoleSkillTool } from "../asset/skill-tool.ts";
-import { codexCapabilities } from "../platform/capabilities.ts";
+import { getDataDir } from "../cli/paths.ts";
+import { graphStoreRoot } from "../graph/store/schema.ts";
 import {
   createCodexMcpServer,
   type CodexMcpServer,
 } from "../platform/adapters/codex/server.ts";
 import { installProtocolStdoutGuard } from "../platform/adapters/codex/stdout-guard.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
-import { buildCanonicalTools } from "../platform/tool-assembly.ts";
+import { createCodexRuntime } from "../platform/adapters/codex/runtime.ts";
+import { syncCodexAgents } from "../platform/adapters/codex/agents.ts";
+import type { CodexSessionOptions } from "../platform/adapters/codex/session.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import { resolveBrowseUseGate } from "../loader/browse-use-gate.ts";
 import { buildComputerContext } from "../computer/context.ts";
@@ -52,7 +44,7 @@ import { roleFunctionsMap } from "../resolver/registry.ts";
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
 import { configureLogDirectory, createSubLogger, formatError } from "../logger.ts";
 
-/** Env var overriding the session id reported to tools (wins over the handshake). */
+/** Legacy session attribution override for clients without per-call thread metadata. */
 export const CODEX_SESSION_ID_ENV = "ROLEBOX_SESSION_ID";
 
 /** Session id used when neither the env override nor the handshake supplies one. */
@@ -61,14 +53,14 @@ export const DEFAULT_CODEX_SESSION_ID = "codex";
 const log = createSubLogger("codex");
 
 /**
- * Resolve the session id for a tool call: the ROLEBOX_SESSION_ID override
- * first, then a session id the MCP client sent in its initialize clientInfo
- * (the stdio transport carries no Mcp-Session-Id header, so this is usually
- * absent), then the stable "codex" fallback.
+ * Prefer Codex's per-call thread identity. Legacy clients use the environment,
+ * then the handshake; the entry isolates the fallback per MCP connection.
  */
 export function resolveCodexSessionId(
   clientInfo: Record<string, unknown> | undefined,
+  meta?: Record<string, unknown>,
 ): string {
+  if (typeof meta?.threadId === "string" && meta.threadId.trim()) return meta.threadId.trim();
   const override = process.env[CODEX_SESSION_ID_ENV]?.trim();
   if (override) return override;
 
@@ -104,6 +96,14 @@ export function buildCodexInstructions(tools: Record<string, unknown>): string {
   return [
     buildComputerContext({ tools: names }),
     buildBrowseContext({ tools: names }),
+    ...("graph_declare" in tools ? [
+      "## Codex rolebox execution\n" +
+      "Public roles are native agents named rolebox--<role-id>; private children are canonical graph targets available only to their owning role. " +
+      "graph_declare starts Codex workers whose native tools run in a sandboxed exec-server; model requests stay in app-server. Only accepted graph_submit_outcome submissions settle explicit outcomes. " +
+      "Use graph_status to collect results and graph_control for lifecycle changes. This stdio connection cannot wake an external UI-owned chat; keep collecting status while work runs, or check it in a later turn. " +
+      "Graph workers use native Codex task tools and role-scoped resource loaders; recursive agents and graph control remain unavailable. " +
+      "Execution and session forks require Codex's host-supplied thread and sandbox metadata; never supply or invent these as tool arguments.",
+    ] : []),
   ].filter(Boolean).join("\n\n");
 }
 
@@ -126,9 +126,11 @@ export async function startCodexMcpServer(
      * disables it, absence AUTO-detects the optional Playwright driver.
      */
     browseUse?: boolean;
+    rpcFactory?: CodexSessionOptions["rpcFactory"];
+    directory?: string;
   } = {},
 ): Promise<CodexMcpServer> {
-  const workingDir = process.cwd();
+  const workingDir = options.directory ?? process.cwd();
   configureLogDirectory(workingDir);
 
   const dirs = resolveRoleboxDirectories({ workingDir, platformId: "codex" });
@@ -139,8 +141,13 @@ export async function startCodexMcpServer(
   });
 
   syncSkillSymlinks(resolvedRoles, dirs.globalSkillsDir);
+  const native = syncCodexAgents(resolvedRoles, {
+    codexHome: dirs.configDir,
+    ...(dirs.roleboxDir === join(workingDir, "rolebox") ? { projectDir: workingDir } : {}),
+  });
+  for (const warning of native.warnings) log.warn(warning);
 
-  // This transport has no role policy; explicit host/config opt-outs still apply.
+  // Global availability gates remain independent of the acting role's policy.
   const computerUseGate = resolveComputerUseGate({
     hostOverride: options.computerUse,
     workspaceDir: workingDir,
@@ -150,40 +157,49 @@ export async function startCodexMcpServer(
     workspaceDir: workingDir,
   });
 
-  const tools = buildCanonicalTools({
-    resolvedRoles,
+  const runtime = createCodexRuntime({
+    roles: resolvedRoles,
     directory: workingDir,
-    capabilities: codexCapabilities(),
-    extraTools: { load_role_skill: createLoadRoleSkillTool(resolvedRoles) },
+    storeRoot: graphStoreRoot(getDataDir(), workingDir),
+    rpcFactory: options.rpcFactory,
     computerUse: computerUseGate.enabled,
     browseUse: browseUseGate.enabled,
   });
+  const tools = runtime.tools;
 
   // The context factory closes over the server so it can read the clientInfo
   // recorded by the initialize handshake. `signal` is the per-request signal
   // the server aborts when notifications/cancelled names that request, and
   // messageID is unique per call.
   let server: CodexMcpServer | undefined;
-  const contextFactory = (
-    _info: { name: string; args: Record<string, unknown> },
+  const connectionId = randomUUID();
+  const contextFactory = async (
+    info: { name: string; args: Record<string, unknown>; meta?: Record<string, unknown> },
     signal: AbortSignal,
-  ): CanonicalToolContext => ({
-    sessionID: resolveCodexSessionId(server?.clientInfo),
-    messageID: randomUUID(),
-    agent: "",
-    directory: workingDir,
-    worktree: workingDir,
-    abort: signal,
-    metadata() {
-      // stdio MCP has no per-call metadata seam — documented no-op.
-    },
-    async ask() {
-      // stdio MCP has no permission callback — documented no-op.
-    },
-  });
+  ): Promise<CanonicalToolContext> => {
+    const supplied = resolveCodexSessionId(server?.clientInfo, info.meta);
+    const sessionID = supplied === DEFAULT_CODEX_SESSION_ID ? `${supplied}:${connectionId}` : supplied;
+    runtime.sessions.rememberInvocation(sessionID, info.meta);
+    const agent = typeof info.meta?.threadId === "string" && resolvedRoles.length > 0
+      ? await runtime.sessions.resolveAgent(sessionID) : "";
+    return {
+      sessionID,
+      messageID: randomUUID(),
+      agent,
+      directory: workingDir,
+      worktree: workingDir,
+      abort: signal,
+      metadata() {},
+      async ask() {
+        // Host MCP approvals remain outside this stdio tool context.
+      },
+    };
+  };
 
   server = createCodexMcpServer({
     tools,
+    sandboxState: true,
+    onClose: () => runtime.close(),
     instructions: buildCodexInstructions(tools),
     serverVersion: resolvePackageVersion(),
     output: options.output,
@@ -219,7 +235,16 @@ export async function main(): Promise<void> {
   // of crashing. Never restored — the process serves until stdin closes.
   const guard = installProtocolStdoutGuard();
   const server = await startCodexMcpServer({ output: guard.stream });
-  await server.serve();
+  const interrupt = () => { server.close(); process.stdin.destroy(); process.exitCode = 130; };
+  const terminate = () => { server.close(); process.stdin.destroy(); process.exitCode = 143; };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  try { await server.serve(); }
+  finally {
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
+    server.close();
+  }
 }
 
 /** Whether this module was launched as the process entry (not imported). */

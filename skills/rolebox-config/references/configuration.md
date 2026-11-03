@@ -96,17 +96,71 @@ Codex where `rolebox sync codex` also writes and registers a local marketplace.
 | OpenCode | Register `rolebox` in the host's `plugin` array; the 2.x server entry is `rolebox/server` |
 | Pi | Load the package's Pi extension, `rolebox/pi`, through the host package/extension mechanism |
 | DSH | Install the `rolebox` bundle with the host plugin manager; the package ships `dsh/cordis.patch.yml` |
-| Codex | Run `rolebox sync codex`; restart Codex to read its managed registration |
+| Codex | Run `rolebox sync codex`, then `codex plugin add rolebox@rolebox` to install or refresh the local cache; restart Codex |
 
 Use the host's own documentation for its installation command and provider
 configuration. The built-in skill's synchronization itself does not register a
 plugin, enable an MCP server, or install a model provider.
 
+### Codex native agents and session execution
+
 Codex sync creates `<codex-home>/rolebox-marketplace`, a plugin manifest, a skills
-link and an MCP configuration launching the installed `dist/entries/codex.js`
-with Node. It updates one managed block in `config.toml`, preserving other text.
-The rolebox MCP server supplies tools and resources, but does not control Codex's
-native role selection, prompts, models, subagent sessions or execution hooks.
+link and an MCP configuration launching `dist/entries/codex.js` with Node. It updates
+one managed block in `config.toml`, preserving other text, and exports public roles
+to `<codex-home>/agents/rolebox--<role-id>.toml`. A fingerprint manifest at
+`<codex-home>/rolebox-agents.json` tracks generated files. Unmanaged files, symlinks
+and local edits are preserved with warnings; only unchanged tracked files are
+updated or removed.
+
+Sync registers and enables the marketplace entry; Codex's plugin installation
+populates its cache. Run `codex plugin add rolebox@rolebox` after first sync or to
+refresh the bundle. The generated MCP configuration forwards the launching
+process's `CODEX_HOME`, `ROLEBOX_CONFIG_DIR`, `ROLEBOX_DATA_DIR`,
+`ROLEBOX_CODEX_COMMAND` and `ROLEBOX_SESSION_ID` by name. Unset values stay unset;
+their contents are never embedded in the bundle. Restart Codex after changes.
+The same whitelist forwards uppercase and lowercase `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY` and `NO_PROXY`, plus `SSL_CERT_FILE`, `SSL_CERT_DIR` and
+`NODE_EXTRA_CA_CERTS`. This preserves the model connection's transport settings
+for app-server workers; it does not alter the inherited sandbox policy.
+
+CLI sync exports the installed global role tree. When the MCP server boots with a
+workspace `rolebox/` tree, it instead generates that tree's public native agents
+under `<workspace>/.codex/agents/` and its manifest under `<workspace>/.codex/`.
+Codex must trust the project before loading its native agent configuration;
+rolebox does not grant project trust.
+It does not export project roles globally. Restart Codex after generation to refresh
+the native catalog. For an ordinary ID `reviewer`, ask Codex to delegate using
+`rolebox--reviewer`. Unusual IDs have a stable sanitized name and suffix;
+use the generated TOML `name`.
+
+Private children remain canonical runtime targets such as `reviewer--researcher`.
+They are not exported into Codex's global native-agent discovery. Use them through
+the owning role's graph; see [Roles](roles.md#codex-role-mapping) and
+[Orchestration](orchestration.md#codex-execution).
+
+Session browsing uses a lazy `codex app-server` process. `ROLEBOX_CODEX_COMMAND`
+optionally names its executable when `codex` is not on `PATH`; it is a single
+executable path, not a shell command. Graph execution and session forks require
+host-supplied `_meta.threadId`, `_meta["codex/sandbox-state"]` and
+`_meta["codex/sandbox-launcher"]`. The MCP handshake opts into that Codex extension.
+The host's launcher and original opaque policy determine delegated execution.
+Model requests remain in app-server; native command/filesystem tools use a separate
+sandboxed `exec-server` selected for every worker turn. The authenticated loopback
+transport is host-owned, bound to that authority and removed on runtime close;
+it grants no network access to worker commands. Codex must support `environment/add`
+and acknowledge the selected thread environment; no local execution fallback is
+used. The executable override does not replace execution authority. Missing capability
+refuses the operation, so update Codex and restart its MCP connection. The protocol
+was checked against `0.166.0-alpha.5.1`; rolebox enforces capabilities rather than a
+numeric Codex version.
+
+The runtime registers 29 base tools, including six `session_*` and five `graph_*`
+tools; gated desktop/browser families add up to 35. Per-call thread identity binds
+native role policy and graph submissions. Project `defaultRole` does not select a
+native agent or replace the current conversation's prompt. Codex native UI hooks,
+hot reload and an in-session role switcher are not installed by this integration.
+
+### DSH settings
 
 DSH plugin settings include `roleboxDir`, `skillsDir`, `defaultRole`, `activeRole`,
 `computerUse`, `browseUse`, `enabledNamespaces` and `spawnProviderName`.
@@ -131,6 +185,12 @@ catalog ID first, then a single alias lookup, then unchanged passthrough with a
 log hint. Alias chains are not followed. An unrecognized value need not fail
 loading, so confirm the host can actually resolve and use the final model.
 Aliases apply to root and child models. They refresh on role bootstrap/reload.
+
+For Codex native agent files, use aliases that resolve to bare native model IDs.
+A qualified `provider/model` can be projected only when the inherited Codex provider
+is known and matches. CLI/native-file sync inherits the parent model with a warning
+when it cannot establish that match. Managed graph workers can read their parent's
+effective provider. This mapping never registers a provider or changes its credentials.
 
 ## Project defaults, automatic activation and reload
 
@@ -158,7 +218,7 @@ desktop/browser gates in the same file are independent settings.
 | OpenCode 1.x / 2 | Reads project `defaultRole`, promotes that role to `primary`, and demotes other primaries to `all`. This does not set the host's default-agent selection or force a switch in an existing conversation. |
 | DSH | Does not read project `defaultRole` for role selection. The rolebox plugin's `defaultRole` promotes role mode; its `activeRole` activates a valid primary role for a new root session without a saved selection. |
 | Pi | Does not read project `defaultRole`. Select with `/role <role-id>`; the role switcher restores the saved choice when that session resumes. A fresh session without a saved choice is not automatically activated by this JSON file. |
-| Codex | Does not use project `defaultRole` to switch Codex's native agent, model or prompt. The rolebox MCP server supplies tools/resources only. |
+| Codex | Does not use project `defaultRole` to switch an existing native agent, model or prompt. Public roles are generated native agents selected through Codex; private children launch through the owning role's graph. |
 
 For DSH automatic activation, set the existing rolebox loader row's `config`
 in the intended DSH profile to include:

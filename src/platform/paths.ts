@@ -103,9 +103,7 @@ export function dshPlatformPaths(): PlatformPaths {
  * env value is treated as unset.
  *
  * - `configDir`: Codex home (`$CODEX_HOME` or `~/.codex`)
- * - `agentsDir`: `{configDir}/skills` (mirrors the pi/dsh pattern — Codex has
- *   no native agent-file registry, so rolebox agent files live under the home
- *   tree)
+ * - `agentsDir`: `{configDir}/agents` (native custom-agent TOML files)
  * - `skillsDir`: `{configDir}/skills`
  *
  * Codex has no rolebox-owned sessions directory, so `sessionsDir` is omitted.
@@ -117,7 +115,7 @@ export function codexPlatformPaths(): PlatformPaths {
   return {
     platformId: "codex",
     configDir: codexHome,
-    agentsDir: join(codexHome, "skills"),
+    agentsDir: join(codexHome, "agents"),
     skillsDir: join(codexHome, "skills"),
   };
 }

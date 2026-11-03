@@ -64,12 +64,17 @@ try {
     await readFile(join(consumer, "node_modules/rolebox/skills/rolebox-config/SKILL.md"), "utf8"),
   );
   assert((await readFile(join(installedSkill, "references/roles.md"), "utf8")).length > 0);
+  const codexRole = join(environment.CODEX_HOME!, "rolebox", "reviewer");
+  await mkdir(codexRole, { recursive: true });
+  await writeFile(join(codexRole, "role.yaml"), "name: Reviewer\ndescription: Reviews changes.\nprompt: Review with evidence.\nmodel: native-review-model\n");
   const probe = join(consumer, "probe.mjs");
   await writeFile(probe, `
     import assert from "node:assert/strict";
     import { createRequire } from "node:module";
     import { spawn } from "node:child_process";
     import { createInterface } from "node:readline";
+    import { readFile } from "node:fs/promises";
+    import { join } from "node:path";
     import { startCodexMcpServer } from "rolebox/codex";
     const require = createRequire(import.meta.url);
     assert.equal(typeof startCodexMcpServer, "function");
@@ -104,9 +109,13 @@ try {
     try {
       const initialized = await request(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "package-test", version: "1" } });
       assert(initialized.result.capabilities.tools);
+      assert.deepEqual(initialized.result.capabilities.experimental["codex/sandbox-state"], {});
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\\n");
       const listed = await request(2, "tools/list");
-      assert(listed.result.tools.length >= 10);
+      const names = new Set(listed.result.tools.map(tool => tool.name));
+      for (const name of ["session_list", "session_read", "session_search", "session_info", "session_diff", "session_fork", "graph_declare", "graph_submit_outcome", "graph_status", "graph_audit", "graph_control"]) assert(names.has(name), "Missing packed Codex tool: " + name);
+      const native = await readFile(join(process.env.CODEX_HOME, "agents", "rolebox--reviewer.toml"), "utf8");
+      assert.match(native, /Review with evidence/);
       assert.deepEqual((await request(3, "ping")).result, {});
     } finally {
       child.stdin.end();

@@ -3,6 +3,7 @@ import {
   appendFileSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readlinkSync,
@@ -163,6 +164,11 @@ describe("writeCodexPluginBundle", () => {
         rolebox: {
           command: "node",
           args: [SERVER_ENTRY],
+          env_vars: [
+            "CODEX_HOME", "ROLEBOX_CONFIG_DIR", "ROLEBOX_DATA_DIR", "ROLEBOX_CODEX_COMMAND", "ROLEBOX_SESSION_ID",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+          ],
           startup_timeout_sec: 60,
           tool_timeout_sec: 600,
         },
@@ -573,6 +579,28 @@ describe("rolebox sync codex", () => {
     if (error !== undefined) throw error;
     return logs;
   }
+
+  it("generates native agents from synced roles and keeps their children private", async () => {
+    const roleDir = join(codexHome, "rolebox", "reviewer");
+    mkdirSync(roleDir, { recursive: true });
+    writeFileSync(join(roleDir, "role.yaml"), [
+      "name: Reviewer",
+      "description: Reviews changes.",
+      "prompt: Review the change with evidence.",
+      "subagents:",
+      "  - name: Researcher",
+      "    description: Finds evidence.",
+      "    prompt: Research the assigned question.",
+      "",
+    ].join("\n"));
+
+    const output = (await runSync()).join("\n");
+    const nativePath = join(codexHome, "agents", "rolebox--reviewer.toml");
+    expect(readFileSync(nativePath, "utf-8")).toContain('name = "rolebox--reviewer"');
+    expect(readFileSync(nativePath, "utf-8")).toContain("Review the change with evidence.");
+    expect(existsSync(join(codexHome, "agents", "rolebox--reviewer--researcher.toml"))).toBe(false);
+    expect(output).toContain("Codex agents: 1 public roles, 1 private children");
+  });
 
   it("writes the plugin bundle and registers it in the Codex config", async () => {
     const logs = await runSync();

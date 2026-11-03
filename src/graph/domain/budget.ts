@@ -384,6 +384,7 @@ export function nodeBudgetLimitsOf(spec: unknown): BudgetLimitReading {
     }
     const field = LIMIT_FIELDS.get(dimension);
     if (field === undefined) continue;
+    if (key === "timeout_ms" && value === 0) continue;
     limits[field] = value;
   }
   return Object.freeze({ kind: "ok", limits: mintNodeBudgetLimits(limits) });

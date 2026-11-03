@@ -259,6 +259,11 @@ function buildMcpConfig(serverEntry: string, runtimeCommand: string): Record<str
       [PLUGIN_ID]: {
         command: runtimeCommand,
         args: [serverEntry],
+        env_vars: [
+          "CODEX_HOME", "ROLEBOX_CONFIG_DIR", "ROLEBOX_DATA_DIR", "ROLEBOX_CODEX_COMMAND", "ROLEBOX_SESSION_ID",
+          "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+          "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+        ],
         startup_timeout_sec: 60,
         tool_timeout_sec: 600,
       },

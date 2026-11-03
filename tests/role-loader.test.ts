@@ -62,6 +62,17 @@ async function writeSubagentYaml(
 }
 
 describe("discoverRoles", () => {
+  it("matches inline and file subagents by canonical ID while retaining inline precedence", async () => {
+    await writeRoleYaml("reviewer", [
+      "name: Reviewer", "description: Reviews changes", "prompt: Review", "subagents:",
+      "  - name: Evidence Reader", "    description: Inline reader", "    prompt: Inline instructions", "",
+    ].join("\n"));
+    await writeSubagentYaml("reviewer", "evidence-reader", "name: evidence-reader\ndescription: Directory reader\nprompt: Directory instructions\n");
+    const config = (await discoverRoles(tmpDir)).get("reviewer")!;
+    expect(config.subagents).toHaveLength(1);
+    expect(config.subagents![0].prompt).toBe("Inline instructions");
+  });
+
   it("returns a Map with one entry for a single valid role.yaml", async () => {
     await writeRoleYaml(
       "engineer",

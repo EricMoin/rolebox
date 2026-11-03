@@ -77,8 +77,9 @@ tools:
 
 Replace these names with exact tools registered by the host. Host permissions,
 approval handling, plugin feature gates and adapter support still apply. A YAML
-entry does not create a tool or grant OS access. Codex's MCP integration does not
-apply role tool policies to native Codex tools.
+entry does not create a tool or grant OS access. Codex maps supported feature denials
+to native-agent settings and enforces attributed-role restrictions on rolebox MCP
+calls; arbitrary native per-tool policies remain unsupported. See the mapping below.
 
 ## Subagents
 
@@ -103,11 +104,59 @@ for example `reviewer--researcher`. Discover the actual resolved ID before
 dispatching. Children are always `subagent` mode. Recursive nesting is bounded
 to three levels by default.
 
+Child names are compared by that canonical slug: case and whitespace/hyphen
+variants share one identity. Later inline definitions replace earlier ones;
+inline definitions take precedence over directory definitions with the same ID.
+
 Unset `model`, `color`, `variant`, `temperature`, `top_p`, `permission`, `tools`
 and `memory` inherit from the parent. An explicit child value replaces the
 parent value for that field; a partial `memory` block is not a deep merge.
 Prompts, skill/function lists, `auto_activate` and `locked` do not inherit.
 Default built-in functions are resolved separately for each child.
+
+## Codex role mapping
+
+`rolebox sync codex` exports public top-level roles as native agents. For a role ID
+`reviewer`, the ordinary native name is `rolebox--reviewer`; unusual IDs use a stable
+sanitized name with a digest suffix. Native files carry `name`, `description` and
+`developer_instructions`, plus supported model and feature settings. Sync preserves
+user edits and unmanaged collisions. Restart Codex to refresh its agent catalog.
+
+Private children keep canonical IDs such as `reviewer--researcher` and in-memory
+prompt/model/resource descriptors. They are excluded from native global discovery.
+A role may target its direct children in `graph_declare`; another role or an
+unattributed root conversation cannot target those children. Native `spawn_agent`
+discovery alone does not publish private rolebox children. The resolver retains
+deeper nested descriptors, but graph workers cannot recursively dispatch and those
+deeper private descendants have no general launch path in this integration.
+
+Bare native model IDs map directly. A `provider/model` maps only when its provider
+matches the effective inherited Codex provider. Sync cannot infer that provider and
+omits a qualified override with a warning, while managed graph execution reads the
+parent's provider. Use a Codex alias resolving to a bare native ID when generating
+native files. The adapter never overrides the provider or installs credentials.
+
+`variant` maps to `model_reasoning_effort` for `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max` and `ultra`, subject to the selected model's support. Managed
+workers inherit the parent's effort when no role variant is set. Other variants,
+`temperature` and `top_p` are omitted with warnings.
+
+Native files only reduce supported feature groups. A false `tools` entry or
+matching `permission.deny` can disable shell (`shell_tool`, `bash`, `shell`,
+`exec_command` or `write_stdin`), apps, plugins, memories (`memories` or
+`memory_tool`), or permission requests (`request_permissions_tool`). These settings
+cannot enable a capability disabled by the parent, widen sandbox/approval policy,
+or provide arbitrary native per-tool enforcement.
+Native feature denials also match trailing-star permission patterns; a matching
+`permission.deny` takes precedence over an explicit `tools` grant for that alias.
+
+For rolebox MCP calls, the host's thread identity resolves the native `agentRole`
+back to its canonical role. A stale generated role is refused until sync/restart.
+`permission.deny` wins; the `tools` map uses an exact name before the longest
+matching trailing-star rule, and otherwise allows the tool. These restrictions
+apply to rolebox's own tools, including browser/desktop tools, independently of
+global registration gates. A graph worker's dedicated `graph_submit_outcome`
+channel remains available; it does not grant graph control or recursive dispatch.
 
 ## Memory
 

@@ -50,9 +50,12 @@ other computer tools. The base agent needs no role selection; an unresolved
 named role is refused until its configuration can be resolved. DSH requires
 its `ctx.tools.guard` seam to enforce explicit role restrictions.
 
-Graph workers inherit the parent's authorized computer tools with native schemas
-shown by default. Node `tools` lists do not restrict access. Use diagnostic and
-permission tools alongside observation and the actions the task requires.
+On hosts that forward the family to workers, graph workers inherit the parent's
+authorized computer tools with native schemas shown by default. Node `tools` lists
+do not restrict access. Use diagnostic and permission tools alongside observation
+and the actions the task requires. Codex managed graph workers instead use native
+Codex task tools plus scoped rolebox resource reads and outcome submission; they do
+not receive outer-process `computer_*` tools through the dynamic callback bridge.
 
 Inherited tools remain subject to host registration, role restrictions and OS
 permissions. Discovery and code presentation are optional. Explicit policy
@@ -60,7 +63,8 @@ restrictions are not OS permission failures: `computer_permissions` does not
 change configuration or grant additional capabilities.
 
 Codex MCP has no rolebox per-call approval callback. Its client permissions
-and the operating system's own permission checks still apply.
+and the operating system's own permission checks still apply. Attributed native
+roles additionally apply their rolebox tool restrictions per call.
 
 ## Workflow
 

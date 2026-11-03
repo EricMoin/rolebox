@@ -60,6 +60,9 @@ export interface CodexMcpServerOptions {
   serverName?: string;
   /** Optional instructions string included in the initialize result. */
   instructions?: string;
+  /** Request Codex's opaque per-call sandbox state for delegated execution. */
+  sandboxState?: boolean;
+  onClose?: () => void;
   /** Protocol input stream; defaults to process.stdin. */
   input?: NodeJS.ReadableStream;
   /** Protocol output stream; defaults to process.stdout. */
@@ -75,7 +78,7 @@ export interface CodexMcpServerOptions {
    * valid, it just cannot observe cancellation).
    */
   contextFactory?: (
-    info: { name: string; args: Record<string, unknown> },
+    info: { name: string; args: Record<string, unknown>; meta?: Record<string, unknown> },
     signal: AbortSignal,
   ) => CanonicalToolContext | Promise<CanonicalToolContext>;
 }
@@ -121,6 +124,9 @@ function createDefaultContext(signal: AbortSignal): CanonicalToolContext {
  * await handleLine(line) directly for tests and embedded use.
  */
 export class CodexMcpServer {
+  #sandboxState: boolean;
+  #onClose: (() => void) | undefined;
+  #closed = false;
   #input: NodeJS.ReadableStream;
   #output: NodeJS.WritableStream;
   #onError: (message: string) => void;
@@ -140,6 +146,8 @@ export class CodexMcpServer {
   #servePromise: Promise<void> | undefined;
 
   constructor(opts: CodexMcpServerOptions) {
+    this.#sandboxState = opts.sandboxState === true;
+    this.#onClose = opts.onClose;
     this.#input = opts.input ?? process.stdin;
     this.#output = opts.output ?? process.stdout;
     this.#onError =
@@ -210,8 +218,15 @@ export class CodexMcpServer {
    * same promise.
    */
   async serve(): Promise<void> {
-    if (!this.#servePromise) this.#servePromise = this.#run();
+    if (!this.#servePromise) this.#servePromise = this.#run().finally(() => this.close());
     return this.#servePromise;
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const controller of this.#inflight.values()) controller.abort(new Error("MCP server closed"));
+    this.#onClose?.();
   }
 
   async #run(): Promise<void> {
@@ -287,7 +302,10 @@ export class CodexMcpServer {
 
           const result: Record<string, unknown> = {
             protocolVersion: negotiateProtocolVersion(record.protocolVersion),
-            capabilities: { tools: { listChanged: false } },
+            capabilities: {
+              tools: { listChanged: false },
+              ...(this.#sandboxState ? { experimental: { "codex/sandbox-state": {} } } : {}),
+            },
             serverInfo: { name: this.#serverName, version: this.#serverVersion },
           };
           if (this.#instructions) result.instructions = this.#instructions;
@@ -347,7 +365,7 @@ export class CodexMcpServer {
       if (this.#contextFactory) {
         try {
           context = await this.#contextFactory(
-            { name, args: asRecord(args) ?? {} },
+            { name, args: asRecord(args) ?? {}, ...(asRecord(record?._meta) ? { meta: asRecord(record?._meta) } : {}) },
             controller.signal,
           );
         } catch (err) {

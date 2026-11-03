@@ -27,23 +27,54 @@ Pi runs `PiLightweightServiceStack` instead of the full PluginCore service stack
 
 ## Codex (MCP) parity
 
-The Codex tool surface is pinned by `tests/platform/codex-mcp.test.ts`: the MCP server (`rolebox mcp`) registers the canonical intersection `buildCanonicalTools` assembles for a harness with no session client and no dispatch backend, plus `load_role_skill` — 18 tools. See [compatibility.md](compatibility.md) for the parity matrix and [codex.md](codex.md) for the documented surface.
+The Codex MCP runtime registers 29 base tools, including six native session tools and
+five declared-graph tools, plus gated desktop/browser families. Public roles become
+native agents; private children stay scoped graph execution targets. See
+[compatibility.md](compatibility.md) and [codex.md](codex.md) for the supported surface.
 
-- `session_*` tools are absent: the stdio MCP transport exposes no rolebox session client.
-- `dispatch_*` / `loop_*` / `task_*` are withheld, and the `graph_*` tools are not registered either — the Codex entry builds the canonical tool set without a dispatch manager, so the graph tools are never constructed. No stubs stand in for any of them.
-- `asset_hot_reload` is opencode-only and is not on the MCP surface.
-- There is no permission prompt on the MCP transport: `context.ask()` is a documented no-op, so a tool that would request permission on another harness (for example `interactive_terminal` open) runs without a prompt.
+- Graph execution and session forks require Codex's per-call thread, opaque sandbox
+  state and launcher metadata. Missing authority refuses execution; there is no
+  unsandboxed fallback or model-controlled substitute for that metadata.
+  Native command/filesystem tools run in a separate sandboxed exec-server, while
+  model requests stay in app-server. Codex must support executor registration and
+  thread/turn environment binding; an unavailable executor never falls back to
+  local command execution.
+- Native files can reduce supported feature groups but cannot supply arbitrary native
+  per-tool permissions, change the inherited provider, or widen sandbox/approval
+  policy. Rolebox MCP calls apply their own attributed-role restrictions.
+- Managed workers expose outcome submission and scoped resource reads through dynamic
+  callbacks. File/shell operations use sandboxed native Codex tools. `discover` and
+  `code` worker presentation are unsupported.
+- Session forks stop at completed turn boundaries. Live state/todos from an external
+  UI process may be unavailable; recorded file patches do not describe current files.
+- Graph results require `graph_status` collection. This integration cannot wake an
+  external UI-owned chat or automatically resume it through a separate app-server.
+  Boot does not redispatch persisted attempts; lost executions remain unknown and
+  uncertain create claims are retained. Attempt credential values are not durable.
+  Fatal transport failure or shutdown cleans up app-server and executor process trees but
+  does not fabricate a failed, completed or interrupted native turn.
+- Node token/cost ceilings are refused because the adapter has no measured usage feed.
+  Execution-count budgets and timeouts remain available. A positive `timeout_ms`
+  includes startup time and records a durable timeout decision for the exact attempt,
+  followed by an interrupt request. Zero disables it; timeout does not imply confirmed
+  interruption or an automatic retry.
+- `dispatch_*`, `loop_*`, `task_*`, `lsp_*`, `function_graph`, `skill_compose`,
+  `context_assemble` and `asset_hot_reload` are not on this MCP surface.
+- MCP `context.ask()` has no permission-dialog callback. Existing standalone tools
+  retain that behavior; managed worker approval/input requests are rejected rather
+  than automatically approved.
 
-### Platform-inherent gaps (explicit non-goals on Codex)
+### Remaining Codex integration gaps
 
-Codex drives rolebox purely over MCP instead of the PluginCore service stack, so these opencode-only subsystems are out of scope on Codex:
+The Codex MCP/app-server runtime does not install the PluginCore service stack, so
+these opencode-only subsystems remain out of scope:
 
 - Hot reload (`asset_hot_reload` tool + `HotReloadService`)
 - Extensions (the PluginCore `ExtensionService` extension loader)
 - Recovery engine (`RecoveryService` / `RecoveryEngine`)
 - TUI (the interactive terminal UI binary is opencode-only)
 - Role switching (no in-session active-role switcher)
-- Hooks-driven activation (`chat.message` / `session.idle` / tool interception) — the MCP transport carries no host event stream, so activation happens per MCP call
+- Hooks-driven activation (`chat.message` / `session.idle` / tool interception) in native UI conversations; managed app-server events do not supply those host hooks
 
 ## hashline_edit concurrency semantics
 
@@ -100,12 +131,10 @@ Operating-system permissions and these platform limits still apply.
   and a missing `import`/`scrot`/`xdotool` is an explicit refusal naming the
   install (`src/computer/drivers/linux.ts:30-34`,
   `src/computer/exec.ts:112-119`).
-- **Codex has no permission prompt and no role.** On the MCP transport
-  `context.ask()` is a documented no-op (see
-  [Codex (MCP) parity](#codex-mcp-parity)) and no rolebox role is active
-  (`src/entries/codex.ts:10-22`), so the global `computerUse` gate is the whole
-  policy there: there is no per-call approval and no per-role grant to fall back
-  on.
+- **Codex MCP has no permission-dialog callback.** The global `computerUse` gate
+  controls registration; attributed native roles additionally apply their tool
+  restrictions. OS permissions remain separate. Managed graph workers do not receive
+  outer-process `computer_*` dynamic tools.
 - **A screenshot needs an image-capable model route.** Each host translates the
   image attachment its own way
   ([computer-use.md](computer-use.md#image-transport-per-host)); on dsh the bytes
@@ -183,10 +212,10 @@ when its `browseUse` gate is on (see
   its own Playwright build is installed. `browse_status` reports Chromium's
   presence only when `PLAYWRIGHT_BROWSERS_PATH` names the cache; otherwise the
   binary state is reported as unknown rather than guessed.
-- **Codex has no per-call approval and no active role.** On the MCP transport
-  the global `browseUse` gate is the whole policy. DSH, Pi and the two OpenCode
-  entries additionally apply per-role rules; OpenCode registers no `browse_*`
-  tool at all, whatever a role's `tools:` map says.
+- **Codex MCP has no permission-dialog callback.** Its global `browseUse` gate
+  controls registration, with additional restrictions for attributed native roles.
+  Managed graph workers do not receive outer-process `browse_*` dynamic tools.
+  OpenCode registers no `browse_*` tool, whatever a role's `tools:` map says.
 - **The default test suite never launches a browser.** The family's tests run
   against an in-memory driver, and the live Playwright check is skipped unless
   `ROLEBOX_BROWSE_LIVE=1`. Unit tests establish the tool, session and result

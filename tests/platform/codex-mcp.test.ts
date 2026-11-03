@@ -168,9 +168,9 @@ function notify(method: string, params?: unknown): string {
   return JSON.stringify({ jsonrpc: JSONRPC_VERSION, method, params });
 }
 
-// ── The real Codex tool surface ──────────────────────────────────────────────
+// ── The standalone tool assembly without host ports ──────────────────────────────────────────────
 
-const EXPECTED_CODEX_TOOL_NAMES = [
+const STANDALONE_CODEX_TOOL_NAMES = [
   "asset_inspect",
   "asset_search",
   "asset_validate",
@@ -191,7 +191,7 @@ const EXPECTED_CODEX_TOOL_NAMES = [
   "web_search",
 ];
 
-function realCodexTools(computerUse = false, browseUse = false): Record<string, CanonicalToolDef> {
+function standaloneCodexTools(computerUse = false, browseUse = false): Record<string, CanonicalToolDef> {
   return buildCanonicalTools({
     resolvedRoles: [],
     directory: process.cwd(),
@@ -581,14 +581,14 @@ describe("CodexMcpServer", () => {
   });
 
   it("lists every registered tool with an object inputSchema", async () => {
-    const tools = realCodexTools();
+    const tools = standaloneCodexTools();
     const harness = createHarness(tools);
     await harness.server.handleLine(request(1, "tools/list"));
 
     const [message] = await waitForMessages(harness, 1);
     const listed = message.result.tools as Array<Record<string, any>>;
     expect(listed.map((tool) => tool.name).sort()).toEqual(Object.keys(tools).sort());
-    expect(listed.map((tool) => tool.name).sort()).toEqual(EXPECTED_CODEX_TOOL_NAMES);
+    expect(listed.map((tool) => tool.name).sort()).toEqual(STANDALONE_CODEX_TOOL_NAMES);
     expect(message.result.nextCursor).toBeUndefined();
 
     for (const tool of listed) {
@@ -601,7 +601,7 @@ describe("CodexMcpServer", () => {
   });
 
   it("advertises a real tool's properties and required list", async () => {
-    const harness = createHarness(realCodexTools());
+    const harness = createHarness(standaloneCodexTools());
     await harness.server.handleLine(request(1, "tools/list"));
     const [message] = await waitForMessages(harness, 1);
     const listed = message.result.tools as Array<Record<string, any>>;
@@ -615,7 +615,7 @@ describe("CodexMcpServer", () => {
 
   it("lists the complete computer family only when the canonical gate is enabled", async () => {
     for (const enabled of [false, true]) {
-      const harness = createHarness(realCodexTools(enabled));
+      const harness = createHarness(standaloneCodexTools(enabled));
       await harness.server.handleLine(request(1, "tools/list"));
       const [message] = await waitForMessages(harness, 1);
       const listed = (message.result.tools as Array<Record<string, any>>)
@@ -630,7 +630,7 @@ describe("CodexMcpServer", () => {
 
   it("lists the complete browse family only when the browse gate is enabled", async () => {
     for (const enabled of [false, true]) {
-      const harness = createHarness(realCodexTools(false, enabled));
+      const harness = createHarness(standaloneCodexTools(false, enabled));
       await harness.server.handleLine(request(1, "tools/list"));
       const [message] = await waitForMessages(harness, 1);
       const listed = (message.result.tools as Array<Record<string, any>>)
@@ -645,15 +645,15 @@ describe("CodexMcpServer", () => {
     }
   });
 
-  it("keeps the tool surface to the canonical intersection plus load_role_skill", () => {
-    const names = Object.keys(realCodexTools());
+  it("keeps standalone assembly minimal when session and graph ports are omitted", () => {
+    const names = Object.keys(standaloneCodexTools());
     for (const prefix of ["session_", "dispatch_", "loop_", "task_", "graph_"]) {
       expect(names.filter((name) => name.startsWith(prefix))).toEqual([]);
     }
   });
 
   it("accepts and ignores a tools/list cursor (single page, no nextCursor)", async () => {
-    const harness = createHarness(realCodexTools());
+    const harness = createHarness(standaloneCodexTools());
     await harness.server.handleLine(request(1, "tools/list", { cursor: "" }));
     await harness.server.handleLine(request(2, "tools/list", { cursor: "anything" }));
 
@@ -1177,15 +1177,15 @@ describe("buildCodexInstructions", () => {
   it("carries one workflow block per registered family and nothing for an absent one", async () => {
     const { buildCodexInstructions } = await import("../../src/entries/codex.ts");
 
-    const neither = buildCodexInstructions(realCodexTools(false, false));
+    const neither = buildCodexInstructions(standaloneCodexTools(false, false));
     expect(neither).not.toContain("Computer use workflow");
     expect(neither).not.toContain("Browser use workflow");
 
-    const computerOnly = buildCodexInstructions(realCodexTools(true, false));
+    const computerOnly = buildCodexInstructions(standaloneCodexTools(true, false));
     expect(computerOnly).toContain("Computer use workflow");
     expect(computerOnly).not.toContain("Browser use workflow");
 
-    const both = buildCodexInstructions(realCodexTools(true, true));
+    const both = buildCodexInstructions(standaloneCodexTools(true, true));
     expect(both).toContain("Computer use workflow");
     expect(both).toContain("Browser use workflow");
     expect(both).toContain("browse_snapshot");

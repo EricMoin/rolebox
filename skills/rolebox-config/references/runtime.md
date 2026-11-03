@@ -105,6 +105,12 @@ to every harness exposing `browse_eval`; restart the host after updating rolebox
 
 ## Hooks and recovery
 
+Codex's app-server adapter observes events only for managed worker threads. It does
+not install rolebox's `chat.message`, native tool-interception or idle hooks into
+UI-owned Codex conversations, and it does not install PluginCore hot reload,
+extensions, recovery or a role switcher. Native-agent files and graph execution do
+not change that boundary.
+
 Declare custom hooks in `role.yaml`:
 
 ```yaml
@@ -224,6 +230,40 @@ replaces the default advisory guidance entirely. The judge uses a fresh child
 session; unknown role, timeout or failed verdict skips the LLM decision without
 retry. Copilot requires host idle/message hooks and is not installed into native
 Codex conversations by the MCP server.
+
+## Codex session and worker runtime
+
+The six Codex session tools browse native threads through app-server, with
+workspace filtering and paginated turns/items. `session_diff` shows recorded file
+patches. `session_fork` requires host sandbox metadata and a completed turn boundary:
+use a turn ID or that turn's final message ID, never a message in the middle of a
+turn. Live todos and execution state require events from an app-server this adapter
+owns; another process's thread may report `notLoaded` here and remains unknown.
+Token/cost telemetry is not supplied by this adapter.
+
+Fatal transport failure rejects pending calls and terminates the app-server process
+tree. MCP close, `SIGINT` and `SIGTERM` also clean up managed descendants. These
+local actions do not establish a native turn outcome: absent a terminal event, the
+execution remains unknown. The adapter does not automatically restart the transport
+or retry a worker.
+
+Per-call `_meta.threadId` supplies thread identity; `_meta.sessionId` may be shared
+by forks and is not a worker identity. Legacy connection identity remains usable
+for standalone tools but cannot execute graph tools. Native role attribution reads
+the thread's `agentRole`; attributed roles narrow rolebox tool calls. Global
+browser/desktop gates still control registration, and OS permissions still apply.
+
+The MCP `ask()` callback remains unavailable for standalone tools. Managed graph
+workers reject fresh interactive approval/input requests and use native task tools
+inside the inherited sandbox. Their outer-process dynamic face contains only
+outcome submission and allowed scoped resource reads. They do not receive
+`hashline_edit`, interactive terminal, desktop or browser tools through that face.
+Cancellation during a pending turn start is queued until the turn ID arrives;
+`requested` is distinct from Codex's interrupted confirmation. A positive node
+`timeout_ms` includes launch time, records timeout control for the exact attempt and
+requests interruption. Zero disables the watchdog, and expiry never retries work.
+See [Orchestration](orchestration.md#codex-execution) for graph result collection,
+cancellation and restart behavior.
 
 ## Notifications
 

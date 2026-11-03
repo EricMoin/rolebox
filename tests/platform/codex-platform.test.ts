@@ -42,7 +42,7 @@ describe("codexPlatformPaths", () => {
 
     expect(paths.platformId).toBe("codex");
     expect(paths.configDir).toBe(codexHome);
-    expect(paths.agentsDir).toBe(join(codexHome, "skills"));
+    expect(paths.agentsDir).toBe(join(codexHome, "agents"));
     expect(paths.skillsDir).toBe(join(codexHome, "skills"));
     // Codex has no rolebox-owned sessions directory — nothing is invented.
     expect(paths.sessionsDir).toBeUndefined();
@@ -64,7 +64,7 @@ describe("codexPlatformPaths", () => {
     const paths = codexPlatformPaths();
 
     expect(paths.configDir).toBe(join(homedir(), ".codex"));
-    expect(paths.agentsDir).toBe(join(homedir(), ".codex", "skills"));
+    expect(paths.agentsDir).toBe(join(homedir(), ".codex", "agents"));
     expect(paths.skillsDir).toBe(join(homedir(), ".codex", "skills"));
   });
 
@@ -189,16 +189,16 @@ describe("codex registry descriptor", () => {
 });
 
 describe("codexCapabilities", () => {
-  it("declares the minimal MCP-only capability shape explicitly", () => {
+  it("declares native agent files and managed app-server session capabilities", () => {
     expect(codexCapabilities()).toEqual({
-      hasBackgroundTasks: false,
-      hasSessionFork: false,
-      hasSessionCreate: false,
-      hasSessionAbort: false,
-      hasAgentFileSync: false,
+      hasBackgroundTasks: true,
+      hasSessionFork: true,
+      hasSessionCreate: true,
+      hasSessionAbort: true,
+      hasAgentFileSync: true,
       hasMultiStepTools: true,
-      hasEventStream: false,
-      hasSessionStatus: false,
+      hasEventStream: true,
+      hasSessionStatus: true,
       hasRoleSwitch: false,
       platformId: "codex",
     });

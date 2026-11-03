@@ -15,6 +15,7 @@ import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "../resolver/env-resolver.ts";
 import { resolveModel } from "../resolver/model-resolver.ts";
+import { subagentIdSlug } from "../utils/subagent-id.ts";
 import type { RoleConfig, SubAgentConfig, DispatchRoleConfig, GraphRoleConfig, MemoryConfig } from "../types.ts";
 import { parseMemoryConfig } from "../memory/config.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "../constants.ts";
@@ -441,11 +442,11 @@ async function loadOneRole(
 
   const mergedMap = new Map<string, SubAgentConfig>();
   for (const sa of validSubagents) {
-    mergedMap.set(sa.name, sa);
+    mergedMap.set(subagentIdSlug(sa.name), sa);
   }
   for (const sa of fileBasedSubagents) {
-    if (!mergedMap.has(sa.name)) {
-      mergedMap.set(sa.name, sa);
+    if (!mergedMap.has(subagentIdSlug(sa.name))) {
+      mergedMap.set(subagentIdSlug(sa.name), sa);
     }
   }
 

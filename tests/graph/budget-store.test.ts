@@ -498,6 +498,15 @@ describe("the dispatch budget — the claim is the conditional write", () => {
 });
 
 describe("the dispatch budget — which limits a plan authorizes", () => {
+  it("treats zero timeout as a disabled watchdog while preserving zero token and cost ceilings", () => {
+    const reading = nodeBudgetLimitsOf({ timeout_ms: 0, max_input_tokens: 0, max_cost_usd: 0 });
+    expect(reading.kind).toBe("ok");
+    if (reading.kind !== "ok") return;
+    expect(reading.limits.durationMs).toBeUndefined();
+    expect(reading.limits.inputTokens).toBe(0);
+    expect(reading.limits.costUsd).toBe(0);
+  });
+
   it("reads exactly the four node resource ceilings", () => {
     const reading = nodeBudgetLimitsOf({
       max_input_tokens: 10,

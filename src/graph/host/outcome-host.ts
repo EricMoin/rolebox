@@ -2382,18 +2382,13 @@ export class OutcomeHost {
     let decisions: readonly ControlDecisionRecord[];
     try {
       runId = ledger.runs.readRun(graphId)?.runId;
-      // A `budget-stop` IS A STOPPING DECISION TOO (P3 item 3). It stops the run
-      // for the same reason a cancel does — the graph must not dispatch or settle
-      // any more — so the platform intent it leaves behind is delivered through
-      // exactly this path: a host with a cancel port hands each in-flight
-      // execution's cancellation over, records the durable cancel effect and
-      // reports what the platform substantiated, while an attempt whose execution
-      // the platform cannot confirm stays visible and unsettled.
+      // Node timeouts and run stops both leave cancellation intents for their
+      // exact attempts. A control decision alone does not confirm interruption.
       decisions = ledger.runs
         .controlDecisions(graphId)
         .filter(
           (decision) =>
-            decision.command === "cancel" || decision.command === "budget-stop",
+            decision.command === "cancel" || decision.command === "budget-stop" || decision.command === "timeout",
         );
     } catch (error) {
       return Object.freeze({

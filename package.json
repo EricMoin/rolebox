@@ -72,6 +72,7 @@
     "test:tui": "npm test -- tests/tui/",
     "test:browse:e2e": "node --import tsx scripts/test-browse-e2e.ts",
     "test:hosts:e2e": "node --import tsx scripts/test-hosts-e2e.ts",
+    "test:codex:e2e": "node --import tsx scripts/test-codex-e2e.ts",
     "check:hosts": "node --import tsx scripts/host-versions.ts check",
     "update:hosts": "node --import tsx scripts/host-versions.ts update",
     "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\"",
@@ -139,6 +140,7 @@
     "js-yaml": "^4.1.0",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
+    "ws": "^8.22.1",
     "zod": "4.1.8"
   },
   "optionalDependencies": {
@@ -235,6 +237,7 @@
     "@types/node": "^26.6.5",
     "@types/semver": "^7.7.1",
     "@types/turndown": "^5.0.6",
+    "@types/ws": "^8.18.2",
     "babel-plugin-module-resolver": "5.0.2",
     "babel-preset-solid": "1.9.12",
     "esbuild": "0.28.2",

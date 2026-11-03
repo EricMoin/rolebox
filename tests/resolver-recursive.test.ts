@@ -57,6 +57,25 @@ function setup(): { ctx: ResolveContext; roleMap: Map<string, RoleConfig>; clean
 }
 
 describe("Recursive subagent resolution", () => {
+  it("resolves canonical-name collisions once with the later inline definition at every depth", async () => {
+    const { ctx, roleMap, cleanup } = setup();
+    try {
+      const role = roleMap.get("emperor")!;
+      role.subagents = [{
+        name: "Coordinator", description: "Coordinates", prompt: "Coordinate",
+        subagents: [
+          { name: "Evidence Reader", description: "Earlier", prompt: "Earlier instructions" },
+          { name: "evidence-reader", description: "Later", prompt: "Later instructions" },
+        ],
+      }];
+      const resolved = await resolveAllRoles(roleMap, ctx);
+      const children = resolved[0].subagents[0].subagents;
+      expect(children).toHaveLength(1);
+      expect(children[0].id).toBe("emperor--coordinator--evidence-reader");
+      expect(children[0].config.prompt).toBe("Later instructions");
+    } finally { cleanup(); }
+  });
+
   it("tracks inherited memory settings for nested agents", async () => {
     const { ctx, roleMap, cleanup } = setup();
     try {

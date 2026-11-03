@@ -219,9 +219,19 @@ Restart the harness. A non-bundle dsh install instead needs one `- insert:` row 
 ```bash
 npm install -g rolebox     # or run from a checkout built with `npm run build`
 rolebox sync codex
+codex plugin add rolebox@rolebox
 ```
 
-`rolebox sync codex` writes the local plugin bundle under `$CODEX_HOME/rolebox-marketplace` (`~/.codex/rolebox-marketplace` by default), registers it in the Codex `config.toml`, and deploys installed roles to `$CODEX_HOME/rolebox`. The bundle starts the rolebox MCP server (`rolebox mcp`), which exposes rolebox's canonical tools over stdio. Restart Codex afterwards. Details: [docs/codex.md](docs/codex.md).
+`rolebox sync codex` registers a local plugin marketplace, deploys installed roles,
+and generates public native agents under `$CODEX_HOME/agents` (`~/.codex/agents` by
+default). Restart Codex, then ask it to delegate using a generated agent such as
+`rolebox--reviewer`.
+Private children remain scoped graph targets. The MCP runtime exposes 29 base tools,
+including native session browsing and declared-graph execution, plus optional desktop
+and browser families. Delegated workers require Codex's host-supplied sandbox metadata
+and use native Codex tools inside that sandbox. Read completion through `graph_status`;
+this stdio integration does not wake an external UI-owned chat. Details and supported
+boundaries: [docs/codex.md](docs/codex.md).
 
 <details>
 <summary><strong>Deprecated entry paths</strong></summary>

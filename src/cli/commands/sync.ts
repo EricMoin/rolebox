@@ -24,6 +24,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { createDirSymlink } from "../../utils/symlink.ts";
+import { syncCodexAgents } from "../../platform/adapters/codex/agents.ts";
+import { initializeRoleboxRuntime, resolveRoleboxDirectories } from "../../platform/factory.ts";
 
 /**
  * Build a filesystem-safe, collision-free backup path beside the target:
@@ -204,6 +206,15 @@ export async function sync(target: string, relink = false): Promise<void> {
       throw error;
     }
     console.log(`Codex plugin: registered ${bundle.marketplaceDir} in ${bundle.configPath}`);
+    console.log("Codex plugin: install or refresh with `codex plugin add rolebox@rolebox`, then restart Codex");
+    const directories = resolveRoleboxDirectories({ platformId: "codex" });
+    const { resolvedRoles } = await initializeRoleboxRuntime({
+      directories: { ...directories, roleboxDir: syncTarget },
+      roleFunctionsMap: new Map(),
+    });
+    const agents = syncCodexAgents(resolvedRoles, { codexHome: directories.configDir });
+    for (const warning of agents.warnings) console.warn(`Warning: ${warning}`);
+    console.log(`Codex agents: ${agents.agents.filter(agent => agent.parentId === undefined).length} public roles, ${agents.agents.filter(agent => agent.parentId !== undefined).length} private children; restart Codex to refresh native agents`);
   }
 
   // ── Relinked role directories ───────────────────────────────────────

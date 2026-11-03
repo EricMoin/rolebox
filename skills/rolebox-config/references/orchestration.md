@@ -7,9 +7,10 @@ prompt/model/assets. Direct dispatch is useful for one task; declared graphs
 express fixed dependencies, outcomes, joins and bounded revision cycles. DSH
 role teams coordinate complementary top-level roles in persistent sessions.
 
-Use the tools actually registered by the current host. Codex's rolebox MCP
-server does not own native Codex subagent sessions; a tool name or a role
-declaration cannot supply that execution capability.
+Use the tools actually registered by the current host. Codex supplies the graph
+surface through its managed app-server workers; its native public-agent discovery
+and private rolebox graph targets have different scopes. See
+[Codex execution](#codex-execution) before configuring that host.
 
 ## Direct dispatch settings
 
@@ -111,9 +112,81 @@ Optional `toolPresentation` selects `native` (default), `discover`, or `code`,
 with up to 32 exact tool names under `preload`. This changes schema visibility,
 not authorization. DSH supports discovery and code invocation. Pi and OpenCode 2
 support native discovery but reject code invocation; OpenCode 1 rejects explicit
-presentation configuration. Codex MCP cannot configure Codex's native workers.
+presentation configuration. Codex supports native presentation only and refuses
+`discover` and `code`.
 Worker instructions should use available native tools and the dedicated outcome
 submission instead of inventing shell or file wrapper APIs.
+
+### Codex execution
+
+Codex registers `graph_declare`, `graph_submit_outcome`, `graph_status`,
+`graph_audit` and `graph_control` over the same graph application and acceptance
+ledger. Public native agents have names such as `rolebox--reviewer`, while graph
+nodes use canonical IDs such as `reviewer` or the acting role's direct private
+child `reviewer--researcher`. A base conversation may target public roles only.
+Deeper child IDs can be resolved, but graph workers cannot recursively dispatch;
+normal Codex workflows therefore do not provide a general launch path for deeper
+private descendants.
+
+Graph execution requires Codex to supply trusted per-call `_meta.threadId`, opaque
+`codex/sandbox-state` and `codex/sandbox-launcher` metadata. Model arguments cannot
+supply that authority. The app-server owns the model connection, while a separate
+`codex exec-server` owns native command and filesystem operations. Rolebox launches
+that executor through the verified sandbox launcher, forwarding the original
+opaque policy unchanged. Thus a network-restricted workspace still permits the
+model connection while worker commands retain their network and filesystem limits.
+Missing metadata refuses execution.
+Worker turns declare `externalSandbox` with restricted network access to avoid
+nesting another OS sandbox inside that protected executor. The original policy is
+still enforced by the outer launcher and is never replaced by this declaration.
+
+Every worker turn is pinned to this execution environment. An authenticated
+loopback relay connects app-server to the executor's stdio; it cannot launch a
+command outside that executor. Environment registration or binding failure refuses
+execution, and executor loss closes its owning app-server without local fallback
+or automatic restart. Codex must support `exec-server`, `environment/add` and
+thread/turn environment selection. Forks defer inherited goal continuation; any
+later worker turn receives the same mandatory environment binding.
+An updated policy gets a separate connection, while existing workers retain their
+original policy. [Configuration](configuration.md#codex-native-agents-and-session-execution)
+describes installation and executable lookup.
+
+Each attempt runs in a confirmed native thread with its role's prompt, supported
+model/effort and feature restrictions. Worker dynamic callbacks are bound to their
+connection, thread, turn and graph attempt. The exposed dynamic tools are
+`graph_submit_outcome` and allowed role-scoped asset/reference/skill readers.
+Native Codex tools perform file and shell work inside the inherited sandbox;
+outer-process mutating tools are not exposed through this bridge. Plugins, apps, memories,
+MCP servers, recursive native agents, hooks, notifications, hosted web/image tools,
+goals and shell snapshots are disabled for these workers. MCP inventory entries
+must be explicitly disabled with empty tool/resource catalogs before the worker
+model starts; absent or uncertain status is refused. Interactive
+approval/input requests are rejected rather than approved automatically.
+
+Only accepted submissions settle explicit outcomes. Normal, failed and interrupted
+turns remain distinct; an interrupt acknowledgment is `requested` until the
+interrupted terminal event arrives. Cancellation requested while `turn/start` is
+pending is queued until its turn ID is known, without claiming interruption.
+If a stopping decision arrives during thread creation, the late-created worker
+is recorded without starting a model turn. Initialization failure closes the
+owning app-server rather than leaving a usable partial connection.
+`budget.max_executions` and node `timeout_ms` remain supported. A positive timeout
+starts at attempt delivery and includes startup time; the watchdog records a durable
+timeout control for that exact attempt and requests interruption. Zero disables the
+timeout. Expiry does not retry work automatically or confirm that a turn stopped.
+Codex node `max_input_tokens`, `max_output_tokens` and
+`max_cost_usd` are refused because this adapter has no measured token/cost feed.
+
+Collect results through `graph_status`, including output/history as needed, and
+apply explicit lifecycle changes through `graph_control`. A fresh stdio app-server
+cannot wake or automatically resume an external UI-owned conversation. Keep
+collecting status while workers run or inspect it in a later turn; do not expect a
+completion notification to start the parent agent. Boot does not redispatch
+persisted graphs. Fatal transport failure terminates its app-server process tree;
+local close and connection loss leave an execution without a native terminal event
+unknown, without inventing failure, completion or interruption. Uncertain create
+claims are retained; credentials are not retained durably. Diagnose the recorded state before
+an explicit retry instead of declaring a duplicate graph to recover it.
 
 On DSH, a model response rejected as `MALFORMED_RESPONSE` specifically because
 `graph_submit_outcome` contains invalid JSON gets up to two submission repairs

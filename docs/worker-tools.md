@@ -8,6 +8,10 @@ skills and `load_reference({ name })` for full reference documents.
 `reference_search` finds relevant passages. Read resource files directly only
 when the corresponding loader is unavailable.
 
+Codex managed graph workers use native task tools and a restricted rolebox dynamic
+face; their plugin/MCP catalog is disabled. See [Host support](#host-support) for
+that adapter's boundary.
+
 Main agents and workers can load references by exact name within the same role
 visibility as `load_role_skill`. This includes role references, skill references
 and visible nested sub-agent resources. The loader returns full content and its
@@ -93,6 +97,7 @@ a provider identifier.
 | Pi | Tools actually loaded in the worker process | Native schema activation | Explicitly unsupported |
 | OpenCode 1.x | Existing default behavior; explicit presentation unsupported | Explicitly unsupported | Explicitly unsupported |
 | OpenCode 2 | Tools in the worker's actual session context | Native schema activation | Explicitly unsupported |
+| Codex | Native Codex task tools plus scoped rolebox resource reads and outcome submission in managed graph workers | Explicitly unsupported | Explicitly unsupported |
 
 Pi and OpenCode do not provide an extension API for invoking tools through the
 complete native execution pipeline, including other plugins' permission hooks.
@@ -105,9 +110,15 @@ configuration and preserves native presentation and host permissions.
 OpenCode 2 reads its catalog from the tools assembled for the worker's model
 request, so custom and MCP tools are checked before the first model call and
 the discovery catalog updates with subsequent turns.
-Codex's rolebox MCP server
-does not own worker sessions, so these graph presentation modes do not configure
-Codex subagents.
+Codex owns only the graph workers it creates through its app-server adapter. It
+supports native presentation for those workers and rejects `discover` and `code`
+before launch. Native Codex tools perform task/file/shell operations inside the
+inherited sandbox. The outer-process dynamic face contains only
+`graph_submit_outcome` and allowed role-scoped resource readers; it does not forward
+mutating rolebox tools or the parent's MCP/plugin catalog. Plugins, MCP servers and
+recursive native agents are disabled in these managed workers. These settings do
+not reconfigure arbitrary native Codex subagents. See [Codex](codex.md) for launch
+requirements and result collection.
 
 Adapters invoke tools as the original worker through the host's available
 execution boundary. Host permissions, approval handling and cancellation still

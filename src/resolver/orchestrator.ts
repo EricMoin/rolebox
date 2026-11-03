@@ -7,6 +7,7 @@ import { resolveFunctions } from "../function/file-resolver.ts";
 import { buildAgentPrompt } from "../prompt/builder.ts";
 import { collectOpenRoles, type OpenRoleEntry } from "./open-roles.ts";
 import { subagentDir, globalFunctionsPath } from "../utils/paths.ts";
+import { subagentIdSlug } from "../utils/subagent-id.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, SubAgentConfig } from "../types.ts";
 import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS } from "../constants.ts";
@@ -81,9 +82,10 @@ async function resolveSubagents(
 
   const globalFunctionsDir = globalFunctionsPath(ctx.configDir);
 
+  const uniqueConfigs = new Map(configs.map(config => [subagentIdSlug(config.name), config]));
   const results = await Promise.all(
-    configs.map(async (saConfig) => {
-      const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
+    [...uniqueConfigs.values()].map(async (saConfig) => {
+      const childSlug = subagentIdSlug(saConfig.name);
       const childId = `${parentFullId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
 
       const slugDir = subagentDir(roleDir, childSlug);

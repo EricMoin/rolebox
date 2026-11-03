@@ -13,8 +13,8 @@ an MCP prefix; use the names and schemas actually registered in the session.
 
 | Goal | Read |
 | --- | --- |
-| Locate configuration, install/sync roles, select a host, set model aliases, project defaults or automatic role activation | [Configuration and hosts](references/configuration.md) |
-| Author `role.yaml`, choose models, restrict tools, configure memory or nested subagents | [Roles](references/roles.md) |
+| Locate configuration, install/sync roles, map Codex native agents, set model aliases, project defaults or automatic role activation | [Configuration and hosts](references/configuration.md) |
+| Author `role.yaml`, choose models, restrict tools, configure memory or private subagents | [Roles](references/roles.md) |
 | Add skills, reusable functions, activation rules or reference documents | [Assets and functions](references/assets.md) |
 | Dispatch work, declare outcome graphs, set worker budgets or form a role team | [Orchestration](references/orchestration.md) |
 | Configure hooks, error recovery, Copilot, notifications, browser/desktop access or LSP | [Runtime features](references/runtime.md) |
@@ -39,6 +39,11 @@ installed. Installation syncs it to existing harness homes; host startup and
 `rolebox sync <target>` repair its link as well. Regular files/directories at the
 destination are preserved. If installation scripts were disabled or a host was
 installed later, run the sync command and restart that host for skill discovery.
+
+For Codex, read Configuration, Roles and Orchestration together: native public-agent
+discovery, private graph workers and MCP tool discovery have different scopes.
+Execution requires host-supplied thread/sandbox metadata; a generated file or tool
+schema alone does not establish that capability.
 
 Do not edit this installed skill to configure a role: it links into the package
 and updates with rolebox. Put user configuration in the locations described by
