@@ -74,6 +74,16 @@ describe.skipIf(!live)("playwright live", () => {
       if (typeof navigation === "string") throw new Error(navigation);
       expect(navigation.metadata?.code).toBe("execution_context_destroyed");
       expect(navigation.metadata?.hint).toContain("browse_snapshot");
+      // The destruction is reported as soon as the OLD context goes away; the
+      // about:blank document it navigated to can still be settling. Evaluating
+      // again immediately therefore races the new document and can fail with
+      // the same execution_context_destroyed classification — a false failure
+      // of the recovery path. Wait for the navigation through the public wait
+      // tool, whose URL and load-state waits do not need a JavaScript context,
+      // so the recovery eval below measures a settled page.
+      const settled = await tools.browse_wait.execute({ url: "about:blank", state: "load" }, context);
+      if (typeof settled === "string") throw new Error(settled);
+      expect(settled.metadata?.error).toBeUndefined();
       const recovered = await tools.browse_eval.execute({ expression: "1 + 1" }, context);
       if (typeof recovered === "string") throw new Error(recovered);
       expect(recovered.metadata?.error).toBeUndefined();
