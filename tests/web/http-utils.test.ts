@@ -447,6 +447,29 @@ describe("isRetryableStatus", () => {
 // Per-host pacing
 // -----------------------------------------------------------------------
 
+/**
+ * Run `run` with `globalThis.setTimeout` instrumented, returning the delay of
+ * every timer it schedules. The pacing gate's only wait primitive is `sleep`,
+ * a `setTimeout` promise, so an empty list means the gate scheduled no delay.
+ * This is deterministic, unlike a wall-clock upper bound, which also measures
+ * scheduler preemption on a loaded runner.
+ */
+async function withRecordedTimerDelays<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T; timerDelays: number[] }> {
+  const realSetTimeout = globalThis.setTimeout;
+  const timerDelays: number[] = [];
+  globalThis.setTimeout = ((handler: () => void, timeout?: number) => {
+    timerDelays.push(timeout ?? 0);
+    return realSetTimeout(handler, timeout);
+  }) as typeof globalThis.setTimeout;
+  try {
+    return { result: await run(), timerDelays };
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
 describe("per-host pacing", () => {
   afterEach(() => {
     delete process.env.ROLEBOX_WEB_HOST_MIN_INTERVAL_MS;
@@ -494,21 +517,31 @@ describe("per-host pacing", () => {
     globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     await fetchWithTimeout("https://pacing-c.example.com/one", {}, 5000);
-    const start = Date.now();
-    await fetchWithTimeout("https://pacing-d.example.com/one", {}, 5000);
 
-    expect(Date.now() - start).toBeLessThan(60);
+    // The first origin's slot was just stamped. A gate that keyed by anything
+    // less specific than the origin would schedule a ~80 ms wait here; a
+    // wall-clock bound could not tell that wait from runner preemption.
+    const { timerDelays } = await withRecordedTimerDelays(() =>
+      fetchWithTimeout("https://pacing-d.example.com/one", {}, 5000),
+    );
+
+    expect(timerDelays).toEqual([]);
   });
 
   it("removes the delay when the interval is configured to 0", async () => {
     __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
     globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
-    const start = Date.now();
-    await fetchWithTimeout("https://pacing-e.example.com/one", {}, 5000);
-    await fetchWithTimeout("https://pacing-e.example.com/two", {}, 5000);
+    // With a zero interval and zero jitter, acquireHostSlot's waitMs is 0 for
+    // both calls and it must not schedule a timer at all. Record the timer
+    // delays instead of asserting elapsed wall time, which measures scheduler
+    // preemption rather than the pacing gate.
+    const { timerDelays } = await withRecordedTimerDelays(async () => {
+      await fetchWithTimeout("https://pacing-e.example.com/one", {}, 5000);
+      await fetchWithTimeout("https://pacing-e.example.com/two", {}, 5000);
+    });
 
-    expect(Date.now() - start).toBeLessThan(30);
+    expect(timerDelays).toEqual([]);
   });
 
   it("honours ROLEBOX_WEB_HOST_MIN_INTERVAL_MS after a reset", async () => {
@@ -562,12 +595,16 @@ describe("per-host pacing", () => {
     __configureHostPacing({ minIntervalMs: 5000, jitterMs: 0 });
     globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
-    const start = Date.now();
-    await fetchWithTimeout("not a url", {}, 5000);
-    await fetchWithTimeout("ftp://example.com/file", {}, 5000);
-    await fetchWithTimeout("not a url", {}, 5000);
+    // Bypassed URLs never reach the slot wait. If they did acquire one, the
+    // repeated URL would schedule a ~5000 ms timer; assert that no timer is
+    // scheduled rather than a wall-clock bound that measures preemption.
+    const { timerDelays } = await withRecordedTimerDelays(async () => {
+      await fetchWithTimeout("not a url", {}, 5000);
+      await fetchWithTimeout("ftp://example.com/file", {}, 5000);
+      await fetchWithTimeout("not a url", {}, 5000);
+    });
 
-    expect(Date.now() - start).toBeLessThan(100);
+    expect(timerDelays).toEqual([]);
   });
 });
 
