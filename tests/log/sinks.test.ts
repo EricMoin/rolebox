@@ -20,7 +20,7 @@ import { spawnProcess, type NodeSubprocess } from "../../scripts/node-process.ts
  * workspace's own log directory is never touched.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -69,6 +69,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The rotation-wait case spies on the wait primitive; restore it even when an
+  // assertion fails before the test can do it itself.
+  vi.restoreAllMocks();
   endLogTest(state);
 });
 
@@ -460,23 +463,33 @@ describe("file sink", () => {
     const lock = path + ROTATE_LOCK_SUFFIX;
     writeFileSync(lock, "999999", "utf8");
 
+    // The sink's only way to block is `Atomics.wait` inside its synchronous
+    // sleep, so the spy measures the gate itself — a record either pays a
+    // no-progress window or it does not — instead of timing the call. A
+    // stopwatch cannot make that distinction at the window's own boundary: the
+    // third record never enters the wait loop, yet a descheduled process can
+    // measure exactly ROTATE_WAIT_MS after it and fail.
+    const waits = vi.spyOn(Atomics, "wait");
+
     // The first record finds an empty file, so the gate does not trip yet.
     sink(makeRecord({ level: "info", message: "first", channel: "locked" }));
 
     // Nobody is refreshing this lock, so the record pays one no-progress window
     // and then appends.
+    waits.mockClear();
     sink(makeRecord({ level: "info", message: "second", channel: "locked" }));
     // The waiter blocks until the LOCK's mtime is older than ROTATE_WAIT_MS —
     // and the fixture wrote that mtime before this call started. Timing the
     // call would credit the wait with the fixture's own head start; the lock's
     // age at return is the condition the sink actually waited for.
+    expect(waits).toHaveBeenCalled();
     expect(Date.now() - statSync(lock).mtimeMs).toBeGreaterThanOrEqual(ROTATE_WAIT_MS);
 
-    // The give-up is scoped to the lock INSTANCE it gave up on: the same
-    // stalled lock is not paid for twice.
-    const thirdStarted = Date.now();
+    // The give-up is scoped to the lock INSTANCE it gave up on: a later record
+    // that finds the SAME stalled stamp must not enter the wait loop at all.
+    waits.mockClear();
     sink(makeRecord({ level: "info", message: "third", channel: "locked" }));
-    expect(Date.now() - thirdStarted).toBeLessThan(ROTATE_WAIT_MS);
+    expect(waits).not.toHaveBeenCalled();
 
     // A REPLACED lock is a different stamp (inode + mtime) and is waited for
     // again. This is the regression: a permanent per-process give-up let ONE
@@ -484,7 +497,9 @@ describe("file sink", () => {
     // file mid-rename (rotated copies reached 40x the limit).
     rmSync(lock, { force: true });
     writeFileSync(lock, "999998", "utf8");
+    waits.mockClear();
     sink(makeRecord({ level: "info", message: "fourth", channel: "locked" }));
+    expect(waits).toHaveBeenCalled();
     expect(Date.now() - statSync(lock).mtimeMs).toBeGreaterThanOrEqual(ROTATE_WAIT_MS);
     sink.close();
 
