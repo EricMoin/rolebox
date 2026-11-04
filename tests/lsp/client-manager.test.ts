@@ -182,6 +182,32 @@ describe("getDiagnostics / getAllDiagnostics", () => {
   });
 });
 
+describe("waitForDiagnostics", () => {
+  it("distinguishes a published empty result from an unpublished result", async () => {
+    const mgr = new LspClientManager("/tmp");
+    mgr.servers.set("typescript", {
+      languageId: "typescript", process: null, capabilities: {}, status: "running", startedAt: new Date(),
+      pendingRequests: new Map(), diagnosticCache: new Map([["file:///clean.ts", []]]), restartCount: 0,
+    });
+    await expect(mgr.waitForDiagnostics("file:///clean.ts", "typescript")).resolves.toEqual([]);
+    await expect(mgr.waitForDiagnostics("file:///unpublished.ts", "typescript", 10)).rejects.toThrow("Timed out waiting for diagnostics");
+  });
+
+  it("rejects a diagnostics wait when its server shuts down", async () => {
+    const mgr = new LspClientManager("/tmp");
+    mgr.servers.set("typescript", {
+      languageId: "typescript", process: null, capabilities: {}, status: "dead", startedAt: new Date(),
+      pendingRequests: new Map(), diagnosticCache: new Map(), restartCount: 0,
+    });
+    const state = mgr.servers.get("typescript")!;
+    state.status = "running";
+    const waiting = expect(mgr.waitForDiagnostics("file:///pending.ts", "typescript")).rejects.toThrow("stopped before publishing diagnostics");
+    state.status = "dead";
+    await mgr.shutdown("typescript");
+    await waiting;
+  });
+});
+
 // ---------------------------------------------------------------------------
 // getRunningServers / getServerCapabilities
 // ---------------------------------------------------------------------------
@@ -453,7 +479,7 @@ describe("client capabilities (internal)", () => {
     expect(capabilities).toBeDefined();
     expect(capabilities.textDocument).toBeDefined();
     expect(capabilities.textDocument.synchronization).toBeDefined();
-    expect(capabilities.textDocument.synchronization.dynamicRegistration).toBe(true);
+    expect(capabilities.textDocument.synchronization.dynamicRegistration).toBe(false);
     expect(capabilities.workspace).toBeDefined();
     expect(capabilities.window).toBeDefined();
     expect(capabilities.general).toBeDefined();

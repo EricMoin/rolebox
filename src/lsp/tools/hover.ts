@@ -30,11 +30,11 @@ export function createLspHoverTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, "hoverProvider")) {
           return capabilityNotSupported("hover");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<Hover | null>(
           "textDocument/hover",
@@ -129,11 +129,11 @@ export function createLspSignatureHelpTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, "signatureHelpProvider")) {
           return capabilityNotSupported("signature help");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<SignatureHelp | null>(
           "textDocument/signatureHelp",

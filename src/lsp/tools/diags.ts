@@ -47,7 +47,8 @@ async function getFileDiagnostics(
   await ensureSynced(filePath, docManager, clientManager, languageId);
 
   const uri = fileUri(filePath);
-  const diags = clientManager.getDiagnostics(uri);
+  const diags = await clientManager.readDiagnostics(uri, languageId);
+  if (diags === undefined) return `Diagnostics are not available yet for \`${uri}\`. The server has not returned a result for the current document; this does not establish that the file is clean.`;
 
   return formatDiagnosticsTable(uri, diags, severity);
 }

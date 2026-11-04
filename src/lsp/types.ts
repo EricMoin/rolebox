@@ -326,13 +326,15 @@ export interface LspServerState {
   languageId: string;
   process: any;
   capabilities: any;
-  status: "starting" | "running" | "dead" | "failed";
+  status: "starting" | "running" | "stopping" | "dead" | "failed";
   startedAt: Date;
   pendingRequests: Map<
     number,
     { resolve: Function; reject: Function; timeout: any }
   >;
   diagnosticCache: Map<string, Diagnostic[]>;
+  documentVersions?: Map<string, number>;
+  closedDocuments?: Set<string>;
   restartCount: number;
 }
 

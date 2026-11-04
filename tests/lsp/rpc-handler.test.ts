@@ -195,6 +195,56 @@ describe("processBuffer", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatchMessage", () => {
+  it.each([undefined, {}, "invalid"])("rejects non-array configuration items: %j", items => {
+    const write = vi.fn();
+    const state = makeServerState({ process: { stdin: { write } } });
+    expect(() => dispatchMessage("typescript", state, { id: 3, method: "workspace/configuration", params: { items } })).not.toThrow();
+    const response = JSON.parse(String(write.mock.calls[0]![0]).split("\r\n\r\n")[1]!);
+    expect(response).toMatchObject({ id: 3, error: { code: -32602 } });
+  });
+
+  it("does not acknowledge unimplemented dynamic capability registration", () => {
+    const write = vi.fn();
+    dispatchMessage("typescript", makeServerState({ process: { stdin: { write } } }), {
+      id: 4, method: "client/registerCapability", params: { registrations: [] },
+    });
+    expect(JSON.parse(String(write.mock.calls[0]![0]).split("\r\n\r\n")[1]!)).toMatchObject({ error: { code: -32601 } });
+  });
+  it("answers server configuration requests without consuming a client request with the same id", () => {
+    const write = vi.fn();
+    const resolve = vi.fn();
+    const state = makeServerState({ process: { stdin: { write } } });
+    const timeout = setTimeout(() => {}, 10000);
+    state.pendingRequests.set(1, { resolve, reject: vi.fn(), timeout });
+    try {
+      dispatchMessage("typescript", state, { id: 1, method: "workspace/configuration", params: { items: [{ section: "one" }, { section: "two" }] } });
+      const response = JSON.parse(String(write.mock.calls[0]![0]).split("\r\n\r\n")[1]!);
+      expect(response).toEqual({ jsonrpc: "2.0", id: 1, result: [null, null] });
+      expect(resolve).not.toHaveBeenCalled();
+      expect(state.pendingRequests.has(1)).toBe(true);
+    } finally { clearTimeout(timeout); }
+  });
+
+  it("answers unsupported server requests with a method error", () => {
+    const write = vi.fn();
+    const state = makeServerState({ process: { stdin: { write } } });
+    dispatchMessage("typescript", state, { id: "server-request", method: "unknown/request" });
+    const response = JSON.parse(String(write.mock.calls[0]![0]).split("\r\n\r\n")[1]!);
+    expect(response).toMatchObject({ id: "server-request", error: { code: -32601 } });
+  });
+
+  it("ignores diagnostics for an older document version", () => {
+    const state = makeServerState({ documentVersions: new Map([["file:///test.ts", 2]]) });
+    dispatchMessage("typescript", state, { method: "textDocument/publishDiagnostics",
+      params: { uri: "file:///test.ts", version: 1, diagnostics: [] } });
+    expect(state.diagnosticCache.has("file:///test.ts")).toBe(false);
+  });
+  it("does not resurrect diagnostics after the document was closed", () => {
+    const state = makeServerState({ closedDocuments: new Set(["file:///closed.ts"]) });
+    dispatchMessage("typescript", state, { method: "textDocument/publishDiagnostics",
+      params: { uri: "file:///closed.ts", diagnostics: [] } });
+    expect(state.diagnosticCache.size).toBe(0);
+  });
   it("resolves pending request on successful response", () => {
     const resolve = vi.fn(() => {});
     const reject = vi.fn<(error: Error) => void>(() => {});
@@ -285,6 +335,15 @@ describe("dispatchMessage", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveLanguageIdFromParams", () => {
+  it.each(["relative/file.ts", "C:\\project\\file.ts", "/project/file.ts"])("accepts a plain path without throwing: %s", uri => {
+    expect(resolveLanguageIdFromParams({ textDocument: { uri } })).toBe("typescript");
+  });
+  it.each(["not a URI", "http://[invalid", "file:///bad%encoding"])("does not throw for an invalid URI: %s", uri => {
+    expect(() => resolveLanguageIdFromParams({ textDocument: { uri } })).not.toThrow();
+  });
+  it("routes hierarchy requests using the item's URI", () => {
+    expect(resolveLanguageIdFromParams({ item: { uri: "file:///project/file.ts" } })).toBe("typescript");
+  });
   it("returns typescript for .ts file", () => {
     const result = resolveLanguageIdFromParams({ textDocument: { uri: "file:///test.ts" } });
     expect(result).toBe("typescript");

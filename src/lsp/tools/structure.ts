@@ -25,12 +25,12 @@ export function createLspFoldingRangesTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.foldingRangeProvider) {
           return "This language server does not support folding ranges.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -110,12 +110,12 @@ export function createLspSelectionRangesTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.selectionRangeProvider) {
           return "This language server does not support selection ranges.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -182,6 +182,8 @@ export function createLspSemanticTokensTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.semanticTokensProvider) {
           return "This language server does not support semantic tokens.";
@@ -194,8 +196,6 @@ export function createLspSemanticTokensTool(
 
         const tokenTypes: string[] = legend.tokenTypes ?? [];
         const tokenModifiers: string[] = legend.tokenModifiers ?? [];
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 

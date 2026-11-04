@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
@@ -81,13 +82,13 @@ function createNavigationTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, capabilityPath)) {
           return capabilityNotSupported(
             method.replace("textDocument/", "").replace(/([A-Z])/g, " $1").toLowerCase().trim(),
           );
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<unknown>(method, {
           textDocument: { uri: docManager.getUri(input.filePath) },
@@ -190,11 +191,11 @@ export function createLspFindReferencesTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, "referencesProvider")) {
           return capabilityNotSupported("find references");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<Location[]>(
           "textDocument/references",
@@ -219,7 +220,7 @@ export function createLspFindReferencesTool(
           lines.push(`### ${i + 1}. \`${formatLocation(ref)}\``);
 
           // Extract file path from URI for context snippet
-          const refPath = ref.uri.replace(/^file:\/\//, "");
+          const refPath = ref.uri.startsWith("file:") ? fileURLToPath(ref.uri) : ref.uri;
           const snippet = extractContextSnippet(refPath, ref.range.start.line);
           if (snippet) {
             lines.push("");
@@ -261,11 +262,11 @@ export function createLspDocumentHighlightsTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, "documentHighlightProvider")) {
           return capabilityNotSupported("document highlights");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<DocumentHighlight[]>(
           "textDocument/documentHighlight",

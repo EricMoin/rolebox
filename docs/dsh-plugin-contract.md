@@ -1870,7 +1870,7 @@ Set them by patching the rolebox row's `config` from the profile's own
   config:
     roleboxDir: /absolute/path/to/roles
     # An allow-list registers exactly the listed namespaces:
-    enabledNamespaces: ["asset", "graph", "hashline", "loop", "memory", "reference", "session", "signal"]
+    enabledNamespaces: ["asset", "graph", "hashline", "lsp", "loop", "memory", "reference", "session", "signal"]
     # ...or keep everything and subtract only what collides with the host
     # (see §5.4.2) — replace the line above with:
     # enabledNamespaces: ["*", "!web"]
@@ -1933,6 +1933,61 @@ of rolebox's, the fallback means rolebox's serve alongside them under distinct
 names. Enumerating namespaces also avoids the overlap; the boot log's
 `filteredTools` field names every tool a narrowed profile actually left
 unregistered (§5.4.1), so neither choice is silent.
+
+### 5.4.3 LSP tools
+
+The DSH entry registers all 32 canonical `lsp_*` tools through `DshToolFactory`
+and the host tool runtime. They are enabled by default, participate in
+`enabledNamespaces` (include `lsp` in an explicit allow-list), and use the same
+`rb_` collision fallback as other non-graph tools. `lsp_servers` lists discovery
+without launching a language server; a file operation starts the appropriate
+server lazily. No role-level `lsp:` configuration or automatic server installer
+is provided.
+
+`DshLspService` owns managers per caller workspace. Workspace resolution uses
+the host working-directory service, then session directory-change events, then
+the session header, falling back to the caller context or process directory for
+calls without session metadata. Concurrent sessions in one directory share a
+server; different directories have separate processes and document/diagnostic
+state. Sessions are tracked from their first LSP call. A directory-change event
+transfers that session's workspace reference, and `session/disposed` releases it.
+The final reference retires the old workspace immediately; accepted calls drain
+before documents and servers close. Calls without a known session retain their
+workspace only while calls are in flight. Plugin disposal also awaits retired
+generations. Restarting a server causes the next file call to reopen its document.
+Each shutdown request has a two-second deadline before process termination,
+independent of ordinary request timeouts; the SIGTERM-to-SIGKILL grace period is
+another two seconds. Draining accepted tool calls can take longer.
+
+Workers inherit parent-authorized LSP tools, including the three file-writing
+formatting/code-action tools. The parent's role `tools` policy can deny them,
+including collision aliases; there is no separate default LSP write gate. See
+[Worker tools](worker-tools.md) for the policy example.
+
+File tools initialize and synchronize before checking server capabilities.
+Canonical file URIs are shared by synchronization, requests and diagnostics on
+POSIX and Windows; equivalent encodings in server publications are normalized
+before cache/version lookup. Diagnostics use negotiated pull support or wait for push
+publication within a five-second budget. Missing results return an unavailable
+status, with a 30-second retry cooldown for the same version; later publications
+are visible immediately. Quickfix requests use current diagnostic context after
+edits. Closing a document removes its cached diagnostics. Dynamic registration
+is not advertised or silently acknowledged. Failed initialization awaits
+termination, consecutive startup failures are bounded and successful
+initialization resets their count. Workspace-symbol queries use already
+started servers. Unsupported capabilities remain explicit tool results.
+See the packaged [LSP configuration guide](../skills/rolebox-config/references/runtime.md#lsp)
+for binaries, filters, position encoding and example calls.
+
+`tests/dsh-lsp.test.ts` boots real Cordis, system-prompt and tool-runtime services,
+then calls all 32 tools. `lsp_servers` only inspects discovery and manager state;
+the other operations exercise a deterministic stdio server. Tests assert each
+tool's success content, RPC methods and file-writing effects, and record server
+spawns and document opens to verify concurrent startup and restart. They also
+check reference-counted cleanup and unacknowledged shutdown. The suite calls a
+real TypeScript language server when that executable is installed; that case
+skips on hosts without it. Coverage includes cold/concurrent startup, workspace
+changes, diagnostics after edits, restart, name collisions and plugin teardown.
 
 ### 5.5 `dsh plugin add` reconcile behavior
 

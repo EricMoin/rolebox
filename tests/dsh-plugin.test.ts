@@ -72,6 +72,7 @@ import type {
   DshToolPresentation,
 } from "../src/platform/adapters/dsh/tool-factory.ts";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
+import { createAllLspTools, LspClientManager, LspDocumentManager } from "../src/lsp/index.ts";
 import { COMPUTER_TOOL_NAMES } from "../src/loader/computer-grants.ts";
 import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import type {
@@ -1366,6 +1367,34 @@ describe("dsh plugin apply()", () => {
     expect(keys).toContain("web_search");
     expect(keys).toContain("asset_search");
 
+    disposer();
+  });
+
+  it("registers the complete LSP surface without starting a server", async () => {
+    const { ctx, tools } = createFakeCtx();
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir });
+    const expected = Object.keys(createAllLspTools(new LspClientManager(tmpDir), new LspDocumentManager())).sort();
+    const registered = tools.registeredTools.filter(tool => tool.name.startsWith("lsp_"));
+
+    expect(expected).toHaveLength(32);
+    expect(registered.map(tool => tool.name).sort()).toEqual(expected);
+    const servers = registered.find(tool => tool.name === "lsp_servers")!;
+    const result = await servers.execute({}, {
+      signal: new AbortController().signal, callId: "lsp-servers",
+      deferContext() {}, concludeTurn() {},
+    });
+    expect(String(result)).not.toContain("### Running");
+    disposer();
+  });
+
+  it.each([
+    { namespaces: ["lsp"], expected: 32 },
+    { namespaces: ["*", "!lsp"], expected: 0 },
+    { namespaces: ["lsp_hover"], expected: 1 },
+  ])("filters LSP tools with $namespaces", async ({ namespaces, expected }) => {
+    const { ctx, tools } = createFakeCtx();
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir, enabledNamespaces: namespaces });
+    expect(tools.registeredTools.filter(tool => tool.name.startsWith("lsp_")).length).toBe(expected);
     disposer();
   });
 

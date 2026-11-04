@@ -27,6 +27,24 @@ Graph control, team orchestration, recursive dispatch, task retry and session-fo
 tools remain unavailable, including rolebox collision aliases. The worker submits
 its own outcome through its dedicated `graph_submit_outcome` entry point.
 
+On DSH, parent-authorized `lsp_*` tools are task tools, including
+`lsp_format_document`, `lsp_format_range` and `lsp_execute_code_action`, which can
+write files directly. There is no separate default LSP write gate. To exclude
+these from workers, set each tool to `false` in the acting parent role's `tools`
+map before dispatch:
+
+```yaml
+tools:
+  lsp_format_document: false
+  lsp_format_range: false
+  lsp_execute_code_action: false
+```
+
+The inheritance filter matches canonical names for `rb_` collision aliases as
+well. A node's legacy `tools` list or a discovery/code presentation cannot grant
+tools excluded by this policy. See the [LSP runtime guide](../skills/rolebox-config/references/runtime.md#lsp)
+for server setup and workspace cleanup.
+
 ## Optional tool presentation
 
 ```json

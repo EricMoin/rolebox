@@ -214,6 +214,12 @@ mkdir -p ~/.dsh/rolebox && cd ~/.dsh/rolebox && rolebox init my-agent -y   # $DS
 
 Restart the harness. A non-bundle dsh install instead needs one `- insert:` row naming the profile-relative `./node_modules/rolebox/dist/entries/dsh.js` in the profile's `cordis.patch.yml` — see [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml). Profile patch semantics, the web role-switch dock, and the `/rolebox` REST surface are documented in [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md).
 
+DSH exposes all 32 `lsp_*` tools by default. Install the appropriate language
+server on the host's `PATH`; an explicit `enabledNamespaces` allow-list must
+include `lsp`. Start with `lsp_servers`, then call `lsp_diagnostics` on an absolute
+project file path. See [LSP setup and usage](skills/rolebox-config/references/runtime.md#lsp)
+for workspace scope, server binaries and tool behavior.
+
 ### Codex
 
 ```bash

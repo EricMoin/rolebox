@@ -48,12 +48,12 @@ export function createLspPrepareCallHierarchyTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.callHierarchyProvider) {
           return "This language server does not support call hierarchy.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -195,12 +195,12 @@ export function createLspTypeHierarchySupertypesTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.typeHierarchyProvider) {
           return "This language server does not support type hierarchy.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -260,12 +260,12 @@ export function createLspTypeHierarchySubtypesTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.typeHierarchyProvider) {
           return "This language server does not support type hierarchy.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 

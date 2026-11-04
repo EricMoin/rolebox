@@ -4,6 +4,7 @@
 
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
+import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -80,18 +81,18 @@ export function createLspCodeActionsTool(
         const filePath = input.filePath;
         const languageId = extractLanguageId(filePath);
 
+        await ensureSynced(filePath, docManager, clientManager, languageId);
+
         // Check capability
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.codeActionProvider) {
           return "This language server does not support code actions.";
         }
 
-        await ensureSynced(filePath, docManager, clientManager, languageId);
-
         const uri = fileUri(filePath);
 
         // Get diagnostics for context
-        const diagnostics = clientManager.getDiagnostics(uri);
+        const diagnostics = await clientManager.readDiagnostics(uri, languageId) ?? [];
         // Filter diagnostics to those overlapping the requested range
         const rangeDiags = diagnostics.filter((d) => {
           const dStart = d.range.start;
@@ -194,15 +195,15 @@ export function createLspExecuteCodeActionTool(
         const filePath = input.filePath;
         const languageId = extractLanguageId(filePath);
 
+        await ensureSynced(filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.codeActionProvider) {
           return "This language server does not support code actions.";
         }
 
-        await ensureSynced(filePath, docManager, clientManager, languageId);
-
         const uri = fileUri(filePath);
-        const diagnostics = clientManager.getDiagnostics(uri);
+        const diagnostics = await clientManager.readDiagnostics(uri, languageId) ?? [];
 
         const result = await clientManager.request<CodeAction[]>(
           "textDocument/codeAction",
@@ -246,7 +247,7 @@ export function createLspExecuteCodeActionTool(
               if (docChange.textDocument && docChange.edits) {
                 const editUri = docChange.textDocument.uri;
                 const editPath = editUri.startsWith("file://")
-                  ? decodeURIComponent(editUri.slice(7))
+                  ? fileURLToPath(editUri)
                   : editUri;
                 try {
                   const content = readFileSync(editPath, "utf-8");
@@ -270,7 +271,7 @@ export function createLspExecuteCodeActionTool(
               action.edit.changes,
             )) {
               const editPath = editUri.startsWith("file://")
-                ? decodeURIComponent(editUri.slice(7))
+                ? fileURLToPath(editUri)
                 : editUri;
               try {
                 const content = readFileSync(editPath, "utf-8");
@@ -318,7 +319,7 @@ export function createLspExecuteCodeActionTool(
               if (docChange.textDocument) {
                 const editUri = docChange.textDocument.uri;
                 const editPath = editUri.startsWith("file://")
-                  ? decodeURIComponent(editUri.slice(7))
+                  ? fileURLToPath(editUri)
                   : editUri;
                 filesToSync.add(editPath);
               }
@@ -326,7 +327,7 @@ export function createLspExecuteCodeActionTool(
           } else if (action.edit.changes) {
             for (const editUri of Object.keys(action.edit.changes)) {
               const editPath = editUri.startsWith("file://")
-                ? decodeURIComponent(editUri.slice(7))
+                ? fileURLToPath(editUri)
                 : editUri;
               filesToSync.add(editPath);
             }

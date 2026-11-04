@@ -138,6 +138,7 @@ export function getLanguageIdFromExtension(filePath: string): string | undefined
 }
 
 function findCommandOnPath(command: string): string | null {
+  if (path.isAbsolute(command)) return existsSync(command) ? command : null;
   const isWin = process.platform === "win32";
 
   const pathDirs = (process.env.PATH ?? "").split(path.delimiter);

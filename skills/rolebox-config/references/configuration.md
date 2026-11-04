@@ -170,6 +170,11 @@ or prefixes and `!` exclusions, for example `["*", "!web"]`. It selects register
 tools and does not grant host permissions. `onSpawn` is a programmatic function,
 not a YAML value. No plugin-owned web host or port option exists.
 
+The 32 `lsp_*` tools are included by default. Include `lsp` in an explicit
+namespace allow-list to keep them, or use `["*", "!lsp"]` to exclude the family.
+See [LSP runtime setup](runtime.md#lsp) for server installation, session workspace
+scope and verification calls.
+
 ## Model aliases
 
 Place aliases in `<harness-home>/role_config.yaml`:

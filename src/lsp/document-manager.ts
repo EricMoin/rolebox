@@ -4,15 +4,16 @@
 // ---------------------------------------------------------------------------
 
 import { readFileSync } from "node:fs";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileUri } from "./uri.ts";
 import { createSubLogger } from "../logger.ts";
 import type { LspClientManager } from "./client-manager.ts";
+import type { LspServerState } from "./types.ts";
 
 const log = createSubLogger("lsp:doc");
 
 export class LspDocumentManager {
   readonly openDocuments: Map<string, { version: number; content: string; open: boolean }> = new Map();
+  private readonly documentServers = new Map<string, LspServerState | undefined>();
 
   // -----------------------------------------------------------------------
   // sync — ensure the server has the latest content for a file
@@ -21,9 +22,14 @@ export class LspDocumentManager {
   async sync(filePath: string, client: LspClientManager, languageId: string): Promise<void> {
     const uri = this.getUri(filePath);
     const content = readFileSync(filePath, "utf-8");
+    await client.startServer(languageId);
+    const server = client.servers.get(languageId);
     const existing = this.openDocuments.get(uri);
 
-    if (!existing || !existing.open) {
+    if (!existing || !existing.open || this.documentServers.get(uri) !== server) {
+      server?.closedDocuments?.delete(uri);
+      server?.diagnosticCache.delete(uri);
+      server?.documentVersions?.set(uri, 1);
       client.notify(
         "textDocument/didOpen",
         {
@@ -37,11 +43,14 @@ export class LspDocumentManager {
         languageId,
       );
       this.openDocuments.set(uri, { version: 1, content, open: true });
+      this.documentServers.set(uri, server);
       return;
     }
 
     if (existing.content !== content) {
       const version = existing.version + 1;
+      server?.diagnosticCache.delete(uri);
+      server?.documentVersions?.set(uri, version);
       client.notify(
         "textDocument/didChange",
         {
@@ -75,11 +84,7 @@ export class LspDocumentManager {
   // -----------------------------------------------------------------------
 
   getUri(filePath: string): string {
-    // pathToFileURL emits a canonical RFC-8089 file URI on every platform:
-    // - Unix: file:///absolute/path/to/file.ts
-    // - Windows: file:///C:/Users/... (drive colon unencoded, backslashes -> '/')
-    const absolute = path.resolve(filePath);
-    return pathToFileURL(absolute).toString();
+    return fileUri(filePath);
   }
 
   isOpen(uri: string): boolean {
@@ -100,6 +105,8 @@ export class LspDocumentManager {
     if (!existing) return;
 
     client.notify("textDocument/didClose", { textDocument: { uri } });
+    client.forgetDocument(uri);
     this.openDocuments.delete(uri);
+    this.documentServers.delete(uri);
   }
 }

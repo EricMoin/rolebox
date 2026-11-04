@@ -35,11 +35,11 @@ export function createLspCompletionTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, "completionProvider")) {
           return capabilityNotSupported("completion");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<CompletionItem[] | { isIncomplete: boolean; items: CompletionItem[] } | null>(
           "textDocument/completion",

@@ -1,9 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
-import type { WorkspaceEdit, TextEdit } from "../types.ts";
+import type { Range, WorkspaceEdit, TextEdit } from "../types.ts";
+import { positionToOffset } from "../position.ts";
 import {
   extractLanguageId,
   ensureSynced,
@@ -34,18 +36,18 @@ export function createLspPrepareRenameTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.rename")) {
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
+        if (!checkCapability(languageId, clientManager, "renameProvider")) {
           return capabilityNotSupported("rename");
         }
 
-        const hasPrepareSupport = checkCapability(languageId, clientManager, "textDocument.rename.prepareSupport");
+        const hasPrepareSupport = checkCapability(languageId, clientManager, "renameProvider.prepareProvider");
         if (!hasPrepareSupport) {
-          return "This language server does not support prepare rename (the `rename.prepareSupport` capability is not enabled). You can still try `lsp_rename` directly.";
+          return "This language server does not support prepare rename. You can still try `lsp_rename` directly.";
         }
 
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
-
-        const result = await clientManager.request<{ range: { start: { line: number; character: number }; end: { line: number; character: number } }; placeholder: string } | null>(
+        const result = await clientManager.request<Range | { range: Range; placeholder: string } | { defaultBehavior: boolean } | null>(
           "textDocument/prepareRename",
           {
             textDocument: { uri: docManager.getUri(input.filePath) },
@@ -57,12 +59,19 @@ export function createLspPrepareRenameTool(
         if (!result) {
           return "No rename information available at this position. The cursor may not be on a valid symbol.";
         }
+        if ("defaultBehavior" in result) {
+          return "The server uses default rename preparation. Use `lsp_rename` with a `newName`.";
+        }
+        const range = "range" in result ? result.range : result;
+        const content = readFileSync(input.filePath, "utf-8");
+        const placeholder = "placeholder" in result ? result.placeholder
+          : content.slice(positionToOffset(content, range.start), positionToOffset(content, range.end));
 
         const lines: string[] = [];
         lines.push("## Prepare Rename");
         lines.push("");
-        lines.push(`**Range:** \`${formatRange(result.range)}\``);
-        lines.push(`**Current name:** \`${result.placeholder}\``);
+        lines.push(`**Range:** \`${formatRange(range)}\``);
+        lines.push(`**Current name:** \`${placeholder}\``);
         lines.push("");
         lines.push("You can rename this symbol using `lsp_rename` with a `newName`.");
 
@@ -102,11 +111,11 @@ export function createLspRenameTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.rename")) {
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
+        if (!checkCapability(languageId, clientManager, "renameProvider")) {
           return capabilityNotSupported("rename");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const edit = await clientManager.request<WorkspaceEdit | null>(
           "textDocument/rename",
@@ -190,7 +199,7 @@ function formatWorkspaceEdit(edit: WorkspaceEdit, newName: string): string {
 
 function extractOldText(uri: string, te: TextEdit): string | null {
   try {
-    const filePath = uri.replace(/^file:\/\//, "");
+    const filePath = fileURLToPath(uri);
     if (!existsSync(filePath)) return null;
     const content = readFileSync(filePath, "utf-8");
     const lines = content.split("\n");

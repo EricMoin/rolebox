@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { resolveDshWorkerToolAllowList } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
 import { DSH_GRAPH_WORKER_TOOLS } from "../../src/platform/adapters/dsh/graph-worker.ts";
 import { COMPUTER_TOOL_NAMES } from "../../src/loader/computer-grants.ts";
+import { inheritedWorkerTaskTools } from "../../src/graph/domain/worker-tools.ts";
 
 const BASELINE = DSH_GRAPH_WORKER_TOOLS;
 
@@ -15,6 +16,23 @@ function registry(names: readonly string[]): (name: string) => boolean {
 }
 
 describe("the per-request worker allow-list", () => {
+  it("inherits parent-authorized LSP reads and writes, including collision aliases", () => {
+    const candidates = ["lsp_hover", "lsp_format_document", "lsp_format_range", "lsp_execute_code_action", "rb_lsp_format_document"];
+    const allow = resolveDshWorkerToolAllowList({ baseline: BASELINE, candidates,
+      inherited: inheritedWorkerTaskTools(candidates), isRegistered: registry([...BASELINE, ...candidates]) });
+    expect(allow).toEqual([...BASELINE, ...candidates]);
+  });
+
+  it("keeps role-denied LSP writes and aliases out of the worker catalog", () => {
+    const candidates = ["lsp_hover", "lsp_format_document", "rb_lsp_format_document", "lsp_format_range", "lsp_execute_code_action"];
+    const inherited = inheritedWorkerTaskTools(candidates, {
+      "lsp_format_*": false, lsp_execute_code_action: false,
+    });
+    expect(inherited).toEqual(["lsp_hover"]);
+    expect(resolveDshWorkerToolAllowList({ baseline: BASELINE, candidates, inherited, declared: ["lsp_*"],
+      isRegistered: registry([...BASELINE, ...candidates]) })).toEqual([...BASELINE, "lsp_hover"]);
+  });
+
   it("cannot expand inherited permissions with an explicit name or prefix", () => {
     expect(resolveDshWorkerToolAllowList({ baseline: BASELINE, declared: ["computer_*", "web_search"],
       inherited: ["computer_screenshot"], candidates: ["computer_screenshot", "computer_click", "web_search", "dispatch"],

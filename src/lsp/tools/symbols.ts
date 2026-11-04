@@ -31,11 +31,11 @@ export function createLspDocumentSymbolsTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         if (!checkCapability(languageId, clientManager, "documentSymbolProvider")) {
           return capabilityNotSupported("document symbols");
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const result = await clientManager.request<unknown[]>(
           "textDocument/documentSymbol",
@@ -131,7 +131,7 @@ export function createLspWorkspaceSymbolsTool(
         let anySupport = false;
         for (const srv of runningServers) {
           const caps = clientManager.getServerCapabilities(srv.languageId);
-          if (caps?.workspace?.symbol) {
+          if (caps?.workspaceSymbolProvider) {
             anySupport = true;
             break;
           }
@@ -145,7 +145,7 @@ export function createLspWorkspaceSymbolsTool(
 
         for (const srv of runningServers) {
           const caps = clientManager.getServerCapabilities(srv.languageId);
-          if (!caps?.workspace?.symbol) continue;
+          if (!caps?.workspaceSymbolProvider) continue;
 
           try {
             const result = await clientManager.request<SymbolInformation[]>(

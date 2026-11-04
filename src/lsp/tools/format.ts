@@ -45,17 +45,17 @@ export function createLspFormatDocumentTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        const caps = clientManager.getServerCapabilities(languageId);
-        if (!caps || !caps.documentFormattingProvider) {
-          return "This language server does not support document formatting.";
-        }
-
         await ensureSynced(
           input.filePath,
           docManager,
           clientManager,
           languageId,
         );
+
+        const caps = clientManager.getServerCapabilities(languageId);
+        if (!caps || !caps.documentFormattingProvider) {
+          return "This language server does not support document formatting.";
+        }
 
         const uri = fileUri(input.filePath);
         const originalContent = readFileSync(input.filePath, "utf-8");
@@ -145,6 +145,13 @@ export function createLspFormatRangeTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(
+          input.filePath,
+          docManager,
+          clientManager,
+          languageId,
+        );
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.documentRangeFormattingProvider) {
           const docCaps = caps?.documentFormattingProvider;
@@ -153,13 +160,6 @@ export function createLspFormatRangeTool(
           }
           return "This language server does not support formatting.";
         }
-
-        await ensureSynced(
-          input.filePath,
-          docManager,
-          clientManager,
-          languageId,
-        );
 
         const uri = fileUri(input.filePath);
         const originalContent = readFileSync(input.filePath, "utf-8");

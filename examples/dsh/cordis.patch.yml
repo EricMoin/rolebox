@@ -39,6 +39,7 @@
         # ones; entries match canonical names either way.
         enabledNamespaces:
           - hashline
+          - lsp
           - web
           - graph
         # No web config keys exist: the role-switch UI surfaces as a

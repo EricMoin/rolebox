@@ -79,6 +79,7 @@ import type {
 } from "../platform/adapters/dsh/agent-registrar.ts";
 import { DshDispatchAdapter } from "../platform/adapters/dsh/dispatch.ts";
 import { DshToolFactory } from "../platform/adapters/dsh/tool-factory.ts";
+import { DshLspService } from "../platform/adapters/dsh/lsp.ts";
 import type { DshToolDefinition } from "../platform/adapters/dsh/tool-factory.ts";
 import { DshSessionAdapter } from "../platform/adapters/dsh/session.ts";
 import { createDshSessionTools } from "../platform/adapters/dsh/session-visibility.ts";
@@ -2620,6 +2621,27 @@ export async function apply(
 
   // Global definitions route through the caller's session workspace. Worker
   // tool filters and the execution guard apply before the bound host tools.
+  const lsp = new DshLspService(process.cwd(), context => {
+    const session = ctx.sessions.get(context.sessionID);
+    return {
+      sessionID: session?.id,
+      directory: resolveDshSessionContext(contextOptions, { id: context.sessionID, session }).directory
+        || context.directory || process.cwd(),
+    };
+  });
+  const lspSubscriptions = [
+    ctx.on("session/disposed", (...args) => {
+      const session = args[0] as { id: string };
+      void lsp.releaseSession(session.id);
+    }),
+    ctx.on("session/event", (...args) => {
+      const session = args[0] as ReturnType<DshSessionStoreLike["get"]>;
+      const event = args[1] as { type?: string } | undefined;
+      if (!session || event?.type !== "working-directory/change") return;
+      const directory = resolveDshSessionContext(contextOptions, { id: session.id, session }).directory || process.cwd();
+      void lsp.moveSession(session.id, directory);
+    }),
+  ];
   const tools = {
     ...buildCanonicalTools({
       resolvedRoles,
@@ -2627,7 +2649,7 @@ export async function apply(
       outcomeGraphTools: graphTools,
       teamTools,
       directory: process.cwd(),
-      extraTools: createDshSessionTools(sessionAdapter),
+      extraTools: { ...createDshSessionTools(sessionAdapter), ...lsp.tools },
       capabilities: dshCapabilities(),
       // The resolved global gate. FALSE (the default) registers nothing from
       // the computer-use family; TRUE registers it, and the guard installed
@@ -2779,19 +2801,20 @@ export async function apply(
   const disposer = (() => {
     if (teamStopping) return teamShutdown;
     teamStopping = true;
+    for (const stop of lspSubscriptions) stop?.();
     for (const stop of teamSubscriptions) stop();
     teamSubscriptions.length = 0;
-    teamShutdown = Promise.allSettled([...teamRuntimes.values()].map(async entry => {
+    teamShutdown = Promise.allSettled([lsp.dispose(), ...[...teamRuntimes.values()].map(async entry => {
       try { await entry.runtime.dispose(); }
       finally { await entry.session.dispose(); }
-    })).then(async results => {
+    })]).then(async results => {
       teamRuntimes.clear();
       if (teamWired) await activeRole.flush();
       const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
-      if (errors.length) throw new AggregateError(errors, "DSH team shutdown did not complete");
+      if (errors.length) throw new AggregateError(errors, "DSH plugin shutdown did not complete");
     });
     void teamShutdown.catch(error => {
-      log.warn("dsh team shutdown failed", { error: error instanceof Error ? error.message : String(error) });
+      log.warn("dsh plugin shutdown failed", { error: error instanceof Error ? error.message : String(error) });
     });
     stopGraphSessions?.();
     for (const runtime of graphRuntimes.values()) {

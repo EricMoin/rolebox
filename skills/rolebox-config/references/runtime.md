@@ -324,8 +324,11 @@ of an ordinary configuration task; explain this limitation if the user needs it.
 
 ## LSP
 
-Rolebox selects language servers by file extension and project markers and starts
-them lazily. Put the relevant server executable on the host process's `PATH`:
+OpenCode, Pi and DSH expose the same 32 `lsp_*` tools. The Codex integration does
+not expose this family. Rolebox selects the server by file extension and starts
+it on the first file operation; the server reads the workspace's project
+configuration. Servers are not installed automatically. Put the relevant
+executable on the host process's `PATH`:
 
 | Languages | Executable |
 | --- | --- |
@@ -340,7 +343,88 @@ them lazily. Put the relevant server executable on the host process's `PATH`:
 | Lua | `lua-language-server` |
 | Kotlin | `kotlin-lsp` |
 
-There is no general `lsp:` block in `role.yaml`. Use `lsp_diagnostics` on a real
-project file, when registered, and host logs for discovery/startup failures. Install/configure
-the server through its own supported mechanisms, then restart the host if its
-environment was changed.
+There is no general `lsp:` block in `role.yaml`. Install/configure the server
+through its own supported mechanisms, then restart the host if its environment
+was changed. TypeScript/JavaScript also needs a TypeScript installation that
+`typescript-language-server` can resolve.
+
+On DSH the family is enabled by default. `enabledNamespaces: ["lsp"]` registers
+only LSP tools; `["*", "!lsp"]` excludes them. Exact names such as `lsp_hover`
+also work. This is the normal plugin namespace filter, not an LSP-specific
+setting. A host-owned name uses the usual `rb_` collision fallback (for example
+`rb_lsp_hover`); use the names actually discovered in the session. Restart DSH
+after changing the plugin's registration settings.
+
+DSH keeps separate language-server processes, open documents and diagnostic
+caches per session workspace. The host working-directory service takes
+precedence, then the latest `working-directory/change` event, then the session
+header's `cwd`; calls without session workspace metadata fall back to the
+process working directory. Sessions in the same workspace share its servers.
+The service tracks sessions that have used LSP. Changing one of those sessions'
+workspaces transfers its reference; `session/disposed` releases it. When the last
+such session leaves a workspace, it is retired immediately, even if no further
+tool is called. Accepted calls finish on that generation before its documents,
+diagnostic state and child processes are closed. Other sessions using the same
+workspace keep their shared servers. Calls without a known session retain a
+workspace only while their calls are in flight. Plugin unload releases all
+remaining workspaces and waits for their cleanup.
+
+Cleanup drains accepted calls first; ordinary LSP requests can each take up to
+30 seconds to time out. The shutdown request has a separate two-second deadline,
+followed by SIGTERM and, if the process remains alive for another two seconds,
+SIGKILL. This bounds shutdown negotiation, not the total time spent draining a
+tool that performs several requests. Failed or timed-out initialization also
+awaits this termination sequence before another start can use that language.
+Three consecutive startup failures require `lsp_restart_server`; a successful
+initialization resets the failure count, so healthy restarts do not accumulate
+past crashes. In-flight requests are cancelled when their server shuts down.
+
+Start with `lsp_servers` to inspect discovery without launching a process, then
+call `lsp_hover` or `lsp_diagnostics` with an absolute project file path. For
+example, `lsp_hover` accepts:
+
+```json
+{"filePath":"/path/to/project/src/index.ts","line":0,"character":0}
+```
+
+Positions are zero-based UTF-16 line/character offsets. Document synchronization,
+requests and diagnostic caches use the same canonical file URI, including
+Windows drives, UNC paths and reserved filename characters. Equivalent file URI
+encodings returned by a server are normalized before diagnostics are cached.
+
+File diagnostics use pull diagnostics when advertised, otherwise they wait for
+the server's publication after synchronization. The initial read has a five-second
+budget. A missing result is reported as unavailable, without claiming the file
+is clean. For the same document version, another wait is suppressed for 30 seconds;
+a publication is visible immediately, and an edit, restart or cooldown expiry
+allows a new attempt. Quickfix tools wait for current diagnostics before building
+their context; if diagnostics remain unavailable, the context is explicitly empty.
+Closing a document removes its cached diagnostics and ignores late publications.
+Without `filePath`,
+`lsp_diagnostics` reads the workspace's cached diagnostics. `lsp_workspace_symbols`
+queries servers already started in that workspace, so use a file tool first.
+`lsp_restart_server` takes a detected `languageId` such as `typescript`; the next
+file call reopens its document in the replacement process.
+
+Individual operations depend on the server's advertised capabilities. An
+unsupported operation reports that limitation. Capabilities are negotiated at
+initialization; dynamic capability registration is not implemented or advertised.
+Rename returns an edit preview;
+formatting and execute-code-action tools can write files. Use host logs for
+discovery, startup and protocol failures.
+
+DSH graph workers inherit parent-authorized LSP tools, including the file-writing
+`lsp_format_document`, `lsp_format_range` and `lsp_execute_code_action` tools.
+There is no additional default LSP write gate. To exclude these from the inherited
+worker catalog, set `tools` on the acting parent role, for example:
+
+```yaml
+tools:
+  lsp_format_document: false
+  lsp_format_range: false
+  lsp_execute_code_action: false
+```
+
+These policies also match `rb_` collision aliases by their canonical names.
+Node `tools` lists are legacy metadata and cannot grant a denied tool; native,
+discovery and code presentation use the same inherited authorization.

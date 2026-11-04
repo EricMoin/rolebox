@@ -108,6 +108,13 @@ Workers inherit the parent's authorized task tools. `tools` on a node is legacy
 metadata and does not restrict, grant or register tools. Graph control, team
 orchestration and recursive dispatch remain unavailable to workers.
 
+On DSH this includes parent-authorized `lsp_*` tools. Formatting and
+`lsp_execute_code_action` can write files and have no separate default LSP write
+gate. Use the acting parent role's `tools` policy to deny `lsp_format_document`,
+`lsp_format_range` and/or `lsp_execute_code_action` before dispatch; canonical
+denials also cover `rb_` aliases. See [LSP runtime setup](runtime.md#lsp) for an
+example and workspace lifetime behavior.
+
 Optional `toolPresentation` selects `native` (default), `discover`, or `code`,
 with up to 32 exact tool names under `preload`. This changes schema visibility,
 not authorization. DSH supports discovery and code invocation. Pi and OpenCode 2

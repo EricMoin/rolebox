@@ -1,6 +1,7 @@
 import type { LspServerState, Diagnostic } from "./types.ts";
 import { getLanguageIdFromExtension } from "./servers.ts";
 import { createSubLogger, formatError } from "../logger.ts";
+import { normalizeDocumentUri } from "./uri.ts";
 
 const log = createSubLogger("lsp:client");
 
@@ -63,6 +64,25 @@ export function dispatchMessage(
   state: LspServerState,
   msg: any,
 ): void {
+  if (msg.method && msg.id !== undefined && msg.id !== null) {
+    if (msg.method === "workspace/configuration" && !Array.isArray(msg.params?.items)) {
+      writeMessage(state.process, { jsonrpc: "2.0", id: msg.id,
+        error: { code: -32602, message: "workspace/configuration requires an items array" } });
+      return;
+    }
+    const result = msg.method === "workspace/configuration"
+      ? (msg.params?.items ?? []).map(() => null)
+      : msg.method === "workspace/applyEdit"
+        ? { applied: false, failureReason: "Server-initiated edits are not supported" }
+        : null;
+    const supported = ["workspace/configuration", "workspace/workspaceFolders", "workspace/applyEdit",
+      "window/workDoneProgress/create"].includes(msg.method);
+    writeMessage(state.process, {
+      jsonrpc: "2.0", id: msg.id,
+      ...(supported ? { result } : { error: { code: -32601, message: `Unsupported client request: ${msg.method}` } }),
+    });
+    return;
+  }
   if (msg.id !== undefined && msg.id !== null) {
     const pending = state.pendingRequests.get(msg.id);
     if (pending) {
@@ -100,12 +120,16 @@ export function dispatchMessage(
 function handlePublishDiagnostics(
   state: LspServerState,
   languageId: string,
-  params: { uri?: string; diagnostics?: Diagnostic[] },
+  params: { uri?: string; diagnostics?: Diagnostic[]; version?: number },
 ): void {
   if (!params.uri) return;
+  const uri = normalizeDocumentUri(params.uri);
+  if (state.closedDocuments?.has(uri)) return;
+  const currentVersion = state.documentVersions?.get(uri);
+  if (params.version !== undefined && currentVersion !== undefined && params.version < currentVersion) return;
 
   const diags = params.diagnostics ?? [];
-  state.diagnosticCache.set(params.uri, diags as Diagnostic[]);
+  state.diagnosticCache.set(uri, diags as Diagnostic[]);
   const errors = diags.filter((d: Diagnostic) => d.severity === 1).length;
   const warnings = diags.filter((d: Diagnostic) => d.severity === 2).length;
   log.debug(`[${languageId}] ${params.uri}: ${errors} errors, ${warnings} warnings`);
@@ -114,8 +138,10 @@ function handlePublishDiagnostics(
 export function resolveLanguageIdFromParams(params: object): string | undefined {
   if (params && typeof params === "object") {
     const p = params as Record<string, any>;
-    if (p.textDocument?.uri && typeof p.textDocument.uri === "string") {
-      return getLanguageIdFromExtension(p.textDocument.uri);
+    const uri = p.textDocument?.uri ?? p.item?.uri;
+    if (typeof uri === "string") {
+      try { return getLanguageIdFromExtension(decodeURIComponent(new URL(uri).pathname)); }
+      catch { return getLanguageIdFromExtension(uri); }
     }
   }
   return undefined;

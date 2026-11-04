@@ -23,6 +23,7 @@ function createMockClient(): LspClientManager {
     shutdown: vi.fn(() => Promise.resolve()),
     shutdownAll: vi.fn(() => Promise.resolve()),
     getDiagnostics: vi.fn(() => []),
+    forgetDocument: vi.fn(),
     getAllDiagnostics: vi.fn(() => new Map()),
     getRunningServers: vi.fn(() => []),
     getServerCapabilities: vi.fn(() => null),

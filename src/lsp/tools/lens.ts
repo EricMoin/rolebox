@@ -45,12 +45,12 @@ export function createLspCodeLensTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.codeLensProvider) {
           return "This language server does not support code lenses.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -104,12 +104,12 @@ export function createLspInlayHintsTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.inlayHintProvider) {
           return "This language server does not support inlay hints.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -176,12 +176,12 @@ export function createLspDocumentLinksTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.documentLinkProvider) {
           return "This language server does not support document links.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 
@@ -231,12 +231,12 @@ export function createLspDocumentColorsTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
+        await ensureSynced(input.filePath, docManager, clientManager, languageId);
+
         const caps = clientManager.getServerCapabilities(languageId);
         if (!caps || !caps.colorProvider) {
           return "This language server does not support document colors.";
         }
-
-        await ensureSynced(input.filePath, docManager, clientManager, languageId);
 
         const uri = fileUri(input.filePath);
 

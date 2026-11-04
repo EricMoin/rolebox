@@ -4,6 +4,7 @@ import { getLanguageIdFromExtension } from "../servers.ts";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
 import type { Location, Range } from "../types.ts";
+export { fileUri } from "../uri.ts";
 
 // ---------------------------------------------------------------------------
 // Language ID
@@ -151,25 +152,6 @@ export async function ensureSynced(
     throw new Error(`File not found: ${filePath}`);
   }
   await docManager.sync(filePath, client, languageId);
-}
-
-// ---------------------------------------------------------------------------
-// URI helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Convert an absolute file path to a `file://` URI.
- */
-export function fileUri(filePath: string): string {
-  const absolute = path.resolve(filePath);
-  const encoded = absolute
-    .split(path.sep)
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  if (path.sep === "\\") {
-    return `file:///${encoded}`;
-  }
-  return `file://${encoded}`;
 }
 
 // ---------------------------------------------------------------------------
