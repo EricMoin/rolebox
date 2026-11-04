@@ -23,8 +23,8 @@ export async function verifyHostProcessRestart(script: string, workspace: string
   } finally { clearTimeout(timer); }
 }
 
-export async function eventually<T>(read: () => T, accepts: (value: T) => boolean, description: string): Promise<T> {
-  const deadline = Date.now() + 30_000;
+export async function eventually<T>(read: () => T, accepts: (value: T) => boolean, description: string, timeoutMs = 30_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
   while (true) {
     const value = read();
     if (accepts(value)) return value;

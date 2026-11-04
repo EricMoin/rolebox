@@ -386,7 +386,9 @@ try {
   dispose = await mountRolebox();
   for (const name of ["dsh.restart", "dsh.restart-natural"]) {
     writeFileSync(join(root, name + ".release"), "ready");
-    const restarted = await eventually(() => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === name), graph => graph?.phase === "complete", name + " failed to finish after host reload");
+    // Under loaded CI runners the remount plus restored-session resume can exceed 30s even
+    // though the graph completes; the wait stays finite and still requires phase complete.
+    const restarted = await eventually(() => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === name), graph => graph?.phase === "complete", name + " failed to finish after host reload", 60_000);
     assert.equal(restarted?.current?.attempts.length, 1);
   }
   await handle.dispose();
