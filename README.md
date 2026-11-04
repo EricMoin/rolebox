@@ -135,7 +135,7 @@ The recording shows a dsh worker completing its assigned brief and using `graph_
   <em>The monitor pane: live sessions and their active role, the engine graph with each node's agent and duration, the repair counter and the run's budget expander.</em>
 </p>
 
-The Rolebox pane in dsh's right sidebar is the live engine view. In the capture it reports `Sessions 4` with one active role — the session being viewed runs `typescript-engineer`, the other three run `base` — and `Engine graphs 1`: `taskstore-remove-completed`, marked `complete` and `Done`, with an expander for attempts, results, approvals and budget, a progress bar with the run's counters, and `repair 0/2`. Under `Nodes 2`, each node names its agent, worker session and duration: `change` ran `typescript-engineer--change-applier` for 28s, `review` ran `typescript-engineer--verification` for 38s. `Metrics 0` reports `No samples recorded` and says the pane measures anything beyond the core dispatch counters only while `ROLEBOX_METRICS` is set. No loops section appears in this pane.
+The Rolebox view is the live engine view; it sits in the dsh conversation as a tab beside Chat and Trajectory, and the capture shows its earlier sidebar placement. In the capture it reports `Sessions 4` with one active role — the session being viewed runs `typescript-engineer`, the other three run `base` — and `Engine graphs 1`: `taskstore-remove-completed`, marked `complete` and `Done`, with an expander for attempts, results, approvals and budget, a progress bar with the run's counters, and `repair 0/2`. Under `Nodes 2`, each node names its agent, worker session and duration: `change` ran `typescript-engineer--change-applier` for 28s, `review` ran `typescript-engineer--verification` for 38s. `Metrics 0` reports `No samples recorded` and says the pane measures anything beyond the core dispatch counters only while `ROLEBOX_METRICS` is set. No loops section appears in this pane.
 
 ### 6 · The same run from a terminal
 
@@ -159,7 +159,7 @@ The Rolebox pane in dsh's right sidebar is the live engine view. In the capture 
   <em>Plugin startup, role loading and prompt assembly, one record per event, filterable by channel or by session.</em>
 </p>
 
-The Logs pane polls the workspace's `.rolebox/logs` directory (in the capture `records 125`, `skipped 0`) and renders one line per record: timestamp, level, title, channel and details. The records shown include the `dsh-plugin` startup lines and the computer-use gate verdict, `dsh-agent-registrar` reporting that no `onSpawn` delegate is wired, `role-loader` warnings that a role declares `graph.orchestration: graph_v2` and that the key is recognized but not wired into graph resolution, and a run of `prompt-builder` `Prompt assembled` lines with their character counts. The levels shown are INFO and WARN, and the controls are an `All channels` dropdown, a `This session` filter, `Pause` and `Refresh`. The pane and `rolebox logs` read the same log files, so what ran in the UI is debuggable from a shell.
+The Logs view, the second conversation tab, polls the workspace's `.rolebox/logs` directory (in the capture `records 125`, `skipped 0`) and renders one line per record: timestamp, level, title, channel and details. The records shown include the `dsh-plugin` startup lines and the computer-use gate verdict, `dsh-agent-registrar` reporting that no `onSpawn` delegate is wired, `role-loader` warnings that a role declares `graph.orchestration: graph_v2` and that the key is recognized but not wired into graph resolution, and a run of `prompt-builder` `Prompt assembled` lines with their character counts. The levels shown are INFO and WARN, and the controls are an `All channels` dropdown, a `This session` filter, `Pause` and `Refresh`. The view and `rolebox logs` read the same log files, so what ran in the UI is debuggable from a shell.
 
 ### Loop mode
 
@@ -376,7 +376,7 @@ Unrecognized values pass through unchanged with a warning. Full resolution chain
 
 ---
 
-> **Upgrading from 0.x or 1.x?** rolebox 2.x (`package.json` currently reads `2.2.0`) runs work through the **graph outcome protocol**: `graph_declare` persists a version-3 declaration, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. An existing (legacy) declaration must be rewritten for the version-3 grammar and started as a new run. A persisted legacy state body stays readable but is never advanced, and this protocol has no incremental node or edge construction tool. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
+> **Upgrading from 0.x or 1.x?** rolebox 2.x (`package.json` currently reads `2.3.0`) runs work through the **graph outcome protocol**: `graph_declare` persists a version-3 declaration, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. An existing (legacy) declaration must be rewritten for the version-3 grammar and started as a new run. A persisted legacy state body stays readable but is never advanced, and this protocol has no incremental node or edge construction tool. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
 
 ---
 

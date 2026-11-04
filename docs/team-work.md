@@ -18,7 +18,7 @@ Host calls to `graph_status` and `graph_audit` expose only graphs owned by the c
 
 DSH's `session_*` tools list, search, read, inspect, diff, and fork only the calling session. Creator, peer, and graph-child relationships do not grant transcript access. A role reads its internal graph results through its own `graph_status`; administrative session APIs retain their unrestricted view.
 
-The creator's host session owns membership and lifecycle changes. Each peer is bound to a dedicated host session and a role ID; event senders are derived from that binding. Knowing a team or member ID does not authorize publishing. Managed peers contribute within their existing team and cannot create another team to reset the execution budget.
+The creator's host session owns membership changes and team deletion, while any active member can resume a paused team. Each peer is bound to a dedicated host session and a role ID; event senders are derived from that binding. Knowing a team or member ID does not authorize publishing. Managed peers contribute within their existing team and cannot create another team to reset the execution budget.
 
 Graph workers cannot invoke team tools, including through a declared tool grant, a tool alias, or the discovery/code tool interface. A team member can use its role's authorized graph workflow for internal work, but graph workers do not acquire the peer's team identity.
 
@@ -27,15 +27,15 @@ Graph workers cannot invoke team tools, including through a declared tool grant,
 | Tool | Purpose |
 | --- | --- |
 | `team_list_roles` | Read top-level role IDs and descriptions. |
-| `team_create(name, goal, max_turns?)` | Create a team with the current role/session as creator. |
+| `team_create(name, goal, max_turns?)` | Create a team with the current role/session as creator. Returns a compact receipt with the team and member identities, status and turn budget; the goal is stored and readable through `team_status`. |
 | `team_add(team_id, role_id)` | Creator records a peer as a member. Adding does not start a turn: the peer starts when the first event addressed to it wakes it, and that delivery already carries the goal, roster and tasks. A role with no usable provider/model is refused (set `model` in its `role.yaml` or configure a host default model). |
-| `team_send_event(team_id, kind, content, task_id?, recipient?, wake?)` | Publish a message, offer/claim/complete/release a task. A `task_offer` wakes every member by default; `wake: false` records the offer without waking anyone, and `recipient` narrows the wake to one member. A claim never wakes. |
+| `team_send_event(team_id, kind, content, task_id?, recipient?, wake?)` | Publish a message, offer/claim/complete/release a task. A `task_offer` wakes every member by default; `wake: false` records the offer without waking anyone, and `recipient` narrows the wake to one member. A claim never wakes. Returns a compact receipt with the event id, sequence, type, sender, resolved recipient, task id, timestamp and effective wake flag without echoing the content; the event body is stored and readable through `team_status`. |
 | `team_status(team_id?, after_seq?, include_deleted?)` | Read your teams or one team's roster, tasks, errors, and ordered events. Closed teams are hidden from the list unless `include_deleted` is set; reading one by `team_id` always works and reports `budgetExhausted` once the team has spent its turn budget. |
 | `team_remove(team_id, member_id)` | Creator cancels a peer, broadcasts departure, and releases its claims. Cancelling the peer's turn is part of the removal and is not recorded as a member failure. The remaining team stays paused until resumed. |
 | `team_delete(team_id)` | Creator cancels managed work and closes the team; history remains inspectable. |
-| `team_resume(team_id)` | Creator resumes a paused team after inspecting the error and existing work. The tool reports any member errors it cleared, so an unresolved failure stays visible. This does not replenish the turn budget. |
+| `team_resume(team_id)` | Any active member resumes a paused team after inspecting the error and existing work; disconnected members are restored in their original sessions, confirmed running deliveries (including the caller's own turn) are preserved, and failed or discarded reservations are released. The tool reports any member errors it cleared, so an unresolved failure stays visible. This does not replenish the turn budget. |
 
-`recipient` may identify a member or its role. It chooses which peer wakes; it is not a private channel. All team events are readable by every member. `wake: false` leaves an event in the stream for the next delivery without starting a turn, so work can be queued now and picked up later.
+`recipient` may identify a member or its role. It chooses which peer wakes; it is not a private channel. The creator is itself a member and appears first in the roster, so an event addressed to its own sender is refused before any task or event is recorded — omit `recipient` to wake every other member, or name the peer that should receive the event. All team events are readable by every member. `wake: false` leaves an event in the stream for the next delivery without starting a turn, so work can be queued now and picked up later. A successful receipt records the event; it does not mean a peer has started or finished a turn.
 
 Example protocol, with IDs replaced by actual tool results:
 
@@ -69,7 +69,7 @@ Every membership change and completed team turn enters the stream. A managed mem
 
 Busy members accumulate events. Once idle, a member receives one batch through a fixed sequence number. The reservation is committed before any host prompt. The cursor advances only after a confirmed successful final turn following that delivery's unique marker in the transcript. An unrelated user turn cannot acknowledge a pending delivery.
 
-Each team allows at most eight members and two in-flight deliveries. Each host session also has a durable lease across teams, preventing two coordinators from prompting the same session concurrently. The default autonomous turn budget is 40, configurable to 1–100 when creating the team. A member turn has a 15 minute execution limit. A failed turn does not spend that budget: the team pauses with the host's actual error, the member's cursor is kept, and `team_resume` replays the pending events. User-published events and new invitations stop after 5,000 stream entries; lifecycle cleanup remains possible.
+Each team allows at most eight members and two in-flight deliveries. Each host session also has a durable lease across teams, preventing two coordinators from prompting the same session concurrently. The default autonomous turn budget is 40, configurable to 1–100 when creating the team. A member turn has no wall-clock execution limit: the scheduler checks live host activity and session ownership instead of treating a quiet, unfinished turn as stalled. A failed turn does not spend that budget: the team pauses with the host's actual error, the member's cursor is kept, and `team_resume` replays the pending events. User-published events and new invitations stop after 5,000 stream entries; lifecycle cleanup remains possible.
 
 These limits bound automatic cooperation. They do not measure tokens or monetary cost, and claims coordinate work rather than provide a filesystem sandbox. Members should publish artifact references and review findings, and avoid overlapping edits until ownership is agreed.
 
@@ -91,7 +91,7 @@ Team state is committed synchronously in SQLite transactions. A new team is buil
 
 On restart the runtime reconstructs membership, task ownership, pending deliveries, and consumption positions. The DSH adapter reads durable session history before deciding whether to recreate a live agent for the same session. Reading history does not start a turn. A confirmed completed delivery is acknowledged without another execution. An interrupted or ambiguous delivery pauses the team and keeps its cursor, so work is not silently discarded.
 
-After inspecting the session and existing artifacts, the creator uses `team_resume`. Where an old managed delivery might still be active, cancellation must be confirmed before it can be replayed. Removing, deleting, and resuming a team hold a persistent lifecycle lock; a concurrent operation cannot reopen work during cancellation.
+After inspecting the session and existing artifacts, an active member uses `team_resume`. Confirmed running deliveries continue, including the caller's own turn; where an old managed delivery might still be active, cancellation must be confirmed before it can be replayed. Removing, deleting, and resuming a team hold a persistent lifecycle lock; a concurrent operation cannot reopen work during cancellation.
 
 Delivery is **at least once after explicit recovery**, not exactly once execution of external effects. A process can stop after an edit or tool call but before its final turn is persisted. Members must inspect task state and artifacts before repeating work. The team protocol does not treat free-form text as proof that a task completed: task completion is an explicit event from its current claimant.
 

@@ -421,13 +421,17 @@ accepted result, starts no successor, and a worker's payload can never issue one
 | Scope | `scope`: `session`, `persisted` or `all` |
 | Format | `format`: `summary`, `tree` or `json`; `group_by`: `hour`, `day` or `agent` |
 | Filters | `query` (case-insensitive match on node id, prompt or agent), `status` (`pending`, `dispatched`, `settled`), `agent`, `from_date`, `to_date` |
-| Inclusion | `include_output`, `include_progress`, `include_budget`, `include_loops`, `include_artifacts`, `include_evidence`, `include_history` |
+| Inclusion | `include_output`, `include_prompt`, `include_progress`, `include_budget`, `include_loops`, `include_artifacts`, `include_evidence`, `include_history` |
 | Window | `limit`, `depth`, `offset`, `max_chars`, `tail` |
 | Export | `export_path` |
 
 `include_output` attaches accepted results with their data, artifacts and
 evidence; without it or `include_history`, an attempt carries only its result
-identity and timestamp. `run_id` selects one archived run; without it the current
+identity and timestamp. Node prompts are omitted from summary, tree and json
+output by default, including run history; `include_prompt: true` restores them.
+Omitting prompts changes only what the read discloses: `query` still matches the
+stored prompt, and declaration, worker delivery and audit records are unchanged.
+`run_id` selects one archived run; without it the current
 run is read. `export_path` writes the selected rendering atomically to that path.
 An unreadable store is an error, never an empty successful inventory.
 

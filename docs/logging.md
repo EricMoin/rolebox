@@ -419,10 +419,11 @@ promise and outranks the budget.
 
 ## The live view (dsh web UI)
 
-The dsh web UI carries a **Logs** page in the right Sidebar — a sibling tab of
-the Rolebox run console, listed in the Sidebar's guide as *Live log view: one row
-per record, with level, channel and the source being read*. It is the browser
-half of the same read side the CLI uses, over one JSON route.
+The dsh web UI contributes a **Logs** session Conversation view, id
+`rolebox-logs` — a view tab beside Chat and Trajectory, next to the Rolebox
+monitor view. It paints one row per record, with level, channel and the source
+being read, and it is the browser half of the same read side the CLI uses, over
+one JSON route.
 
 ### The route: `GET /rolebox/logs`
 
@@ -513,11 +514,11 @@ routeDisposers.push(logsRoute.register(webServer));
 > contract above: read-only `GET` (`200` with the view JSON), `400` for an
 > illegible query parameter, `404` for an unknown sub-path, `405` for a known
 > path with another method, `500` for an unexpected failure, and `200` with an
-> empty set when the log directory does not exist yet. The **Logs** tab (right
-> Sidebar, type `rolebox-logs`) polls this route, so it paints records instead of
-> its error state. `tests/dsh-plugin.test.ts` proves the registration against the
-> registrar itself, and `tests/dsh-cordis-e2e.test.ts` pins the two-route table
-> on a real cordis boot.
+> empty set when the log directory does not exist yet. The **Logs** view (a
+> session Conversation view, id `rolebox-logs`) polls this route, so it paints
+> records instead of its error state. `tests/dsh-plugin.test.ts` proves the
+> registration against the registrar itself, and `tests/dsh-cordis-e2e.test.ts`
+> pins the two-route table on a real cordis boot.
 
 (As a delegate of the composed `/rolebox` registration the same handler works
 unchanged, because a delegate receives the same `(req, res)` with the full URL.)
@@ -541,7 +542,7 @@ unchanged, because a delegate receives the same `(req, res)` with the full URL.)
   next to the record count, the malformed-line count and the time of the last
   poll.
 * **Filters restart the view.** The channel select (and the optional *This
-  session* toggle, offered when the tab is docked beside a session) narrow the
+  session* toggle, offered when the view is mounted in a session) narrow the
   server-side query; changing one starts a new view, because the old cursor names
   a position in the old stream. This is the only operation that discards what is
   on screen, and it is the user's own.
@@ -561,8 +562,8 @@ So the panel reads `GET /rolebox/logs` and holds one string between requests —
 the cursor. `tests/platform/dsh-web-ui-logs-bundle.test.ts` is the guard: it
 builds the real client entry with the build script's own options, scans the
 bundle for node and kernel markers, evaluates it the way the dsh module loader
-does (refusing any external other than react) and asserts both right-Sidebar tab
-bodies register. The probe's report lands in
+does (refusing any external other than react) and asserts both session
+Conversation view bodies register. The probe's report lands in
 `.rolebox/tmp/webview/bundle-probe.json`.
 
 ## The live view (TUI)
