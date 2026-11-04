@@ -113,7 +113,9 @@ describe("Codex sandboxed execution transport", () => {
     const socket = await connect(await executor.listen(), executor.token);
     socket.send('{"id":1}\n{"id":2}', { binary });
     await vi.waitFor(() => expect(failure).toHaveBeenCalledOnce());
-    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    // fail() terminates the server side, but the client's close event arrives asynchronously;
+    // the bounded wait still fails if the socket never reaches CLOSED.
+    await vi.waitFor(() => expect(socket.readyState).toBe(WebSocket.CLOSED), { timeout: 5000 });
   });
 
   it("revokes the relay when its execution process exits", async () => {
@@ -122,7 +124,9 @@ describe("Codex sandboxed execution transport", () => {
     socket.send(JSON.stringify({ method: "exit" }));
     await vi.waitFor(() => expect(failure).toHaveBeenCalledOnce());
     expect(spawned).toHaveLength(1);
-    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    // The relay's server-side terminate/close propagates to the client asynchronously,
+    // so observe CLOSED with a bounded wait that still fails if it never arrives.
+    await vi.waitFor(() => expect(socket.readyState).toBe(WebSocket.CLOSED), { timeout: 5000 });
   });
 
   it("closes its owned process without reporting a spurious failure", async () => {
