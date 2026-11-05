@@ -281,6 +281,7 @@ async function createFixture(
   ) => {
     const composed = registrar.composeSpawnRequest(agentId, request, workerExecutionPrompt);
     return subagents.startActivation({
+      ...composed,
       provider: agentId,
       label: agentId,
       request: composed,

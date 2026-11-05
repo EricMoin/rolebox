@@ -1,12 +1,20 @@
 # dsh (DeepSeek Harness) Plugin Contract
 
-## Current rc3 compatibility
+## Current 0.2.x compatibility
 
 The runtime is verified against both the installed `0.2.1-rc.3` packages and
-a built source checkout at that version. Source hosts have changed several
-extension points without changing the version string, so the adapter selects
-the available API:
+a built `0.2.2-rc.1` source checkout. Source hosts have changed several
+extension points, so the adapter supports both APIs:
 
+- Published rc3 reads activation task options from `spec.request`; current
+  source hosts read `spec.parent`, `spec.prompt` and the other task options
+  directly. Graph and loop dispatch send the same composed task in both
+  locations in a single activation call, retaining parent identity, role model,
+  cancellation and caller-owned result delivery without retrying child creation.
+- Recovery uses published rc3's `listChildren` or current source hosts'
+  `listDescendants`, accepting only direct-child rows owned by the declaring
+  parent. Nested descendants and diagnostic rows cannot establish an execution
+  binding; missing, ambiguous or unreadable matches remain `unknown`.
 - Published rc3 exposes `ctx.tools.presentAs("native")` and includes `tools`
   in the `system-prompt/assemble` waterfall.
 - Newer source hosts expose `ctx.tools.setExecutor`. Their assembly waterfall

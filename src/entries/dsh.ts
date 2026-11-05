@@ -320,12 +320,13 @@ export interface DshPluginContext {
    * nodes / loop rounds through `ctx.subagents.startActivation` (via
    * {@link DshDispatchAdapter}).
    *
-   * `listChildren` is OPTIONAL ON THIS MIRROR because it is one consumer's
+   * `listChildren` / `listDescendants` are optional because listing is one consumer's
    * optional capability, not part of the dispatch contract: the outcome run
    * path's execution query correlates a dispatch effect with the subagent run
    * it created through the run's durable label, and a dsh build (or a test
    * double) without the listing is answered `unknown` rather than failing to
-   * load. The base profile's `SubagentRuntime` provides it
+   * load. Published rc3 provides `listChildren`; current source hosts provide
+   * `listDescendants`, whose rows are filtered to this parent's direct children
    * (`docs/dsh-plugin-contract.md` §4.3).
    */
   subagents: DshOutcomeSubagentRuntime;

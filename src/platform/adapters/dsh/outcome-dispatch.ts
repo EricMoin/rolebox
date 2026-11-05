@@ -61,9 +61,9 @@ import type { DshSessionEventLike } from "./session.ts";
  * - {@link DshOutcomeDelivery.executionQuery} — the execution query (P2 item 5):
  *   the create call CARRIES the stable key
  *   (`graphId + "/dispatch:" + attemptId`) as the documented start-request
- *   `label`, and `ctx.subagents.listChildren` is asked for the child carrying
- *   it. Whether a listed child returns that label is unverified in this
- *   repository; when it does not, the correlation answers `unknown` and the
+ *   `label`, and the host's child or descendant catalog is asked for the
+ *   direct child carrying it. When no listed child carries that label, the
+ *   correlation answers `unknown` and the
  *   effect stays blocked. The listing is asynchronous, so it is read by the
  *   port's `prime` phase before the run path's synchronous window, and a child
  *   that is not found answers `unknown` — never `absent`, because a
@@ -145,6 +145,13 @@ export interface DshSubagentChildRow {
   readonly mode?: string;
 }
 
+/** Current descendant catalog fields needed to select the declaring parent's children. */
+export interface DshSubagentDescendantRow extends DshSubagentChildRow {
+  readonly kind: "child" | "diagnostic";
+  readonly parentId: string;
+  readonly depth: number;
+}
+
 function isGraphWorkerChild(child: DshSubagentChildRow): boolean {
   // rc3 startActivation publishes local workers as continuable children.
   return child.mode === "one-shot" || child.mode === "continuable" ||
@@ -152,8 +159,8 @@ function isGraphWorkerChild(child: DshSubagentChildRow): boolean {
 }
 
 /**
- * The listing half of the dsh subagent service (`SubagentRuntime.listChildren`,
- * contract §4.3). Declared here as an OPTIONAL extension rather than on the
+ * The listing half of the dsh subagent service (legacy `listChildren` or
+ * current `listDescendants`). Declared here as an OPTIONAL extension rather than on the
  * shared dispatch surface because it is the query port's need alone: a runtime
  * double for the delivery path does not have to provide it, and a runtime
  * without it answers `unknown` instead of correlating.
@@ -163,6 +170,10 @@ export interface DshSubagentCatalogLike {
     parentSessionId: string,
     signal?: AbortSignal,
   ): Promise<readonly DshSubagentChildRow[]>;
+  listDescendants?(
+    rootSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<readonly DshSubagentDescendantRow[]>;
   /**
    * Interrupt one CHILD SESSION — the addressable cancellation surface of the
    * dsh subagent runtime (contract §4.3:
@@ -394,6 +405,17 @@ export class DshOutcomeDelivery {
     this.log = createSubLogger(opts.loggerName ?? "dsh-outcome-dispatch");
   }
 
+  private childListing(): DshSubagentCatalogLike["listChildren"] {
+    const subagents = this.opts.subagents;
+    if (subagents.listChildren !== undefined) return subagents.listChildren.bind(subagents);
+    const listDescendants = subagents.listDescendants;
+    if (listDescendants === undefined) return undefined;
+    return async (parentSessionId, signal) =>
+      (await listDescendants.call(subagents, parentSessionId, signal)).filter(
+        row => row.kind === "child" && row.parentId === parentSessionId && row.depth === 1,
+      );
+  }
+
   /**
    * THE PLATFORM EXECUTION QUERY PORT (P2 item 5 / F3).
    *
@@ -415,10 +437,10 @@ export class DshOutcomeDelivery {
    */
   readonly executionQuery: OutcomeExecutionQuery = Object.freeze({
     lookup: (probe: OutcomeExecutionProbe): OutcomeExecutionLookup => {
-      const listing = this.opts.subagents.listChildren;
+      const listing = this.childListing();
       if (listing === undefined) {
         return unknownAnswer(
-          "this dsh build exposes no ctx.subagents.listChildren, so a subagent run cannot " +
+          "this dsh build exposes neither ctx.subagents.listChildren nor listDescendants, so a subagent run cannot " +
           "be correlated with the dispatch effect that created it",
         );
       }
@@ -483,7 +505,7 @@ export class DshOutcomeDelivery {
           parents.add(parentSessionId);
         }
       }
-      const listing = this.opts.subagents.listChildren;
+      const listing = this.childListing();
       if (listing === undefined) return;
       for (const parentSessionId of parents) {
         try {
@@ -834,6 +856,7 @@ export class DshOutcomeDelivery {
     // The start itself is a promise; the delivery contract is synchronous. A
     // rejection is reported as a failed start (nothing was observed running).
     const start = () => this.opts.subagents.startActivation({
+      ...startRequest,
       provider: agent,
       label: dispatchIdempotencyKeyOf(effect),
       request: startRequest,

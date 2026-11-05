@@ -176,6 +176,72 @@ function dshDelivery(runtime: DshOutcomeSubagentRuntime): DshOutcomeDelivery {
 }
 
 describe("the dsh execution query port", () => {
+  it("recovers only the declaring parent's direct children from a descendant catalog", async () => {
+    const { runtime, listings } = makeDshRuntime({ noListing: true });
+    runtime.listDescendants = async function (parentId) {
+      expect(this).toBe(runtime);
+      listings.push(parentId);
+      return [
+        { kind: "child", id: EXECUTION_ID, parentId, depth: 1, mode: "continuable", label: STABLE_KEY },
+        { kind: "child", id: "grandchild", parentId: EXECUTION_ID, depth: 2, mode: "continuable", label: STABLE_KEY },
+        { kind: "child", id: "other-parent-child", parentId: "other-parent", depth: 1, mode: "continuable", label: STABLE_KEY },
+        { kind: "diagnostic", id: "unreadable-child", parentId, depth: 1, label: STABLE_KEY },
+      ];
+    };
+    const delivery = dshDelivery(runtime);
+    try {
+      await delivery.executionQuery.prime?.([probe()]);
+      expect(listings).toEqual([INVOCATION.sessionId]);
+      expect(delivery.executionQuery.lookup(probe())).toEqual({
+        kind: "created", execution: { executionId: EXECUTION_ID },
+      });
+    } finally {
+      delivery.close();
+    }
+  });
+
+  it.each(["empty", "nested", "diagnostic", "ambiguous"] as const)(
+    "keeps %s descendant matches unknown instead of authorizing another execution", async (scenario) => {
+      const { runtime } = makeDshRuntime({ noListing: true });
+      const child = {
+        kind: "child" as const, id: EXECUTION_ID, parentId: INVOCATION.sessionId,
+        depth: 1, mode: "continuable", label: STABLE_KEY,
+      };
+      runtime.listDescendants = async () => {
+        if (scenario === "empty") return [];
+        if (scenario === "nested") return [{ ...child, parentId: "other-child", depth: 2 }];
+        if (scenario === "diagnostic") return [{ ...child, kind: "diagnostic" }];
+        return [child, { ...child, id: "duplicate-child" }];
+      };
+      const delivery = dshDelivery(runtime);
+      try {
+        await delivery.executionQuery.prime?.([probe()]);
+        expect(delivery.executionQuery.lookup(probe()).kind).toBe("unknown");
+      } finally {
+        delivery.close();
+      }
+    },
+  );
+
+  it("drops a recovered descendant match when a later catalog read fails", async () => {
+    const { runtime } = makeDshRuntime({ noListing: true });
+    let failed = false;
+    runtime.listDescendants = async parentId => {
+      if (failed) throw new Error("catalog unavailable");
+      return [{ kind: "child", id: EXECUTION_ID, parentId, depth: 1, mode: "continuable", label: STABLE_KEY }];
+    };
+    const delivery = dshDelivery(runtime);
+    try {
+      await delivery.executionQuery.prime?.([probe()]);
+      expect(delivery.executionQuery.lookup(probe()).kind).toBe("created");
+      failed = true;
+      await delivery.executionQuery.prime?.([probe()]);
+      expect(delivery.executionQuery.lookup(probe()).kind).toBe("unknown");
+    } finally {
+      delivery.close();
+    }
+  });
+
   for (const parent of [undefined, INVOCATION]) {
     for (const noListing of [false, true]) {
       it("reads a confirmed execution without listing a parent: parent=" + (parent !== undefined) + ", listing=" + !noListing, async () => {

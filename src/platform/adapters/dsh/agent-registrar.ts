@@ -284,18 +284,20 @@ export type DshSubagentRun = {
  *     {@link DshContinuableCreateSpec} (this is rolebox's path);
  *   - a provider WITHOUT it runs the EXTERNAL path and its `start()` is called.
  *
- * `request` deliberately EXCLUDES `label` and `signal` — both live on this spec
- * — and `delivery` selects whether the child's result is delivered to the
- * parent model (`"parent"`) or returned to the caller alone (`"caller"`).
+ * Current source hosts read task options directly from this spec. Published
+ * rc3 hosts read them from `request`, excluding `label` and `signal`. Both
+ * layouts carry the same composed task so either host can start it in one call.
+ * `delivery` selects whether the result reaches the parent model (`"parent"`)
+ * or the caller alone (`"caller"`).
  */
-export type DshSubagentActivationSpec = {
+export type DshSubagentActivationSpec = Omit<DshSubagentStartRequest, "label" | "signal"> & {
   /** Registered backend to use. */
   readonly provider: string;
   /** Short task label retained in cataloged child membership. */
   readonly label: string;
   /** Optional reserved identity for a local child. */
   readonly childId?: string;
-  /** Task and backend-supported execution options (no `label`/`signal`). */
+  /** Legacy nested task options for hosts predating activation flattening. */
   readonly request: Omit<DshSubagentStartRequest, "label" | "signal">;
   /** Cancellation before publication. */
   readonly signal: AbortSignal;

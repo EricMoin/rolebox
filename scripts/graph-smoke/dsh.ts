@@ -311,7 +311,7 @@ try {
   assert.equal(sandboxProbes, 2, "Worker sandbox probe did not run through the real registry");
   assert.equal(deniedProbes, 2, "Host did not report denial of the forbidden tool");
   const recoveredEffect = dispatchEffectKeyOf("dsh.explicit", "work#1");
-  const recoveredChild = (await ctx.subagents.listChildren(handle.agent.id))
+  const recoveredChild = (await (ctx.subagents.listChildren?.(handle.agent.id) ?? ctx.subagents.listDescendants(handle.agent.id)))
     .find((child: any) => child.label === dispatchIdempotencyKeyOf(recoveredEffect));
   assert.equal(recoveredChild?.mode, "continuable", "rc3 local activations must appear in the durable child catalog");
   const recoveryDelivery = new DshOutcomeDelivery({

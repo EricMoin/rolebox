@@ -371,6 +371,7 @@ export class DshDispatchAdapter implements IDispatchAdapter {
     // host still dispatches the adapter-composed request.
     const request = this.opts.composeRequest?.(agent, baseRequest) ?? baseRequest;
     const activation = await this.opts.subagents.startActivation({
+      ...request,
       provider: agent,
       // dsh 0.2.x requires the activation label; a dispatch without a
       // description falls back to the agent id rather than an empty label.

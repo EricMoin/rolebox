@@ -102,6 +102,15 @@ Use the host's own documentation for its installation command and provider
 configuration. The built-in skill's synchronization itself does not register a
 plugin, enable an MCP server, or install a model provider.
 
+DSH graph and loop workers support published `0.2.1-rc.3` hosts and source hosts
+with flattened activation task options, including `0.2.2-rc.1`. No plugin option
+selects the activation layout. After updating a locally linked rolebox checkout,
+rebuild rolebox and restart DSH so the host loads the updated `dist/` entry.
+Graph recovery also supports both host catalog APIs (`listChildren` and
+`listDescendants`); it correlates only direct children of the declaring session.
+Missing or ambiguous catalog evidence keeps an execution unresolved rather than
+automatically launching another worker.
+
 ### Codex native agents and session execution
 
 Codex sync creates `<codex-home>/rolebox-marketplace`, a plugin manifest, a skills
