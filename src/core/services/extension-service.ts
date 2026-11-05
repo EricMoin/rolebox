@@ -3,7 +3,8 @@ import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { ExtensionRegistry } from "../../extensions/index.ts";
 import { createSubLogger } from "../../logger.ts";
-import type { RecoveryStrategy, ErrorPattern } from "../../recovery/types.ts";
+import type { RecoveryStrategy } from "../../recovery/types.ts";
+import { adaptExtensionPattern } from "../../recovery/extension-pattern.ts";
 
 const log = createSubLogger(SERVICE_NAMES.extension);
 
@@ -52,7 +53,12 @@ export class ExtensionService implements PluginService {
         recoveryEngine.registerStrategy({ name, execute: mod.execute } as RecoveryStrategy);
       }
       for (const [name, mod] of this.extensionRegistry.getLoadedPatterns()) {
-        recoveryEngine.registerErrorPattern({ name, category: mod.category, match: mod.match } as unknown as ErrorPattern);
+        const pattern = adaptExtensionPattern(name, mod);
+        if (!pattern) {
+          log.warn("Skipping invalid extension recovery pattern", { name });
+          continue;
+        }
+        recoveryEngine.registerErrorPattern(pattern);
       }
     }
 

@@ -14,6 +14,7 @@ import type {
   RecoveryChainConfig,
   StrategyStep,
 } from "./types.ts";
+import { RECOVERY_ERROR_CATEGORIES } from "./validation.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("recovery:config");
@@ -144,17 +145,7 @@ export function parseRecoveryConfig(
   };
 
   // Parse chain configs for each category
-  const categoryKeys: RecoveryErrorCategory[] = [
-    "session_error",
-    "context_window",
-    "edit_error",
-    "json_error",
-    "empty_response",
-    "tool_pair",
-    "guard_violation",
-  ];
-
-  for (const cat of categoryKeys) {
+  for (const cat of RECOVERY_ERROR_CATEGORIES) {
     const rawChain = obj[cat];
     if (rawChain && typeof rawChain === "object") {
       const chainObj = rawChain as Record<string, unknown>;
