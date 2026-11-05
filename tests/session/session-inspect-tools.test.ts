@@ -5,12 +5,12 @@ import {
   createSessionDiffTool,
   createSessionForkTool,
 } from "../../src/session/session-inspect-tools.ts";
-import type { SessionClientWrapper } from "../../src/session/client.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 
-/** Helper to cast mock ISessionClient to SessionClientWrapper. */
-function mockClient(overrides?: Parameters<typeof createMockClient>[0]): SessionClientWrapper {
-  return createMockClient(overrides) as unknown as SessionClientWrapper;
+/** Helper to build a mock ISessionClient. */
+function mockClient(overrides?: Parameters<typeof createMockClient>[0]): ISessionClient {
+  return createMockClient(overrides);
 }
 
 const defaultCtx = {
@@ -31,7 +31,9 @@ function makeSession(opts: {
 }) {
   return {
     id: opts.id,
-    projectID: opts.projectID ?? "proj1",
+    // projectID is host-reported and OPTIONAL: only set it when the caller
+    // supplies one, like a host with a real project concept does.
+    ...(opts.projectID !== undefined ? { projectID: opts.projectID } : {}),
     directory: opts.directory ?? "/tmp",
     title: opts.title ?? "Test Session",
     version: opts.version ?? "1",
@@ -144,6 +146,22 @@ describe("createSessionInfoTool", () => {
     expect(result).toContain("**Children:** 1");
     expect(result).toContain("Total Cost: $0.005000");
     expect(result).toContain("openai/gpt-4: 1 messages");
+  });
+
+  it("omits the Project line when the host reports no projectID", async () => {
+    const tool = createSessionInfoTool(mockClient({
+      sessionGet: () => Promise.resolve(makeSession({ id: "ses_1", title: "Neutral Session", directory: "/work/space" })),
+      sessionMessages: () => Promise.resolve([]),
+      sessionChildren: () => Promise.resolve([]),
+      sessionTodo: () => Promise.resolve([]),
+      sessionStatus: () => Promise.resolve(null),
+    }));
+    const result = (await tool.execute(args as never, defaultCtx)) as string;
+
+    // A host without a project concept (dsh, pi) omits projectID entirely, so
+    // the report must not invent a Project line; `directory` still shows.
+    expect(result).not.toContain("**Project:**");
+    expect(result).toContain("**Directory:** /work/space");
   });
 
   it("shows todo progress when todos exist", async () => {

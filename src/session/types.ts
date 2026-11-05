@@ -8,7 +8,12 @@ export type FileDiff = {
 
 export type SessionInfo = {
   id: string;
-  projectID: string;
+  /**
+   * Host-reported project identifier. OPTIONAL: a host without a project
+   * concept (dsh, pi) omits it — `directory` carries the workspace identity
+   * there — and an adapter must never fabricate one from a path.
+   */
+  projectID?: string;
   directory: string;
   parentID?: string;
   summary?: {

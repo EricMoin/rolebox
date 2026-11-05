@@ -187,10 +187,10 @@ export function buildCanonicalTools(
 
   // 2. Session tools (if sessionClient provided)
   if (opts.sessionClient) {
-    // Session tools expect SessionClientWrapper (OpencodeSessionAdapter),
-    // which is a concrete class implementing ISessionClient. Since this
-    // module is forbidden from importing src/session/client.ts, derive the
-    // expected parameter type from one of the session tool factory signatures.
+    // Session tools accept the platform-neutral ISessionClient port. Derive
+    // the parameter type from one of the session tool factory signatures so
+    // this assembly stays platform-neutral and never imports a concrete
+    // adapter.
     type SessionClientForTools = Parameters<typeof createSessionListTool>[0];
     const client = opts.sessionClient as SessionClientForTools;
 

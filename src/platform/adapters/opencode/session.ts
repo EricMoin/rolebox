@@ -2,7 +2,8 @@
  * OpenCode session adapter — implements ISessionClient by wrapping
  * the opencode SDK client (PluginInput["client"] or OpencodeClient).
  *
- * This adapter subsumes the old SessionClientWrapper and adds prompt/create/abort.
+ * This adapter implements the platform-neutral ISessionClient over the
+ * opencode SDK client (including prompt/create/abort).
  */
 
 import type { PluginInput } from "@opencode-ai/plugin";

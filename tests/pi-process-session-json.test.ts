@@ -304,6 +304,13 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     adapter = new PiProcessSessionAdapter();
   });
 
+  it("create() reports SessionInfo with no projectID — pi has no project concept", async () => {
+    const info = await adapter.create({ directory: "/tmp/rolebox-test-project" });
+    expect(info).not.toBeNull();
+    expect(info!.directory).toBe("/tmp/rolebox-test-project");
+    expect(info!.projectID).toBeUndefined();
+  });
+
   it("assistant text accumulates exactly once — deltas stream, then message_end finalizes without double-counting", async () => {
     const record = await createRecord(adapter);
 

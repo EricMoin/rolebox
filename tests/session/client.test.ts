@@ -1,13 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SessionClientWrapper } from "../../src/session/client.ts";
-import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
-
-describe("SessionClientWrapper", () => {
-  it("is an alias for OpencodeSessionAdapter", () => {
-    expect(SessionClientWrapper).toBe(OpencodeSessionAdapter);
-  });
-});
 
 describe("ISessionClient interface (via mock)", () => {
   it("create — returns a new session", async () => {

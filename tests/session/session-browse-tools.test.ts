@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { createSessionListTool, createSessionSearchTool } from "../../src/session/session-browse-tools.ts";
-import type { SessionClientWrapper } from "../../src/session/client.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 
-/** Helper to cast mock ISessionClient to SessionClientWrapper. */
-function mockClient(overrides?: Parameters<typeof createMockClient>[0]): SessionClientWrapper {
-  return createMockClient(overrides) as unknown as SessionClientWrapper;
+/** Helper to build a mock ISessionClient. */
+function mockClient(overrides?: Parameters<typeof createMockClient>[0]): ISessionClient {
+  return createMockClient(overrides);
 }
 
 const defaultCtx = {

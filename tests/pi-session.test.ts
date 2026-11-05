@@ -199,6 +199,9 @@ describe("PiSessionAdapter — filesystem-backed reading", () => {
     const session = await adapter.get(SESSION_A_ID);
     expect(session).not.toBeNull();
     expect(session!.id).toBe(SESSION_A_ID);
+    // pi has no project concept: no projectID is fabricated from the path.
+    expect(session!.projectID).toBeUndefined();
+    expect(session!.directory).toBeDefined();
   });
 
   it("get() returns null for non-existent session", async () => {
@@ -399,7 +402,7 @@ describe("PiSessionAdapter — sessionDir with tilde expansion", () => {
 
 import { createSessionSearchTool } from "../src/session/session-browse-tools.ts";
 import type { Message, SessionInfo } from "../src/session/types.ts";
-import type { SessionClientWrapper } from "../src/session/client.ts";
+import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
 
 // ── Mock client for session_search tests ─────────────────────────────────────
@@ -407,7 +410,7 @@ import type { CanonicalToolContext } from "../src/platform/types.ts";
 function createMockSearchClient(
   totalSessions: number,
   matchInSessionIndex?: number,
-): SessionClientWrapper {
+): ISessionClient {
   const sessions: SessionInfo[] = Array.from({ length: totalSessions }, (_, i) => ({
     id: `session-${i}`,
     projectID: "test",
@@ -449,7 +452,7 @@ function createMockSearchClient(
     promptSync: async () => null,
     create: async () => null,
     abort: async () => false,
-  } as unknown as SessionClientWrapper;
+  };
 }
 
 const searchToolContext: CanonicalToolContext = {

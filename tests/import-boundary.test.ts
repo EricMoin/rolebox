@@ -36,12 +36,6 @@ describe("import boundary for src/tool-assembly.ts", () => {
     expect(forbidden).toEqual([]);
   });
 
-  it("does not import from src/session/client.ts", () => {
-    const specifiers = extractImportSpecifiers(readSource());
-    const forbidden = specifiers.filter((s) => s.includes("session/client"));
-    expect(forbidden).toEqual([]);
-  });
-
   it("does not import from src/platform/adapters/opencode/session.ts", () => {
     const specifiers = extractImportSpecifiers(readSource());
     const forbidden = specifiers.filter((s) => s.includes("opencode/session"));

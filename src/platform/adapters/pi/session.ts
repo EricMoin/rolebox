@@ -197,7 +197,6 @@ export class PiSessionAdapter implements ISessionClient {
 
     return {
       id,
-      projectID: directory ?? workspaceDir,
       directory: directory ?? workspaceDir,
       parentID: undefined,
       summary: {

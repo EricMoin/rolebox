@@ -1,4 +1,3 @@
-export { SessionClientWrapper } from "./client.ts";
 export {
   createSessionListTool,
   createSessionReadTool,

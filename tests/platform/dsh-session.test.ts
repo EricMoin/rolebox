@@ -269,7 +269,9 @@ describe("DshSessionAdapter", () => {
     expect(infos[0].id).toBe("s1");
     expect(infos[0].title).toBe("Build the widget");
     expect(infos[0].directory).toBe("/repo");
-    expect(infos[0].projectID).toBe("/repo");
+    // dsh has no project concept: the adapter reports no projectID, and
+    // `directory` alone carries the workspace identity.
+    expect(infos[0].projectID).toBeUndefined();
     expect(infos[0].version).toBe("1");
     expect(infos[0].time.created).toBe(1000);
     expect(infos[0].time.updated).toBe(3000);

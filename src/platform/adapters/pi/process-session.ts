@@ -540,7 +540,6 @@ export class PiProcessSessionAdapter implements ISessionClient {
 
     return {
       id,
-      projectID: options.directory,
       directory: options.directory,
       parentID: options.parentID,
       summary: { additions: 0, deletions: 0, files: 0 },

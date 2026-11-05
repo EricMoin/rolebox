@@ -626,7 +626,6 @@ export class DshSessionAdapter implements ISessionClient {
 
     return {
       id: session.id,
-      projectID: dir,
       directory: dir,
       summary: { additions: 0, deletions: 0, files: 0, diffs: [] },
       title,

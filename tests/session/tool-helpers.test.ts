@@ -6,13 +6,13 @@ import {
   extractContext,
   collectSessionAnalytics,
 } from "../../src/session/tool-helpers.ts";
-import type { SessionClientWrapper } from "../../src/session/client.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 import type { SessionInfo, Message } from "../../src/session/types.ts";
 
-/** Wrapper to cast ISessionClient mock to the SessionClientWrapper type expected by helpers. */
-function mockClientWrapper(overrides?: Parameters<typeof createMockClient>[0]): SessionClientWrapper {
-  return createMockClient(overrides) as unknown as SessionClientWrapper;
+/** Helper to build a mock ISessionClient. */
+function mockClientWrapper(overrides?: Parameters<typeof createMockClient>[0]): ISessionClient {
+  return createMockClient(overrides);
 }
 
 describe("shortId", () => {

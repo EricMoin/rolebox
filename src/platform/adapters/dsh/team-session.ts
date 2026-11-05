@@ -563,7 +563,7 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
   }
 
   private info(descriptor: Descriptor, events: readonly DshSessionEventLike[]): SessionInfo {
-    return { id: descriptor.sessionId, directory: descriptor.directory, projectID: "dsh", title: descriptor.roleId,
+    return { id: descriptor.sessionId, directory: descriptor.directory, title: descriptor.roleId,
       version: "1", time: { created: descriptor.createdAt, updated: events.at(-1)?.time ?? descriptor.createdAt } };
   }
 

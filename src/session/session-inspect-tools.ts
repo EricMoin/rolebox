@@ -87,7 +87,7 @@ export function createSessionInfoTool(client: ISessionClient) {
       const lines: string[] = [];
       lines.push(`## Session: ${session.title}`, "");
       lines.push(`**ID:** ${session.id}`);
-      lines.push(`**Project:** ${session.projectID}`);
+      if (session.projectID !== undefined) lines.push(`**Project:** ${session.projectID}`);
       lines.push(`**Directory:** ${session.directory}`);
       lines.push(`**Created:** ${formatDate(session.time.created)} (${relativeTime(session.time.created)})`);
       lines.push(`**Updated:** ${formatDate(session.time.updated)} (${relativeTime(session.time.updated)})`);
