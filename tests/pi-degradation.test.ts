@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { DispatchService } from "../src/core/services/dispatch-service.ts";
 import { LoopService } from "../src/core/services/loop-service.ts";
 import { EventBus } from "../src/core/event-bus.ts";
-import { minimalCapabilities, opencodeCapabilities, piCapabilities } from "../src/platform/capabilities.ts";
+import { minimalCapabilities, opencodeCapabilities, piCapabilities, sessionCreateUnavailableMessage } from "../src/platform/capabilities.ts";
 import type { PluginCoreLike } from "../src/core/service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../src/core/service-names.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
@@ -126,7 +126,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     expect(svc.health().status).toBe("degraded");
   });
 
-  it("health() details mention Pi when degraded", async () => {
+  it("health() detail names the degraded platform", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
     serviceMap.set(SERVICE_NAMES.dispatch, svc);
@@ -136,7 +136,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     const health = svc.health();
 
     expect(health.status).toBe("degraded");
-    expect(health.detail).toContain("Pi");
+    expect(health.detail).toContain("pi");
   });
 
   it("getDispatchManager() throws when degraded", async () => {
@@ -177,7 +177,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     const tools = svc.getTools();
 
     const result = await tools.dispatch.execute({}, stubToolContext);
-    expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
+    expect(result).toBe(sessionCreateUnavailableMessage("pi"));
   });
 
   it("stub dispatch_output tool returns same message", async () => {
@@ -190,7 +190,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     const tools = svc.getTools();
 
     const result = await tools.dispatch_output.execute({}, stubToolContext);
-    expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
+    expect(result).toBe(sessionCreateUnavailableMessage("pi"));
   });
 
   it("stub dispatch_cancel tool returns same message", async () => {
@@ -203,7 +203,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     const tools = svc.getTools();
 
     const result = await tools.dispatch_cancel.execute({}, stubToolContext);
-    expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
+    expect(result).toBe(sessionCreateUnavailableMessage("pi"));
   });
 
   it("stub dispatch_metrics tool returns same message", async () => {
@@ -216,7 +216,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     const tools = svc.getTools();
 
     const result = await tools.dispatch_metrics.execute({}, stubToolContext);
-    expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
+    expect(result).toBe(sessionCreateUnavailableMessage("pi"));
   });
 
   it("stub dispatch_status tool returns same message", async () => {
@@ -229,7 +229,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     const tools = svc.getTools();
 
     const result = await tools.dispatch_status.execute({}, stubToolContext);
-    expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
+    expect(result).toBe(sessionCreateUnavailableMessage("pi"));
   });
 
   it("dispose() is safe when degraded (no-op)", async () => {
@@ -452,7 +452,7 @@ describe("Pi extension log messages — degradation verification", () => {
     expect(Object.keys(dispatchTools).length).toBe(5);
     for (const tool of Object.values(dispatchTools)) {
       const result = await (tool as any).execute();
-      expect(result).toContain("not available on Pi");
+      expect(result).toContain("not available");
     }
   });
 

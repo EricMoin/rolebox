@@ -8,7 +8,7 @@ import type { PluginContext } from "../../src/core/context.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 import { __resetForTest } from "../../src/logger.ts";
 import { hookState } from "../../src/hooks/state.ts";
-import { opencodeCapabilities, piCapabilities } from "../../src/platform/capabilities.ts";
+import { minimalCapabilities, opencodeCapabilities, piCapabilities } from "../../src/platform/capabilities.ts";
 import { makeSessionClient } from "./helpers.ts";
 // CanonicalToolContext fixture, shared with the tests/asset tool call sites
 // (same convention as the ../dispatch/helpers.ts import above).
@@ -99,6 +99,17 @@ describe("DispatchService", () => {
       await svc.init(ctx);
 
       expect(() => svc.getDispatchManager()).toThrow("permanently degraded");
+    });
+
+    it("stub tools name the declared platform instead of a hard-coded host", async () => {
+      const svc = new DispatchService();
+      const ctx = makeContext({ capabilities: minimalCapabilities("test-host") });
+      await svc.init(ctx);
+
+      const result = await svc.getTools().dispatch.execute({}, makeToolContext());
+      expect(result).toContain("test-host");
+      expect(result).not.toContain("Pi");
+      expect(result).not.toContain("opencode");
     });
   });
 

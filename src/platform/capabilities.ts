@@ -181,3 +181,16 @@ export function opencodeV2Capabilities(): PlatformCapabilities {
     hasRoleSwitch: false,
   };
 }
+
+/**
+ * Build the message shown by degraded dispatch stub tools.
+ *
+ * The platform is named so an operator knows which host could not create
+ * sessions; a host that did not declare an id (resolving to the minimal
+ * capability set) is described as "this host" rather than being told it is
+ * some other platform.
+ */
+export function sessionCreateUnavailableMessage(platformId: string): string {
+  const where = platformId && platformId !== "unknown" ? `on ${platformId}` : "on this host";
+  return `Dispatch is not available ${where} — session create is not supported.`;
+}

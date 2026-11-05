@@ -33,7 +33,7 @@ import type { CanonicalToolDef as CanonicalToolDefForGraph } from "../../types.t
 // ── Shared tool assembly ────────────────────────────────────────────────────
 
 import { buildCanonicalTools } from "../../tool-assembly.ts";
-import { piCapabilities } from "../../capabilities.ts";
+import { piCapabilities, sessionCreateUnavailableMessage } from "../../capabilities.ts";
 
 // ── Logger ──────────────────────────────────────────────────────────────────
 
@@ -46,17 +46,17 @@ const log = createSubLogger("pi-service-stack");
 // ── Stub dispatch tools ──────────────────────────────────────────────────────
 
 /**
- * Create a stub tool that returns "Not available on Pi" for platform-specific
- * features that Pi does not support (dispatch, etc.).
+ * Create a stub tool that returns an "unavailable" message for
+ * platform-specific features that this host does not support (dispatch, etc.).
  */
 function stubTool(description: string): CanonicalToolDef {
   return defineTool({
     description,
     args: {
-      _stub: z.string().optional().describe("This tool is not available on Pi"),
+      _stub: z.string().optional().describe("This tool is unavailable on this host"),
     },
     async execute() {
-      return "Dispatch is not available on Pi — use opencode for multi-agent workflows.";
+      return sessionCreateUnavailableMessage("pi");
     },
   });
 }

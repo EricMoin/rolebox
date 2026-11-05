@@ -15,23 +15,23 @@ import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 
-/** Message shown by stub loop tools when the service is degraded on Pi. */
-const PI_LOOP_UNAVAILABLE_MSG =
-  "Loop is not available on Pi — dispatch is not supported.";
+/** Message shown by stub loop tools when the service is degraded. */
+const LOOP_UNAVAILABLE_MSG =
+  "Loop is not available — dispatch is degraded on this host.";
 
 /**
  * Creates a stub CanonicalToolDef that returns a fixed "not available" message.
- * Used when the service is permanently degraded (e.g., on Pi when dispatch is
- * degraded). Mirrors the dispatch-service stubTool pattern.
+ * Used when the service is permanently degraded because dispatch is degraded.
+ * Mirrors the dispatch-service stubTool pattern.
  */
 function stubTool(description: string): CanonicalToolDef {
   return defineTool({
     description,
     args: {
-      _stub: z.string().optional().describe("This tool is not available on Pi"),
+      _stub: z.string().optional().describe("This tool is unavailable on this host"),
     },
     async execute() {
-      return PI_LOOP_UNAVAILABLE_MSG;
+      return LOOP_UNAVAILABLE_MSG;
     },
   });
 }
@@ -61,7 +61,7 @@ export class LoopService implements PluginService {
     const dispatchHealth = dispatchService.health();
     if (dispatchHealth && dispatchHealth.status === "degraded") {
       this.stateDegraded = true;
-      this.degradedDetail = "dispatch not available on Pi";
+      this.degradedDetail = dispatchHealth.detail ? `dispatch degraded: ${dispatchHealth.detail}` : "dispatch service is degraded";
       logEvent("loop-service.degraded", { reason: this.degradedDetail });
       return;
     }
@@ -184,7 +184,7 @@ export class LoopService implements PluginService {
 
   /**
    * Returns real compatibility `loop_*` tools (CanonicalToolDefs) when the
-   * service is healthy, or PI_UNAVAILABLE stub tools when degraded.
+   * service is healthy, or unavailable stub tools when degraded.
    *
    * These tools are the restored Phase-C compatibility shims backed by the
    * LoopCoordinator (see src/loop/loop-tools.ts). They are consumed on the

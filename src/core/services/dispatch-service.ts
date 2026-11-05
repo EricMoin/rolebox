@@ -2,7 +2,7 @@ import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
-import type { PlatformCapabilities } from "../../platform/capabilities.ts";
+import { sessionCreateUnavailableMessage } from "../../platform/capabilities.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { DispatchManager } from "../../dispatch/core/manager.ts";
 import { cleanExpiredState } from "../../dispatch/persistence/state-gc.ts";
@@ -19,22 +19,19 @@ import {
   buildRoleConfigs,
 } from "../../dispatch/factory.ts";
 
-/** Message shown by stub dispatch tools when the service is degraded on Pi. */
-const PI_UNAVAILABLE_MSG =
-  "Dispatch is not available on Pi — use opencode for multi-agent workflows.";
-
 /**
- * Creates a stub CanonicalToolDef that returns a fixed "not available" message.
- * Used when the service is permanently degraded (e.g., on Pi).
+ * Creates a stub CanonicalToolDef that returns the supplied "not available"
+ * message. Used when the service is permanently degraded because the host
+ * cannot create sessions.
  */
-function stubTool(description: string): CanonicalToolDef {
+function stubTool(description: string, message: string): CanonicalToolDef {
   return defineTool({
     description,
     args: {
-      _stub: z.string().optional().describe("This tool is not available on Pi"),
+      _stub: z.string().optional().describe("This tool is unavailable on this host"),
     },
     async execute() {
-      return PI_UNAVAILABLE_MSG;
+      return message;
     },
   });
 }
@@ -48,9 +45,9 @@ function stubTool(description: string): CanonicalToolDef {
  * Tool registration is deferred to ToolService (S8).
  *
  * Graceful degradation: when capabilities indicate the platform does not
- * support session creation (hasSessionCreate=false, as on Pi), the service
- * skips DispatchManager construction, registers stub tools that return
- * clear "not available" messages, and reports degraded health.
+ * support session creation (hasSessionCreate=false), the service skips
+ * DispatchManager construction, registers stub tools that return clear
+ * "not available" messages, and reports degraded health.
  */
 export class DispatchService implements PluginService, ToolContributor {
   readonly name: ServiceName = SERVICE_NAMES.dispatch;
@@ -71,9 +68,11 @@ export class DispatchService implements PluginService, ToolContributor {
     this.sessionClient = options?.sessionClient;
   }
 
-  /** True when the service is permanently degraded (e.g., on Pi). */
+  /** True when the service is permanently degraded (no session creation). */
   private degraded = false;
   private degradedDetail = "";
+  /** Platform id captured at init for degraded stub messages. */
+  private platformId = "unknown";
 
   async init(ctx: PluginContext): Promise<void> {
     // Check for graceful degradation: platforms without session create
@@ -81,7 +80,8 @@ export class DispatchService implements PluginService, ToolContributor {
     const caps = ctx.capabilities;
     if (!this.sessionClient && caps && !caps.hasSessionCreate) {
       this.degraded = true;
-      this.degradedDetail = `session create not supported on Pi and no session client provided`;
+      this.platformId = caps.platformId ?? "unknown";
+      this.degradedDetail = `session create not supported on ${this.platformId === "unknown" ? "this host" : this.platformId} and no session client provided`;
       logEvent("dispatch-service.degraded", { platformId: caps.platformId });
       return;
     }
@@ -183,7 +183,7 @@ export class DispatchService implements PluginService, ToolContributor {
 
   /**
    * Returns real compatibility `dispatch_*` tools (CanonicalToolDefs) when the
-   * service is healthy, or PI_UNAVAILABLE stub tools when degraded.
+   * service is healthy, or unavailable stub tools when degraded.
    *
    * These tools are the restored Phase-C compatibility shims backed by the
    * DispatchManager (see src/dispatch/tools.ts). They are consumed on the
@@ -192,12 +192,13 @@ export class DispatchService implements PluginService, ToolContributor {
    */
   getTools(): Record<string, CanonicalToolDef> {
     if (this.degraded) {
+      const message = sessionCreateUnavailableMessage(this.platformId);
       return {
-        dispatch: stubTool("Dispatch work to a subagent."),
-        dispatch_output: stubTool("Retrieve output from a completed background task."),
-        dispatch_cancel: stubTool("Cancel a running background task."),
-        dispatch_metrics: stubTool("Retrieve runtime dispatch metrics."),
-        dispatch_status: stubTool("Check background task liveness."),
+        dispatch: stubTool("Dispatch work to a subagent.", message),
+        dispatch_output: stubTool("Retrieve output from a completed background task.", message),
+        dispatch_cancel: stubTool("Cancel a running background task.", message),
+        dispatch_metrics: stubTool("Retrieve runtime dispatch metrics.", message),
+        dispatch_status: stubTool("Check background task liveness.", message),
       };
     }
     if (!this.dispatchManager) {
@@ -227,7 +228,7 @@ export class DispatchService implements PluginService, ToolContributor {
     return this.subagentModelKey;
   }
 
-  /** Whether the service is permanently degraded (e.g., on Pi). */
+  /** Whether the service is permanently degraded (no session creation). */
   isDegraded(): boolean {
     return this.degraded;
   }
