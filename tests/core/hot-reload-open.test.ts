@@ -1,18 +1,6 @@
 import { beforeEach as resetBeforeEach } from "vitest";
 /** Top-level teammate discovery must survive both fast and full reloads. */
 
-vi.doMock("../../src/platform/adapters/opencode/agent-registrar.ts", () => ({
-  OpencodeAgentRegistrar: class {
-    async sync() {
-      return { added: [], removed: [], unchanged: [] };
-    }
-    async register() {}
-    async unregister() {}
-    async list() {
-      return [];
-    }
-  },
-}));
 const { HotReloadService } = await import("../../src/core/services/hot-reload-service.ts");
 const { opencodeCapabilities } = await import("../../src/platform/capabilities.ts");
 const { roleOpenRegistry } = await import("../../src/resolver/registry.ts");

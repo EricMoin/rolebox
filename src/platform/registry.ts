@@ -40,6 +40,7 @@ import {
   type PlatformCapabilities,
 } from "./capabilities.ts";
 import { createSubLogger } from "../logger.ts";
+import { syncCodexTarget } from "./adapters/codex/sync.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,16 @@ export interface PlatformDescriptor {
    * the line rather than fabricate a "registered/not registered" verdict.
    */
   detectIntegration: () => PlatformIntegration | null;
+  /**
+   * Host-owned post-sync/install step, run by `rolebox sync <target>` AFTER the
+   * generic role-symlink sync.
+   *
+   * A host whose integration needs more than role symlinks implements it here
+   * (Codex: local plugin-marketplace bundle, `config.toml` registration and
+   * native agent files), so the neutral CLI calls the descriptor instead of
+   * naming the platform. Omitted = the generic sync is the whole step.
+   */
+  postSync?: (ctx: { syncTarget: string }) => Promise<void>;
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────
@@ -280,6 +291,9 @@ const codexDescriptor: PlatformDescriptor = {
   label: "Codex",
   paths: codexPlatformPaths,
   capabilities: codexCapabilities,
+  // Codex is extended through a local plugin marketplace, not role symlinks
+  // alone: this hook writes the bundle and registers it in `config.toml`.
+  postSync: syncCodexTarget,
   // Codex registration is detected in `<codexHome>/config.toml`: the local
   // marketplace table and the plugin enablement table that `rolebox sync codex`
   // writes, or an `[mcp_servers.rolebox]` table registering the same server

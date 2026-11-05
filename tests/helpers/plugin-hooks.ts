@@ -2,24 +2,57 @@
  * Typed entry point to the plugin handler map for the suites that drive the
  * real hook pipeline.
  *
- * `createPluginHooks` has two return paths: the handler map `HookService`
- * assembles for opencode, and `buildNoOpHandlers()` — the degraded fallback
- * that keeps opencode alive when hook-service never initialized. That fallback
- * is annotated `Record<string, unknown>` on purpose (its keys are checked
- * against the host `Hooks` contract by `satisfies Hooks`), so the union of the
- * two paths erases every handler signature and `hooks["chat.message"](...)`
- * does not type-check against production.
- *
- * These suites exercise the healthy path, so they narrow through the guard
- * below rather than widening production to fit a test: the map under test is
- * the one production returns, typed exactly as production declares it.
+ * `createPluginHooks` returns `Record<string, unknown>` now that the core no
+ * longer imports the host's `Hooks` type: the hook provider is
+ * platform-neutral and the host-shaped signatures live with the hosting
+ * entry/adapter. These suites drive the opencode path, so they narrow through
+ * the test-local host-shaped interface below and cast once — tests may know
+ * the host contract even though production core does not.
  */
 import { createPluginHooks } from "../../src/core/composition.ts";
 import type { CreatePluginHooksConfig } from "../../src/core/composition.ts";
-import type { HookService } from "../../src/core/services/hook-service.ts";
+import { normalizeOpencodeEvent } from "../../src/platform/adapters/opencode/event-bridge.ts";
 
-/** The handler map `HookService` assembles for opencode — production's own type. */
-export type PluginHookHandlers = ReturnType<HookService["getHandlers"]>;
+/**
+ * The opencode-shaped handler map these suites drive. It mirrors the handlers
+ * `HookService` assembles plus the adapter-provided `config` contribution;
+ * every signature is the host's, not the core's.
+ */
+export interface PluginHookHandlers {
+  tool: Record<string, unknown>;
+  event: (input: { event: unknown }) => Promise<void>;
+  "chat.message": (
+    input: { agent?: string; sessionID: string },
+    output: { parts: Array<{ type: string; text?: string }> },
+  ) => Promise<void>;
+  "tool.execute.before": (
+    input: { tool: string; sessionID: string; callID: string },
+    output: { args: { [key: string]: unknown } },
+  ) => Promise<void>;
+  "tool.execute.after": (
+    input: { sessionID?: string; tool?: string; callID?: string; args?: unknown },
+    output: unknown,
+  ) => Promise<void>;
+  "experimental.chat.system.transform": (
+    input: { sessionID?: string; agent?: string },
+    output: { system: string[] },
+  ) => Promise<void>;
+  "experimental.session.compacting": (
+    input: { sessionID: string },
+    output: { context: string[]; prompt?: string },
+  ) => Promise<void>;
+  config?: (config: Record<string, unknown>) => Promise<void>;
+  dispose: () => Promise<void>;
+}
+
+/**
+ * Configuration accepted by the helper: the production config with only the
+ * now-required `normalizeEvent` made optional (the helper supplies the
+ * opencode normalizer by default).
+ */
+type HealthyHooksConfig = Omit<CreatePluginHooksConfig, "normalizeEvent"> & {
+  normalizeEvent?: CreatePluginHooksConfig["normalizeEvent"];
+};
 
 /**
  * Structural check that a value is a usable handler map.
@@ -28,7 +61,7 @@ export type PluginHookHandlers = ReturnType<HookService["getHandlers"]>;
  * them no-ops), so this cannot tell the two paths apart — a suite that received
  * the fallback still fails on its behavioural assertions. What it rejects is a
  * map whose handlers are missing, i.e. the empty wrapper of a hook-service that
- * never ran, and it narrows to production's declared handler type.
+ * never ran, and it narrows (once) to the host-shaped interface.
  */
 function isPluginHookHandlers(value: unknown): value is PluginHookHandlers {
   if (typeof value !== "object" || value === null) return false;
@@ -44,13 +77,16 @@ function isPluginHookHandlers(value: unknown): value is PluginHookHandlers {
 
 /**
  * `createPluginHooks` for the healthy path: calls production and returns its
- * handler map with production's type, throwing instead of handing back a map
- * without handlers, so a suite cannot silently drive no-ops.
+ * handler map with the host-shaped type, throwing instead of handing back a
+ * map without handlers, so a suite cannot silently drive no-ops.
  */
 export async function createHealthyPluginHooks(
-  config: CreatePluginHooksConfig,
+  config: HealthyHooksConfig,
 ): Promise<PluginHookHandlers> {
-  const hooks = await createPluginHooks(config);
+  const hooks = await createPluginHooks({
+    ...config,
+    normalizeEvent: config.normalizeEvent ?? normalizeOpencodeEvent,
+  });
   if (!isPluginHookHandlers(hooks)) {
     throw new Error("createPluginHooks returned a handler map without the expected handlers");
   }

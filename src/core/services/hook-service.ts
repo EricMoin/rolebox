@@ -2,13 +2,9 @@ import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
-import type { Config, Hooks } from "@opencode-ai/plugin";
-import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-bridge.ts";
 import type { CanonicalEvent, CanonicalEventType } from "../../platform/types.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
 import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
-import { buildAgentConfig, transformPermission, type RoleboxAgentConfig } from "../../prompt/agent-config.ts";
-import { RoleMode } from "../../constants.ts";
 import { createSubLogger } from "../../logger.ts";
 import { hookState } from "../../hooks/state.ts";
 import type { HookDeps } from "../../hooks/deps.ts";
@@ -19,8 +15,6 @@ import { handleToolBefore } from "../../hooks/tool-before.ts";
 import { handleSystemTransform } from "../../hooks/system-transform.ts";
 import { handleCompacting } from "../../hooks/compaction.ts";
 import { CustomHookRegistry } from "../../hooks/custom/registry.ts";
-import { STOP_LOOP_COMMAND, STOP_LOOP_SIGNAL } from "../../loop/constants.ts";
-import type { ResolvedSubAgent } from "../../types.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 import type { LoopService } from "./loop-service.ts";
 import type { NotificationService } from "./notification-service.ts";
@@ -45,7 +39,11 @@ export class HookService implements PluginService {
 
   private customHookRegistry?: CustomHookRegistry;
   private deps?: HookDeps;
-  private handlers?: ReturnType<typeof this.buildHandlers>;
+  private handlers?: Record<string, unknown>;
+  /** The context of the last init(), read by the event handler (normalizer). */
+  private ctx?: PluginContext;
+  /** One-time warning flag for a host that supplied no event normalizer. */
+  private warnedMissingNormalizer = false;
   /**
    * Per-session throttle stamps for the liveness relay
    * (`sessionId → lastHeartbeatEmittedAt`). Bounded — entries older than the
@@ -61,6 +59,7 @@ export class HookService implements PluginService {
   async init(ctx: PluginContext): Promise<void> {
     const { resolvedRoles, roleFunctionsMap, directory } = ctx;
     const dir = directory;
+    this.ctx = ctx;
 
     if (dir) {
       functionRuntime.setStoreDirectory(dir);
@@ -143,7 +142,7 @@ export class HookService implements PluginService {
     log.debug("HookDeps assembled", { tools: Object.keys(toolService.getTools()).length });
 
     // --- Build handlers ---
-    const newHandlers = this.buildHandlers(toolService.getTools(), ctx.bus, resolvedRoles);
+    const newHandlers = this.buildHandlers(toolService.getTools(), ctx.bus);
 
     // Update the stable wrapper in-place so opencode's reference stays valid
     for (const key of Object.keys(this.handlersWrapper)) {
@@ -159,8 +158,8 @@ export class HookService implements PluginService {
     try { await this.customHookRegistry?.dispose(); } catch { /* best effort */ }
   }
 
-  getHandlers() {
-    return this.handlersWrapper as ReturnType<typeof this.buildHandlers>;
+  getHandlers(): Record<string, unknown> {
+    return this.handlersWrapper;
   }
 
   /**
@@ -180,12 +179,24 @@ export class HookService implements PluginService {
     return undefined;
   }
 
-  private buildHandlers(tools: Record<string, any>, bus: EventBus, resolvedRoles: any[]) {
+  private buildHandlers(tools: Record<string, any>, bus: EventBus) {
     const deps = this.deps!;
     const handlers = {
       tool: tools,
       event: async (input: { event: unknown }) => {
-        const canonical = normalizeOpencodeEvent(input.event);
+        // The host owns the native→canonical event vocabulary and supplies it
+        // through the context. Without it there is no truthful translation, so
+        // skip the event instead of inventing one; one warning is enough for
+        // the whole stream.
+        const normalize = this.ctx?.normalizeEvent;
+        if (!normalize) {
+          if (!this.warnedMissingNormalizer) {
+            this.warnedMissingNormalizer = true;
+            log.warn("Host supplied no event normalizer — skipping hook event handling");
+          }
+          return;
+        }
+        const canonical = normalize(input.event);
         await handleEvent(canonical, hookState, deps);
         // Emit to bus for notification and other subscribers
         const props = canonical.properties;
@@ -193,47 +204,6 @@ export class HookService implements PluginService {
         const agent = typeof props?.agent === "string" ? props.agent : undefined;
         if (sessionID) {
           await bus.emit(`event:${canonical.type}`, { sessionID, agent, properties: props });
-        }
-      },
-      config: async (config: Config) => {
-        function registerSubAgentConfigs(subagents: ResolvedSubAgent[], cfg: Config): void {
-          for (const sub of subagents) {
-            const subAgentCfg: Record<string, unknown> = {
-              prompt: sub.prompt,
-              mode: RoleMode.Subagent,
-              hidden: true,
-            };
-            if (sub.config.description) subAgentCfg.description = sub.config.description;
-            if (sub.config.model) subAgentCfg.model = sub.config.model;
-            if (sub.config.color) subAgentCfg.color = sub.config.color;
-            if (sub.config.variant) subAgentCfg.variant = sub.config.variant;
-            if (sub.config.temperature !== undefined) subAgentCfg.temperature = sub.config.temperature;
-            if (sub.config.top_p !== undefined) subAgentCfg.top_p = sub.config.top_p;
-            if (sub.config.tools) subAgentCfg.tools = sub.config.tools;
-            if (sub.config.permission) subAgentCfg.permission = transformPermission(sub.config.permission);
-
-            cfg.agent ??= {};
-            cfg.agent[sub.id] = subAgentCfg as RoleboxAgentConfig;
-            if (sub.subagents.length > 0) {
-              registerSubAgentConfigs(sub.subagents, cfg);
-            }
-          }
-        }
-
-        for (const resolved of resolvedRoles) {
-          const agentConfig = buildAgentConfig(resolved);
-          config.agent ??= {};
-          config.agent[resolved.id] = agentConfig;
-          registerSubAgentConfigs(resolved.subagents, config);
-        }
-
-        (config as Record<string, unknown>).command ??= {};
-        const commands = (config as Record<string, unknown>).command as Record<string, unknown>;
-        if (!commands[STOP_LOOP_COMMAND]) {
-          commands[STOP_LOOP_COMMAND] = {
-            template: STOP_LOOP_SIGNAL,
-            description: "Stop the active loop",
-          };
         }
       },
       "chat.message": async (
@@ -273,7 +243,7 @@ export class HookService implements PluginService {
       dispose: async () => {
         try { await this.customHookRegistry?.dispose(); } catch { /* best effort */ }
       },
-    } satisfies Hooks;
+    };
     return handlers;
   }
 

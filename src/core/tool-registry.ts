@@ -3,8 +3,8 @@
  * The ToolService collects all tool definitions from registered
  * ToolContributors and assembles the final `tool` object.
  *
- * Returns tool definitions in their native format (as returned by
- * the `tool()` factory from `@opencode-ai/plugin`), with a minimal
+ * Returns tool definitions in their native format (as returned by the host's
+ * `tool()` factory), with a minimal
  * `Record<string, any>` return type for flexibility.
  */
 export interface ToolContributor {

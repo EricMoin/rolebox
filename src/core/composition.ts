@@ -1,8 +1,8 @@
-import type { Hooks } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction } from "../types.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
+import type { IAgentRegistrar } from "../platform/ports/agent-registrar.ts";
 import type { PlatformCapabilities } from "../platform/capabilities.ts";
-import type { CanonicalToolDef } from "../platform/types.ts";
+import type { CanonicalEvent, CanonicalToolDef } from "../platform/types.ts";
 import { resolvePlatformCapabilities } from "../platform/registry.ts";
 import { hookState } from "../hooks/state.ts";
 import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
@@ -47,9 +47,9 @@ function listDegradedServices(core: PluginCore): string[] {
  * diagnostic is the error log emitted by the caller, not a thrown Error that
  * would take the whole plugin (and server) down. Never return undefined —
  * opencode iterates the handler map, so absent keys must be real no-ops and
- * `tool` must be a usable (empty) tool map. The key set is checked against the
- * host's `Hooks` contract (`satisfies Hooks`), so a renamed or removed
- * opencode hook key fails the build instead of silently degrading to a no-op.
+ * `tool` must be a usable (empty) tool map. Host-owned handlers passed through
+ * `extraHandlers` are merged over this map below, so they survive the degraded
+ * path too.
  */
 function buildNoOpHandlers(): Record<string, unknown> {
   const noop = async () => {};
@@ -63,7 +63,7 @@ function buildNoOpHandlers(): Record<string, unknown> {
     "experimental.chat.system.transform": noop,
     "experimental.session.compacting": noop,
     dispose: noop,
-  } satisfies Hooks;
+  };
 }
 
 // Re-exports backed by hookState (unchanged — consumers import these directly)
@@ -102,12 +102,32 @@ export interface CreatePluginHooksConfig {
    */
   platformId?: string;
   /**
+   * The host's native→canonical event translation. REQUIRED on this
+   * composition path: the event handler it installs is the host's event
+   * stream, and requiring the normalizer prevents silent degradation to an
+   * event pipeline that never sees a real event.
+   */
+  normalizeEvent: (raw: unknown) => CanonicalEvent;
+  /**
    * Declared-graph tool face assembled by the host's own outcome capability
    * layer. Forwarded to the context so the tool service registers `graph_*`
    * tools; absent means the host has no such layer and registers none.
    */
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
   isGraphWorker?: (sessionID: string) => boolean;
+  /**
+   * Platform agent registrar supplied by the host entry that owns the
+   * platform's registration mechanics. Forwarded to the context; absent means
+   * this host has no registrar and agent-file sync is skipped.
+   */
+  agentRegistrar?: IAgentRegistrar;
+  /**
+   * Host-owned handlers the core does not itself provide (the opencode config
+   * contribution, for example). Merged into the returned map on both the
+   * healthy and the degraded path, so a host handler is never lost because a
+   * core service degraded.
+   */
+  extraHandlers?: Record<string, unknown>;
 }
 
 export async function createPluginHooks(config: CreatePluginHooksConfig) {
@@ -139,7 +159,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
 
-  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, outcomeGraphTools, isGraphWorker: config.isGraphWorker, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
+  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, normalizeEvent: config.normalizeEvent, outcomeGraphTools, isGraphWorker: config.isGraphWorker, agentRegistrar: config.agentRegistrar, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget). The
   // flush is hoisted out of the guard so the process-fatal reporter below
@@ -181,7 +201,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
     logEvent("plugin-hooks.hook-service-unavailable", {
       degradedServices: listDegradedServices(core),
     });
-    return buildNoOpHandlers();
+    return { ...buildNoOpHandlers(), ...config.extraHandlers };
   }
 
   const handlers = hookService.getHandlers();
@@ -189,13 +209,13 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
     // hook-service was skipped or degraded (init never ran, so its handler
     // wrapper is empty). Log the degraded service chain and fall back to no-op
     // handlers — never return undefined, which would break opencode's hook
-    // registration.
+    // registration. Host handlers still win over the no-ops.
     logEvent("plugin-hooks.handlers-uninitialized", {
       degradedServices: listDegradedServices(core),
       failedServiceChain: [SERVICE_NAMES.hook, ...listDegradedServices(core)],
     });
-    return buildNoOpHandlers();
+    return { ...buildNoOpHandlers(), ...config.extraHandlers };
   }
 
-  return handlers;
+  return { ...handlers, ...config.extraHandlers };
 }

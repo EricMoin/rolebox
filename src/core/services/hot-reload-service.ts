@@ -15,7 +15,6 @@ import { initModelResolver } from "../../resolver/model-resolver.ts";
 import { resolveSkills } from "../../resolver/skill-resolver.ts";
 import { buildAgentPrompt } from "../../prompt/builder.ts";
 import { syncAllAgents } from "../../sync/agent-files.ts";
-import { OpencodeAgentRegistrar } from "../../platform/adapters/opencode/agent-registrar.ts";
 import { syncSkillSymlinks } from "../../sync/skill-symlinks.ts";
 import type { ResolvedFunction, ResolvedRole, RoleConfig } from "../../types.ts";
 import { ROLE_YAML } from "../../constants.ts";
@@ -77,6 +76,8 @@ export class HotReloadService implements PluginService {
   private pendingChanges: Array<{ watchedDir: string; filename: string }> = [];
   /** Cache of role.yaml content hashes for detecting which roles actually changed. */
   private roleHashCache = new Map<string, string>();
+  /** Latches the "declared file sync but injected no registrar" warning to one line. */
+  private agentSyncWarned = false;
 
   async init(ctx: PluginContext): Promise<void> {
     this.ctx = ctx;
@@ -279,7 +280,7 @@ export class HotReloadService implements PluginService {
 
       // 5. Sync skill symlinks and agents
       syncSkillSymlinks(this.ctx.resolvedRoles, this.ctx.globalSkillsDir!);
-      await syncAllAgents(this.ctx.resolvedRoles, new OpencodeAgentRegistrar());
+      await this.syncAgents(this.ctx.resolvedRoles);
 
       // 6. Clear extension module cache
       try {
@@ -331,7 +332,7 @@ export class HotReloadService implements PluginService {
     const newResolvedRoles = await resolveAllRoles(newRoles, resolverCtx);
 
     // 4. Sync agent files and skill symlinks
-    await syncAllAgents(newResolvedRoles, new OpencodeAgentRegistrar());
+    await this.syncAgents(newResolvedRoles);
     syncSkillSymlinks(newResolvedRoles, this.ctx.globalSkillsDir!);
 
     // 5. Update the resolvedRoles array in-place (keep the reference stable)
@@ -393,6 +394,29 @@ export class HotReloadService implements PluginService {
       resolved: newResolvedRoles.length,
       skipped: newRoles.size - newResolvedRoles.length,
     };
+  }
+
+  /**
+   * Sync agent definitions through the host's registrar.
+   *
+   * The registrar is supplied by the host entry because it owns the platform's
+   * registration mechanics; this shared service must not construct one. A host
+   * that declares `hasAgentFileSync: false` registers agents in-process and
+   * needs no file sync. A host that declares file sync but injected no
+   * registrar is a wiring gap: warn once and skip, rather than falling back to
+   * another platform's file layout.
+   */
+  private async syncAgents(resolvedRoles: ResolvedRole[]): Promise<void> {
+    if (!this.ctx.capabilities.hasAgentFileSync) return;
+    const registrar = this.ctx.agentRegistrar;
+    if (!registrar) {
+      if (!this.agentSyncWarned) {
+        this.agentSyncWarned = true;
+        log.warn("Agent file sync skipped: host declares hasAgentFileSync but injected no agentRegistrar");
+      }
+      return;
+    }
+    await syncAllAgents(resolvedRoles, registrar);
   }
 
   // ── Incremental diff helpers ────────────────────────────────────────

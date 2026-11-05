@@ -1,14 +1,10 @@
 import { defineCommand } from "citty";
 import { loadLock } from "../config.ts";
-import { getSyncTarget, getTargetConfigDir, getTargetSkillsDir, getRolePath } from "../paths.ts";
+import { getSyncTarget, getTargetSkillsDir, getRolePath } from "../paths.ts";
 import { syncBuiltinSkills } from "../../sync/builtin-skills.ts";
 import { SyncTarget } from "../../constants.ts";
-import {
-  writeCodexPluginBundle,
-  registerCodexPlugin,
-  resolveRoleboxPackageRoot,
-} from "../../platform/adapters/codex/plugin-bundle.ts";
 import { scanModelsForTarget } from "../../platform/model-catalog/index.ts";
+import { PLATFORM_REGISTRY } from "../../platform/registry.ts";
 import { findPlaceholderRoles } from "../role-models.ts";
 import type { RoleModelEntry } from "../role-models.ts";
 import {
@@ -17,15 +13,12 @@ import {
   lstatSync,
   unlinkSync,
   readdirSync,
-  readFileSync,
   statSync,
   cpSync,
   rmSync,
 } from "node:fs";
 import { join } from "node:path";
 import { createDirSymlink } from "../../utils/symlink.ts";
-import { syncCodexAgents } from "../../platform/adapters/codex/agents.ts";
-import { initializeRoleboxRuntime, resolveRoleboxDirectories } from "../../platform/factory.ts";
 
 /**
  * Build a filesystem-safe, collision-free backup path beside the target:
@@ -43,34 +36,6 @@ function makeBackupPath(syncTarget: string, role: string): string {
     n++;
   }
   return backupPath;
-}
-
-/**
- * Read the package version the way `src/cli/main.ts` does — from the
- * package.json at the resolved package root — so the Codex plugin manifest is
- * stamped with the real released version instead of a hardcoded one.
- */
-function readPackageVersion(packageRoot: string): string {
-  const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as {
-    version: string;
-  };
-  return pkg.version;
-}
-
-/**
- * Warn when the bundle points Codex at an MCP server entry that does not
- * exist yet. A source checkout that was never built still syncs — Codex just
- * cannot start the server until rolebox is built or reinstalled.
- */
-export function warnIfCodexServerEntryMissing(bundle: {
-  serverEntry: string;
-  serverEntryExists: boolean;
-}): void {
-  if (bundle.serverEntryExists) return;
-  console.warn(
-    `Warning: the Codex MCP server entry ${bundle.serverEntry} does not exist. ` +
-      "Build or reinstall rolebox before starting Codex (for a source checkout, `npm run build`).",
-  );
 }
 
 /**
@@ -179,43 +144,13 @@ export async function sync(target: string, relink = false): Promise<void> {
   if (cleaned > 0) parts.push(`${cleaned} cleaned`);
   console.log(parts.join(", "));
 
-  // ── Codex plugin bundle ─────────────────────────────────────────────
-  // Codex is extended through a local plugin marketplace, not role symlinks
-  // alone: write the bundle (manifest, MCP config, marketplace manifest,
-  // skills link) and register it in the Codex config.toml. Every other target
-  // is untouched by this branch.
-  if (target === SyncTarget.Codex) {
-    const packageRoot = resolveRoleboxPackageRoot(import.meta.url);
-    const bundle = writeCodexPluginBundle({
-      codexHome: getTargetConfigDir(target),
-      packageRoot,
-      version: readPackageVersion(packageRoot),
-    });
-    warnIfCodexServerEntryMissing(bundle);
-    try {
-      registerCodexPlugin(bundle.configPath, bundle.marketplaceDir);
-    } catch (error) {
-      // The bundle is already on disk; name what did and did not happen before
-      // failing, and say that a retry is safe (both steps are idempotent).
-      console.error(
-        `Codex plugin: wrote the marketplace directory ${bundle.marketplaceDir}, ` +
-          `but registering it in ${bundle.configPath} failed: ` +
-          `${error instanceof Error ? error.message : String(error)}. ` +
-          "Fix the cause and re-run `rolebox sync codex` — the sync is safe to repeat.",
-      );
-      throw error;
-    }
-    console.log(`Codex plugin: registered ${bundle.marketplaceDir} in ${bundle.configPath}`);
-    console.log("Codex plugin: install or refresh with `codex plugin add rolebox@rolebox`, then restart Codex");
-    const directories = resolveRoleboxDirectories({ platformId: "codex" });
-    const { resolvedRoles } = await initializeRoleboxRuntime({
-      directories: { ...directories, roleboxDir: syncTarget },
-      roleFunctionsMap: new Map(),
-    });
-    const agents = syncCodexAgents(resolvedRoles, { codexHome: directories.configDir });
-    for (const warning of agents.warnings) console.warn(`Warning: ${warning}`);
-    console.log(`Codex agents: ${agents.agents.filter(agent => agent.parentId === undefined).length} public roles, ${agents.agents.filter(agent => agent.parentId !== undefined).length} private children; restart Codex to refresh native agents`);
-  }
+  // ── Host-owned post-sync/install step ───────────────────────────────
+  // A target whose integration needs more than role symlinks declares a
+  // `postSync` hook on its platform descriptor (Codex writes its plugin
+  // bundle and registers it in `config.toml`). The CLI stays neutral: it asks
+  // the descriptor for the target and calls the hook when one is declared.
+  const descriptor = PLATFORM_REGISTRY.find((p) => p.id === target);
+  await descriptor?.postSync?.({ syncTarget });
 
   // ── Relinked role directories ───────────────────────────────────────
   // Only populated by an explicit `--relink`. The original directory was

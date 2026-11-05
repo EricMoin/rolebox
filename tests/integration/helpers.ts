@@ -32,6 +32,8 @@ import { roleFunctionsMap } from "../../src/resolver/registry.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../src/types.ts";
 import { RoleMode } from "../../src/constants.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
+import { normalizeOpencodeEvent } from "../../src/platform/adapters/opencode/event-bridge.ts";
+import { createOpencodeConfigHandler } from "../../src/platform/adapters/opencode/hook-config.ts";
 import type { Hooks } from "@opencode-ai/plugin";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -326,8 +328,12 @@ export async function createTestContext(): Promise<TestContext> {
 
   // ── Create hooks via production composition ─────────────────────────
   const client = createMockClient();
+  // The SAME array instance reaches the composition and the host-owned config
+  // handler, so a hot reload that mutates it in place is visible to both — the
+  // behaviour the config contribution had when it lived in the core.
+  const resolvedRoles = [role];
   const hooks = await createPluginHooks({ platformId: "opencode",
-    resolvedRoles: [role],
+    resolvedRoles,
     session: new OpencodeSessionAdapter(client),
     roleFunctionsMap,
     directory: tmpDir,
@@ -335,7 +341,9 @@ export async function createTestContext(): Promise<TestContext> {
     globalSkillsDir,
     configDir,
     builtinDir,
-  });
+    normalizeEvent: normalizeOpencodeEvent,
+    extraHandlers: { config: createOpencodeConfigHandler(resolvedRoles) },
+  }) as unknown as Hooks;
 
   // ── Build cleanup ──────────────────────────────────────────────────
   let cleaned = false;

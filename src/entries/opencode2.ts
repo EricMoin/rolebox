@@ -38,7 +38,10 @@
  */
 
 import { Plugin } from "@opencode/plugin";
+import { OpencodeAgentRegistrar } from "../platform/adapters/opencode/agent-registrar.ts";
 import { OpencodeWorkerTools } from "../platform/adapters/opencode/worker-tools.ts";
+import { normalizeOpencodeEvent } from "../platform/adapters/opencode/event-bridge.ts";
+import { createOpencodeConfigHandler } from "../platform/adapters/opencode/hook-config.ts";
 import type { Plugin as Opencode2Plugin } from "@opencode/plugin";
 import {
   Opencode2SessionAdapter,
@@ -90,11 +93,10 @@ interface Opencode2CanonicalEvent {
 /**
  * The subset of the v1 hook handler map this entry adapts, described
  * structurally so no `@opencode-ai/plugin` type reaches this module's runtime
- * graph. Every signature is copied from the handler the HookService installs
- * (src/core/services/hook-service.ts:192-262); `createPluginHooks` returns that
- * same map (src/core/composition.ts:176-190) and no-op objects built from
- * `satisfies Hooks` (:50-61), so this view is the entry's own narrowing of what
- * the composition promises at compile time.
+ * graph. Every signature is copied from the handlers the HookService installs
+ * (src/core/services/hook-service.ts); `createPluginHooks` returns that same
+ * map plus the host handlers (src/core/composition.ts), so this view is the
+ * entry's own narrowing of what the composition promises at compile time.
  */
 interface Opencode2Handlers {
   tool: Record<string, unknown>;
@@ -589,8 +591,14 @@ export function createOpencode2Plugin(
         configDir: dirs.configDir,
         builtinDir: dirs.builtinDir,
         capabilities: opencodeV2Capabilities(),
+        normalizeEvent: normalizeOpencodeEvent,
         ...(graphHost === undefined ? {} : { outcomeGraphTools: graphHost.createTools() }),
         isGraphWorker: sessionID => graphHost?.host.workerPrincipalOf(sessionID) !== undefined,
+        // Supplied for parity with the host-owned registrar seam. v2 declares
+        // `hasAgentFileSync: false` (agents register in-process), so the shared
+        // hot-reload runtime never drives this registrar's files.
+        agentRegistrar: new OpencodeAgentRegistrar(),
+        extraHandlers: { config: createOpencodeConfigHandler(resolvedRoles) },
       })) as unknown as Opencode2Handlers;
       const workerCapabilityTools = graphHost === undefined ? {} : workerTools.createTools();
 

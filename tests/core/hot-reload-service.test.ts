@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { HotReloadService } from "../../src/core/services/hot-reload-service.ts";
 import { clearExtensionModuleCache } from "../../src/extensions/loader.ts";
-import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { opencodeCapabilities, opencodeV2Capabilities } from "../../src/platform/capabilities.ts";
+import type { IAgentRegistrar } from "../../src/platform/ports/agent-registrar.ts";
+import { configureLogging } from "../../src/log/index.ts";
+import { createMemorySink } from "../../src/log/sinks/memory.ts";
+import { beginLogTest, endLogTest } from "../helpers/log.ts";
 import { HookService } from "../../src/core/services/hook-service.ts";
 import { EventBus } from "../../src/core/event-bus.ts";
 import type { PluginContext } from "../../src/core/context.ts";
@@ -52,6 +56,23 @@ function makeCtx(dir: string, core: PluginCoreLike = makeMockCore()): PluginCont
 }
 
 // ── tests ──────────────────────────────────────────────────────────
+
+/** A registrar double typed as the port, so it cannot drift from IAgentRegistrar. */
+function makeFakeRegistrar(): {
+  registrar: IAgentRegistrar;
+  sync: ReturnType<typeof vi.fn>;
+} {
+  const sync = vi.fn(async () => ({ added: [], removed: [], unchanged: [] }));
+  return {
+    registrar: {
+      sync,
+      register: vi.fn(async () => {}),
+      unregister: vi.fn(async () => {}),
+      list: vi.fn(async () => []),
+    },
+    sync,
+  };
+}
 
 async function waitForRestart(core: any, expectedCalls = 1, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -409,5 +430,70 @@ describe("HotReloadService", () => {
     } finally {
       rmSync(hookTempDir, { recursive: true, force: true });
     }
+  });
+
+  // ── PL-03: the host owns agent registration ───────────────────────
+
+  it("syncs agents through the registrar injected by the host", async () => {
+    const svc = new HotReloadService();
+    const core = makeMockCore();
+    const ctx = makeCtx(tempDir, core);
+    const { registrar, sync } = makeFakeRegistrar();
+    ctx.agentRegistrar = registrar;
+    await svc.init(ctx);
+
+    await svc.triggerReload();
+
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(core.restartService).toHaveBeenCalledWith("dispatch-service");
+
+    await svc.dispose();
+  });
+
+  it("skips agent file sync with one warning when no registrar was injected", async () => {
+    const logState = beginLogTest();
+    const memory = createMemorySink({ capacity: 64 });
+    configureLogging({ sinks: [memory], level: "debug" });
+
+    const svc = new HotReloadService();
+    const core = makeMockCore();
+    // opencodeCapabilities() declares hasAgentFileSync: true; no registrar is
+    // injected, so the sync must be skipped instead of falling back to a
+    // concrete platform registrar.
+    await svc.init(makeCtx(tempDir, core));
+    try {
+      await svc.triggerReload();
+      await svc.triggerReload();
+
+      const warnings = memory.records().filter(
+        record => record.level === "warn" && record.message.includes("Agent file sync skipped"),
+      );
+      // Latched: the wiring gap is reported once, not once per reload.
+      expect(warnings).toHaveLength(1);
+      // The reload itself still completes.
+      expect(core.restartService).toHaveBeenCalledTimes(2);
+    } finally {
+      await svc.dispose();
+      endLogTest(logState);
+    }
+  });
+
+  it("skips agent file sync on a host whose capabilities declare no file sync", async () => {
+    const svc = new HotReloadService();
+    const core = makeMockCore();
+    const ctx = makeCtx(tempDir, core);
+    // The real v2 host shape: agents register in-process, so there is no file
+    // registrar to drive even when one is injected.
+    ctx.capabilities = opencodeV2Capabilities();
+    const { registrar, sync } = makeFakeRegistrar();
+    ctx.agentRegistrar = registrar;
+    await svc.init(ctx);
+
+    await svc.triggerReload();
+
+    expect(sync).not.toHaveBeenCalled();
+    expect(core.restartService).toHaveBeenCalledWith("dispatch-service");
+
+    await svc.dispose();
   });
 });

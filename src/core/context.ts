@@ -3,7 +3,8 @@ import type { PluginCoreLike } from "./service.ts";
 import type { EventBus } from "./event-bus.ts";
 import type { PlatformCapabilities } from "../platform/capabilities.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
-import type { CanonicalToolDef } from "../platform/types.ts";
+import type { IAgentRegistrar } from "../platform/ports/agent-registrar.ts";
+import type { CanonicalEvent, CanonicalToolDef } from "../platform/types.ts";
 
 /**
  * Context passed to every PluginService's init() method.
@@ -40,6 +41,20 @@ export interface PluginContext {
    */
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
   isGraphWorker?: (sessionID: string) => boolean;
+  /**
+   * The host's native→canonical event translation, supplied by the host entry
+   * that owns the platform's event vocabulary. Forwarded to the hook service,
+   * which calls it for every raw host event. Absent means this host has no
+   * event stream, so the hook service logs once and skips event handling
+   * instead of inventing an event.
+   */
+  normalizeEvent?: (raw: unknown) => CanonicalEvent;
+  /**
+   * Platform agent registrar supplied by the host entry, which owns the
+   * platform's registration mechanics. Absent means this host has no registrar
+   * and agent-file sync is skipped (see HotReloadService).
+   */
+  agentRegistrar?: IAgentRegistrar;
   /** Platform capabilities for feature detection and graceful degradation.
    * Always present: the composition layer resolves the entry's explicit
    * declaration (or its platformId) BEFORE constructing the context, so an

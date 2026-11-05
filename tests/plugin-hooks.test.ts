@@ -5,6 +5,7 @@ import { tmpdir as osTmpdir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap, pendingCorrections } from "../src/core/composition.js";
 import { OpencodeSessionAdapter } from "../src/platform/adapters/opencode/session.js";
+import { normalizeOpencodeEvent } from "../src/platform/adapters/opencode/event-bridge.js";
 import { roleFunctionsMap } from "../src/entries/opencode.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../src/types.js";
 import { RoleMode } from "../src/constants.js";
@@ -117,8 +118,8 @@ describe("Plugin Hooks - Manager Singleton", () => {
       const client = createMockClient();
       const roles = [makeRoleWithSubagents()];
 
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: tmpDir });
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: tmpDir });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: tmpDir });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: tmpDir });
 
       expect(managerMap.size).toBe(1);
       expect(managerMap.has(tmpDir)).toBe(true);
@@ -137,8 +138,8 @@ describe("Plugin Hooks - Manager Singleton", () => {
       const client = createMockClient();
       const roles = [makeRoleWithSubagents()];
 
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: dir1 });
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: dir2 });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: dir1 });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: dir2 });
 
       expect(managerMap.size).toBe(2);
       expect(managerMap.has(dir1)).toBe(true);
@@ -159,8 +160,8 @@ describe("Plugin Hooks - Manager Singleton", () => {
       // Spy on process.on before the first call
       const processOnSpy = vi.fn(process.on.bind(process));
 
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: tmpDir });
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: tmpDir });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: tmpDir });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: roles, session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: tmpDir });
 
       // The guard should prevent duplicate registrations — process.on is called
       // once for each event (exit, SIGINT, SIGTERM), not twice
@@ -187,7 +188,7 @@ describe("Plugin Hooks - Config Injection", () => {
         config: { mode: RoleMode.Primary } as any,
       });
 
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: [primary], session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: tmpDir });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: [primary], session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: tmpDir });
 
       expect(managerMap.has(tmpDir)).toBe(true);
       const manager = managerMap.get(tmpDir)!;
@@ -213,7 +214,7 @@ describe("Plugin Hooks - Config Injection", () => {
       const primary = makeRoleWithSubagents();
       // No dispatchConfig set
 
-      await createPluginHooks({ platformId: "opencode", resolvedRoles: [primary], session: new OpencodeSessionAdapter(client), roleFunctionsMap, directory: tmpDir });
+      await createPluginHooks({ platformId: "opencode", resolvedRoles: [primary], session: new OpencodeSessionAdapter(client), roleFunctionsMap, normalizeEvent: normalizeOpencodeEvent, directory: tmpDir });
 
       const manager = managerMap.get(tmpDir)!;
       const config = manager.getConfig();

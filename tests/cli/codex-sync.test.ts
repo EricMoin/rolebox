@@ -698,7 +698,9 @@ describe("rolebox sync codex", () => {
   });
 
   it("warns with the missing server entry path before Codex is started", async () => {
-    const { warnIfCodexServerEntryMissing } = await import("../../src/cli/commands/sync.ts");
+    const { warnIfCodexServerEntryMissing } = await import(
+      "../../src/platform/adapters/codex/sync.ts"
+    );
     const warnings: string[] = [];
     const origWarn = console.warn;
     console.warn = (...args: unknown[]) => warnings.push(args.join(" "));

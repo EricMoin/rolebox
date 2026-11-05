@@ -3,6 +3,8 @@ import { OpencodeAgentRegistrar } from "../platform/adapters/opencode/agent-regi
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
 import { createPluginHooks } from "../core/composition.ts";
 import { OpencodeSessionAdapter } from "../platform/adapters/opencode/session.ts";
+import { normalizeOpencodeEvent } from "../platform/adapters/opencode/event-bridge.ts";
+import { createOpencodeConfigHandler } from "../platform/adapters/opencode/hook-config.ts";
 import {
   OpencodeGraphHost,
   opencodeGraphSessionPort,
@@ -122,8 +124,11 @@ const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
     configDir: dirs.configDir,
     builtinDir: dirs.builtinDir,
     capabilities: opencodeCapabilities(),
+    normalizeEvent: normalizeOpencodeEvent,
     ...(graphHost === undefined ? {} : { outcomeGraphTools: graphHost.createTools() }),
     isGraphWorker: sessionID => graphHost?.host.workerPrincipalOf(sessionID) !== undefined,
+    agentRegistrar: new OpencodeAgentRegistrar(),
+    extraHandlers: { config: createOpencodeConfigHandler(resolvedRoles) },
   }) as Hooks;
 
   // The session ends and the session STATES the declared-graph host reads arrive
