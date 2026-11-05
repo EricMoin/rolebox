@@ -62,6 +62,10 @@ interface InfoJson {
   skills: string[];
   functions: string[];
   subagents: Array<{ name: string; description?: string }>;
+  /**
+   * @deprecated Retained for backward compatibility; populated only when an
+   * opencode target is registered.
+   */
   sync: { synced: boolean; symlinkValid: boolean };
   syncTargets: Array<{ target: string; label: string; present: boolean; synced: boolean; symlinkValid: boolean; linkPath: string }>;
   integrityCheck?: { passed: boolean; expected: string; actual: string };
@@ -117,8 +121,10 @@ export async function info(spec: string, jsonOutput: boolean, checkIntegrity: bo
       linkPath,
     };
   });
-  // opencode remains the backward-compatible top-level `sync` field.
-  const opencodeSync = syncTargets.find((t) => t.target === "opencode") ?? syncTargets[0];
+  // opencode remains the backward-compatible top-level `sync` field. When no
+  // opencode target is registered it is reported as unsynced — never borrowed
+  // from another target's state.
+  const opencodeSync = syncTargets.find((t) => t.target === "opencode");
   const synced = opencodeSync?.synced ?? false;
   const symlinkValid = opencodeSync?.symlinkValid ?? false;
 

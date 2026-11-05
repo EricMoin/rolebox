@@ -448,7 +448,7 @@ export default defineCommand({
     },
     target: {
       type: "string",
-      description: "Sync target: opencode, pi, or dsh (default: opencode)",
+      description: `Sync target: ${SYNC_TARGET_VALUES.join(", ")} (default: ${SYNC_TARGET_VALUES[0]})`,
       alias: "t",
     },
   },

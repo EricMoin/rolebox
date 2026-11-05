@@ -31,7 +31,7 @@ When reviewing code, check:
 
 1. \`skills/{name}/SKILL.md\` — role-local directory
 2. \`skills/{name}.md\` — role-local single file
-3. Global opencode skills (under \`~/.config/opencode/skills/\`)
+3. Global harness skills (in the harness's global skills directory)
 
 See full docs: https://github.com/EricMoin/rolebox
 `;
@@ -68,7 +68,7 @@ Check for:
 ## Resolution order
 
 1. \`{roleDir}/functions/{name}.md\` — role-local override
-2. \`~/.config/opencode/functions/{name}.md\` — global user-defined
+2. The harness's global functions directory (\`<global>/{name}.md\`) — global user-defined
 3. Built-in (\`plan\`, \`execute\`) — shipped with rolebox
 
 See full docs: https://github.com/EricMoin/rolebox

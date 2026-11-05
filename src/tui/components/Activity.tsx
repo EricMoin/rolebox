@@ -196,7 +196,7 @@ export function renderGraphActivity(props: {
   const { c, graph, snap, sessionScope, currentSessionId } = props;
   // agentId might be a session ID; if so, shorten it
   const rawAgent = graph.agentId ?? "(unknown)";
-  const orch = rawAgent.startsWith("ses_") ? shortSessionId(rawAgent) : rawAgent;
+  const orch = shortSessionId(rawAgent);
 
   // Build node status: completed → ✓, frontier → · (or • if matching a running task)
   const allNodes = [...graph.completed, ...graph.frontier];

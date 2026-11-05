@@ -1,9 +1,6 @@
 import { join, sep } from "node:path";
 import { SKILL_MD } from "../constants.ts";
-import {
-  defaultPlatformPaths,
-  piPlatformPaths,
-} from "../platform/paths.ts";
+import { defaultPlatformPaths } from "../platform/paths.ts";
 import { resolvePlatformPaths } from "../platform/registry.ts";
 
 // ── Path normalization ───────────────────────────────────────────
@@ -105,19 +102,4 @@ export function agentsDir(): string {
  */
 export function platformAgentsDir(platformId?: string): string {
   return resolvePlatformPaths(platformId).agentsDir;
-}
-
-/**
- * Returns the platform-specific agent file path.
- * - `"pi"` → `{piPlatformPaths().agentsDir}/{agentId}/SKILL.md`
- * - default (or `"opencode"`) → `agentFilePath(agentId)`
- */
-export function platformAgentFilePath(
-  agentId: string,
-  platformId?: string,
-): string {
-  if (platformId === "pi") {
-    return join(piPlatformPaths().agentsDir, agentId, SKILL_MD);
-  }
-  return agentFilePath(agentId);
 }

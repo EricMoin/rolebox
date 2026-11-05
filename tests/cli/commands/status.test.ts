@@ -30,11 +30,6 @@ vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
     getSyncTarget: (target: string) => join(targetBase(target), "rolebox"),
     getTargetConfigDir: (target: string) => targetBase(target),
     getTargetSkillsDir: (target: string) => join(targetBase(target), "skills"),
-    getOpencodeSkillsDir: () => {
-      const xdg = process.env.XDG_CONFIG_HOME;
-      if (xdg) return join(xdg, "opencode", "skills");
-      return join(homedir(), ".config", "opencode", "skills");
-    },
   },
 }));
 
@@ -112,6 +107,12 @@ function createSyncSymlink(roleId: string, target: string): void {
   const syncDir = syncTarget();
   mkdirSync(syncDir, { recursive: true });
   createDirSymlink(target, join(syncDir, roleId));
+}
+
+function createSyncSymlinkFor(syncTarget: string, roleId: string, roleDir: string): void {
+  const syncDir = join(targetBase(syncTarget), "rolebox");
+  mkdirSync(syncDir, { recursive: true });
+  createDirSymlink(roleDir, join(syncDir, roleId));
 }
 
 function createOpencodeConfig(plugins: string[]): void {
@@ -289,6 +290,48 @@ describe("status", () => {
     expect(oc.totalCount).toBe(1);
     expect(pi.syncedCount).toBe(0);
     expect(pi.totalCount).toBe(1);
+  });
+
+  it("reports a role as synced when any registered target has it", async () => {
+    const roleDir = createRoleDir("oh-my-role", "pi-only", "1.0.0");
+    createLockFile([{
+      role: "pi-only",
+      registry: "oh-my-role",
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      integrity: "sha256-pi",
+    }]);
+    // Deploy to pi only, and drop opencode from the platform registry entirely.
+    createSyncSymlinkFor("pi", "pi-only", roleDir);
+
+    vi.doMock("../../../src/platform/registry.ts", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/platform/registry.ts")>();
+      return {
+        ...actual,
+        PLATFORM_REGISTRY: actual.PLATFORM_REGISTRY.filter((p) => p.id !== "opencode"),
+      };
+    });
+    try {
+      const { status } = await importStatus();
+      const { logs, run } = captureLogs(() => status(false, true));
+      await run();
+
+      const parsed = JSON.parse(logs[0]);
+      const role = parsed.roles.find((r: any) => r.role === "pi-only");
+      expect(role.synced).toBe(true);
+      expect(role.symlinkValid).toBe(true);
+      const pi = parsed.targets.find((t: any) => t.target === "pi");
+      expect(pi.syncedCount).toBe(1);
+      // The deprecated opencode block must fall back to empty/false, not to
+      // another target's state.
+      expect(parsed.opencode).toEqual({
+        syncTarget: "",
+        pluginRegistered: false,
+        skillSymlinks: [],
+      });
+    } finally {
+      vi.doUnmock("../../../src/platform/registry.ts");
+    }
   });
 
   it("handles missing config dir gracefully", async () => {

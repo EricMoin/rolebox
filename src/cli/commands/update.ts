@@ -172,7 +172,7 @@ export async function update(specificRole: string | undefined, noCache: boolean,
   if (upToDate > 0) parts.push(`${upToDate} already up to date`);
   out(parts.join(". ") + ".");
   if (updated > 0) {
-    out("Run `rolebox sync opencode` to deploy changes");
+    out("Run `rolebox sync` to deploy changes");
   }
 }
 

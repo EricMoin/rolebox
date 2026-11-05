@@ -11,7 +11,6 @@ import {
   agentFilePath,
   agentsDir,
   platformAgentsDir,
-  platformAgentFilePath,
   toPosixPath,
   samePath,
 } from "../../src/utils/paths.ts";
@@ -93,34 +92,6 @@ describe("paths", () => {
   it('platformAgentsDir("opencode") falls back to agentsDir()', () => {
     expect(platformAgentsDir("opencode")).toBe(
       join(FAKE_HOME, ".claude", "agents"),
-    );
-  });
-
-  it('platformAgentFilePath with "pi" returns .pi/agent/skills/{agentId}/SKILL.md', () => {
-    expect(platformAgentFilePath("my-agent", "pi")).toBe(
-      join(FAKE_HOME, ".pi", "agent", "skills", "my-agent", "SKILL.md"),
-    );
-  });
-
-  it("platformAgentFilePath() with no platformId falls back to agentFilePath", () => {
-    expect(platformAgentFilePath("my-agent")).toBe(
-      join(FAKE_HOME, ".claude", "agents", "my-agent.md"),
-    );
-  });
-
-  it('platformAgentFilePath("opencode") falls back to agentFilePath', () => {
-    expect(platformAgentFilePath("my-agent", "opencode")).toBe(
-      join(FAKE_HOME, ".claude", "agents", "my-agent.md"),
-    );
-  });
-
-  it("platformAgentsDir and platformAgentFilePath both use homedir mock", () => {
-    // Verify the mock is consistently applied across both functions
-    expect(platformAgentsDir("pi")).toBe(
-      join(FAKE_HOME, ".pi", "agent", "skills"),
-    );
-    expect(platformAgentFilePath("x", "pi")).toBe(
-      join(FAKE_HOME, ".pi", "agent", "skills", "x", "SKILL.md"),
     );
   });
 });

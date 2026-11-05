@@ -44,11 +44,6 @@ vi.doMock("../../src/cli/paths", () => ({
     }
     throw new Error(`Unknown sync target: "${t}". Supported targets: opencode`);
   },
-  getOpencodeSkillsDir: () => {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "opencode", "skills");
-    return join(homedir(), ".config", "opencode", "skills");
-  },
 }));
 
 afterAll(() => {

@@ -133,17 +133,19 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
   const targetStatuses: TargetStatus[] = PLATFORM_REGISTRY.map((p) =>
     computeTargetStatus(p, lock),
   );
-  const opencodeStatus =
-    targetStatuses.find((t) => t.target === "opencode") ?? targetStatuses[0];
+  const opencodeStatus = targetStatuses.find((t) => t.target === "opencode");
 
   // Top-level role identity list (registry/version/installedAt), enriched with
-  // opencode sync flags for backward compatibility.
+  // host-neutral sync flags: a role counts as synced/valid when ANY registered
+  // target reports it, not just opencode.
   const roleStatuses = lock.roles.map((entry) => {
-    const oc = opencodeStatus?.roles.find((r) => r.role === entry.role);
+    const perTarget = targetStatuses
+      .map((t) => t.roles.find((r) => r.role === entry.role))
+      .filter((r): r is { role: string; synced: boolean; symlinkValid: boolean } => r !== undefined);
     return {
       ...entry,
-      synced: oc?.synced ?? false,
-      symlinkValid: oc?.symlinkValid ?? false,
+      synced: perTarget.some((r) => r.synced),
+      symlinkValid: perTarget.some((r) => r.symlinkValid),
     };
   });
 
@@ -331,7 +333,7 @@ async function fetchLatestVersions(
 export default defineCommand({
   meta: {
     name: "status",
-    description: "Show overall health and opencode integration",
+    description: "Show overall health and agent harness integration",
   },
   args: {
     checkUpdates: {

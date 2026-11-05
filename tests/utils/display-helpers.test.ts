@@ -117,6 +117,13 @@ describe("shortSessionId", () => {
     // first3 = "abc", last5 = "klmno"
     expect(result).toBe("abc\u2026klmno");
   });
+
+  it("strips any leading lowercase type prefix for long IDs", () => {
+    // "msg_abcdefghijk123" length = 17 ≥ 15
+    const result = shortSessionId("msg_abcdefghijk123");
+    // stripped = "abcdefghijk123", first3 = "abc", last5 = "jk123"
+    expect(result).toBe("abc\u2026jk123");
+  });
 });
 
 // ── barSegments ────────────────────────────────────────────────────────────

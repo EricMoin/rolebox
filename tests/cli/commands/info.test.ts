@@ -86,6 +86,12 @@ function createSyncSymlink(roleId: string, target: string): void {
   createDirSymlink(target, join(syncDir, roleId));
 }
 
+function createSyncSymlinkFor(syncTarget: string, roleId: string, roleDir: string): void {
+  const syncDir = join(infoTargetBase(syncTarget), "rolebox");
+  mkdirSync(syncDir, { recursive: true });
+  createDirSymlink(roleDir, join(syncDir, roleId));
+}
+
 async function importInfo() {
   return await import("../../../src/cli/commands/info.ts");
 }
@@ -183,6 +189,40 @@ describe("info", () => {
     expect(parsed.skills).toEqual(["skill-a"]);
     expect(parsed.functions).toEqual(["plan"]);
     expect(parsed.sync).toBeDefined();
+  });
+
+  it("does not borrow another target's sync state when opencode is absent", async () => {
+    const roleDir = createRoleDir("oh-my-role", "pi-only", "1.0.0", { name: "Pi Only" });
+    createLockFile([{
+      role: "pi-only",
+      registry: "oh-my-role",
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      integrity: "sha256-pi",
+    }]);
+    // Deploy to pi only, and drop opencode from the platform registry entirely.
+    createSyncSymlinkFor("pi", "pi-only", roleDir);
+
+    vi.doMock("../../../src/platform/registry.ts", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/platform/registry.ts")>();
+      return {
+        ...actual,
+        PLATFORM_REGISTRY: actual.PLATFORM_REGISTRY.filter((p) => p.id !== "opencode"),
+      };
+    });
+    try {
+      const { info } = await importInfo();
+      const { logs, run } = captureLogs(() => info("pi-only", true, false));
+      await run();
+
+      const parsed = JSON.parse(logs[0]);
+      expect(parsed.sync).toEqual({ synced: false, symlinkValid: false });
+      const pi = parsed.syncTargets.find((t: any) => t.target === "pi");
+      expect(pi.synced).toBe(true);
+      expect(pi.symlinkValid).toBe(true);
+    } finally {
+      vi.doUnmock("../../../src/platform/registry.ts");
+    }
   });
 
   it("detects subagents from subdirectory", async () => {

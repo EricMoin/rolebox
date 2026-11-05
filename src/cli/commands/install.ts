@@ -239,7 +239,7 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   out(`✓ Installed ${escapeForDisplay(parsed.roleId)}@${escapeForDisplay(version)} from ${escapeForDisplay(registryName)}`);
 
   // 12. Print hint
-  out(`Run \`rolebox sync opencode\` to deploy`);
+  out(`Run \`rolebox sync\` to deploy`);
 }
 
 export default defineCommand({

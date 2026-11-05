@@ -1,10 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PlatformPaths } from "../platform/paths.ts";
-import {
-  defaultPlatformPaths,
-  piPlatformPaths,
-} from "../platform/paths.ts";
 import { PLATFORM_REGISTRY } from "../platform/registry.ts";
 import { currentPlatform, setPlatformForTest as setSystemPlatformForTest } from "../platform/system/index.ts";
 
@@ -42,16 +38,6 @@ export function getPlatform(): string {
 /** Test-only seam. Pass `undefined` to restore the real platform. */
 export function setPlatformForTest(platform: string | undefined): void {
   setSystemPlatformForTest(platform);
-}
-
-// ── Opencode Paths ────────────────────────────────────────────────
-
-export function getOpencodeConfigDir(): string {
-  return defaultPlatformPaths().configDir;
-}
-
-export function getOpencodeSkillsDir(): string {
-  return defaultPlatformPaths().skillsDir;
 }
 
 // ── Rolebox Paths ─────────────────────────────────────────────────
@@ -236,26 +222,4 @@ export function assertSafePathSegment(value: string, label: string): void {
       `${label} contains a control character (U+${code.toUpperCase()}); refusing to use it in a filesystem path`,
     );
   }
-}
-
-// ── Pi Paths ───────────────────────────────────────────────────────
-
-/** `~/.pi/agent` — delegates to `piPlatformPaths().configDir` */
-export function getPiConfigDir(): string {
-  return piPlatformPaths().configDir;
-}
-
-/** `~/.pi/agent/skills` — delegates to `piPlatformPaths().skillsDir` */
-export function getPiSkillsDir(): string {
-  return piPlatformPaths().skillsDir;
-}
-
-/** `~/.pi/agent/sessions` — delegates to `piPlatformPaths().sessionsDir` */
-export function getPiSessionsDir(): string {
-  return piPlatformPaths().sessionsDir!;
-}
-
-/** `~/.pi/agent/extensions` — delegates to `piPlatformPaths().extensionsDir` */
-export function getPiExtensionsDir(): string {
-  return piPlatformPaths().extensionsDir!;
 }

@@ -52,9 +52,10 @@ export function truncate(s: string, maxLen: number): string {
 }
 
 /**
- * Shorten a session ID for display. For IDs of 15 characters or more, strips the
- * `ses_` prefix (if present) and shows `first3…last5`. Falls back to the original
- * ellipsis-prefixed-last-8 behavior for shorter IDs.
+ * Shorten a session ID for display. For IDs of 15 characters or more, strips a
+ * leading lowercase type prefix (`<type>_`, e.g. `ses_`) if present and shows
+ * `first3…last5`. Falls back to the original ellipsis-prefixed-last-8 behavior
+ * for shorter IDs.
  */
 export function shortSessionId(id: string): string {
   if (id.length < 15) {
@@ -62,8 +63,8 @@ export function shortSessionId(id: string): string {
     if (id.length <= 12) return id;
     return "\u2026" + id.slice(-8);
   }
-  // For longer IDs: strip ses_ prefix, then show first3…last5
-  const stripped = id.startsWith("ses_") ? id.slice(4) : id;
+  // For longer IDs: strip a leading type prefix, then show first3…last5
+  const stripped = id.replace(/^[a-z][a-z0-9]*_/, "");
   return stripped.slice(0, 3) + "\u2026" + stripped.slice(-5);
 }
 

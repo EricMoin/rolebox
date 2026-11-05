@@ -23,7 +23,7 @@ const main = defineCommand({
   meta: {
     name: "rolebox",
     version,
-    description: "AI role manager for opencode",
+    description: "AI role manager for coding agents",
   },
   subCommands: {
     init: () => import("./commands/init.ts").then((m) => m.default),

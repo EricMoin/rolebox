@@ -80,7 +80,7 @@ export async function init(nameArg: string | undefined, yes: boolean, templateAr
   // 6. Print success
   // -----------------------------------------------------------------------
   console.log(`\u2713 Created ${templateType} role at ${targetDir}`);
-  console.log(`Run \`rolebox sync opencode\` to deploy`);
+  console.log(`Run \`rolebox sync\` to deploy`);
 }
 
 export default defineCommand({
