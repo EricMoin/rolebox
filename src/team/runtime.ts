@@ -5,6 +5,7 @@ import type { CanonicalEvent, CanonicalToolContext, Message } from "../platform/
 import type { ResolvedRole } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
 import { withTimeout } from "../dispatch/core/with-timeout.ts";
+import { isToolFinishReason } from "../dispatch/completion/completion-detector.ts";
 import { TeamStore } from "./store.ts";
 import type { TeamEvent, TeamMember, TeamState } from "./types.ts";
 
@@ -121,7 +122,10 @@ function finalMessage(messages: Message[]): Message | undefined {
   if (!last || last.info.role !== "assistant") return undefined;
   if (last.parts.some(p => p.type === "tool" && "state" in p &&
     ["running", "pending"].includes((p.state as { status?: string })?.status ?? ""))) return undefined;
-  if (last.info.finish === "tool-calls" || last.info.finish === "tool_use") return undefined;
+  // A tool-related finish means the peer's agentic turn is not final, whatever
+  // spelling the host uses for it: ask the dispatch completion detector's one
+  // /tool/i rule rather than hard-coding names here.
+  if (isToolFinishReason(last.info.finish)) return undefined;
   return last.info.time.completed || last.info.finish || last.info.error ? last : undefined;
 }
 

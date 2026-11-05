@@ -32,6 +32,3 @@ export * from "./scheduler.ts";
 
 // ── Central Orchestrator (PRIMARY integration surface) ──────────────────
 export * from "./manager.ts";
-
-// ── Event System Integration Layer ──────────────────────────────────────
-export * from "./hook.ts";

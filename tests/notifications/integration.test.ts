@@ -728,7 +728,12 @@ describe("Formatting", () => {
     expect(script).toContain("ToastNotificationManager");
     expect(script).toContain("Test Title");
     expect(script).toContain("Test Message");
-    expect(script).toContain("CreateToastNotifier");
+    expect(script).toContain("CreateToastNotifier('Rolebox')");
+  });
+
+  it("escapes a custom Windows toast application id", () => {
+    const script = buildWindowsToastScript("Title", "Message", "My'App");
+    expect(script).toContain(`CreateToastNotifier('My''App')`);
   });
 
   it("builds AppleScript notification string", () => {

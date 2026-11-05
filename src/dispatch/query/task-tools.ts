@@ -87,7 +87,7 @@ export function createTaskSearchTool(
 ) {
   return defineTool({
     description:
-      "Search dispatch task history by query text, status, or date range. Searches task prompt, description, and agent name. Returns a markdown table of matching tasks with status, duration, and an optional result preview. Rolebox-specific: the opencode platform has no native task search with status/query filtering.",
+      "Search dispatch task history by query text, status, or date range. Searches task prompt, description, and agent name. Returns a markdown table of matching tasks with status, duration, and an optional result preview. Rolebox adds task history search with status/query filtering on top of the host's native surface.",
     args: {
       query: z
         .string()
@@ -222,7 +222,7 @@ function fmtRemaining(value: number, limit: number | undefined): string {
 export function createTaskBudgetTool(dispatchManager: DispatchManager) {
   return defineTool({
     description:
-      "Query budget usage — token/cost consumption, remaining quota, and trigger limits for the current request. Rolebox-specific: the opencode platform has no native concept of dispatch budget tracking.",
+      "Query budget usage — token/cost consumption, remaining quota, and trigger limits for the current request. Rolebox adds dispatch budget tracking on top of the host's native surface.",
     args: {
       session_id: z
         .string()
@@ -371,7 +371,7 @@ function renderNode(
 export function createTaskGraphTool(dispatchManager: DispatchManager) {
   return defineTool({
     description:
-      "Visualise the dispatch task dependency tree. Builds a parent-child tree from DispatchTask parentSessionId/sessionId relations. Shows an indented tree with status, agent, nesting depth, and optional result summaries. When no root is given, renders every top-level (parentless) task forest. Rolebox-specific: opencode session_list only shows flat task lists.",
+      "Visualise the dispatch task dependency tree. Builds a parent-child tree from DispatchTask parentSessionId/sessionId relations. Shows an indented tree with status, agent, nesting depth, and optional result summaries. When no root is given, renders every top-level (parentless) task forest. Rolebox adds dependency-tree visualisation on top of the host's native task listing.",
     args: {
       root_session: z
         .string()
@@ -441,7 +441,7 @@ export function createTaskGraphTool(dispatchManager: DispatchManager) {
 export function createTaskRetryTool(dispatchManager: DispatchManager) {
   return defineTool({
     description:
-      "Retry a failed dispatch task — reopens the original session for continuation via DispatchManager.reopenForContinuation(). Only tasks in a terminal state (completed, error, cancelled, timeout) can be retried. The original session is reused so all prior context is preserved. Rolebox-specific: opencode has no native retry mechanism for dispatched sub-agent tasks.",
+      "Retry a failed dispatch task — reopens the original session for continuation via DispatchManager.reopenForContinuation(). Only tasks in a terminal state (completed, error, cancelled, timeout) can be retried. The original session is reused so all prior context is preserved. Rolebox adds task retry on top of the host's native surface.",
     args: {
       task_id: z
         .string()
@@ -570,7 +570,7 @@ function buildTable(
 export function createTaskChronologyTool(manager: DispatchManager) {
   return defineTool({
     description:
-      "Show time-bucketed task activity. Returns a markdown table grouped by hour, day, or agent with status distribution counts. Rolebox-specific: the opencode platform has no native time-bucketed task chronology view.",
+      "Show time-bucketed task activity. Returns a markdown table grouped by hour, day, or agent with status distribution counts. Rolebox adds time-bucketed task chronology on top of the host's native surface.",
     args: {
       group_by: z
         .enum(["hour", "day", "agent"])
@@ -635,7 +635,7 @@ export function createTaskExportTool(
   directory: string,
 ) {
   return defineTool({
-    description: "Export a completed task's full result to a file (markdown or JSON). Rolebox-specific: the opencode platform has no native per-task export mechanism.",
+    description: "Export a completed task's full result to a file (markdown or JSON). Rolebox adds per-task export on top of the host's native surface.",
     args: {
       task_id: z.string().describe("Task ID to export"),
       format: z

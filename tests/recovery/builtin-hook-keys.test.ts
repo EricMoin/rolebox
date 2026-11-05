@@ -57,3 +57,13 @@ describe("built-in hook keys", () => {
     ).toEqual(["auto_activate"]);
   });
 });
+
+describe("webfetch-redirect-guard tool filter", () => {
+  // The registry matches a hook's filter names EXACTLY (`registry.ts`), so the
+  // guard must name every host spelling of the webfetch tool or it silently
+  // never fires there: `webfetch` on opencode-style hosts, `web_fetch` on dsh.
+  it("covers both the opencode-style and dsh tool names", () => {
+    const hook = createWebFetchRedirectGuardHook();
+    expect(hook.filter?.tools).toEqual(expect.arrayContaining(["webfetch", "web_fetch"]));
+  });
+});

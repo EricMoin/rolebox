@@ -34,7 +34,7 @@ export function createDispatchStatusTool(manager: DispatchManager): CanonicalToo
       "Proactively check task liveness on demand. Returns status and liveness " +
       "information for a specific task or all tasks dispatched by the calling " +
       "session. Unlike dispatch_output, this NEVER throws — even for running tasks. " +
-      "Rolebox-specific: the opencode platform has no native per-task liveness query that distinguishes running from stale tasks.",
+      "Rolebox adds per-task liveness queries that distinguish running from stale tasks on top of the host's native surface.",
     args: {
       task_id: z
         .string()

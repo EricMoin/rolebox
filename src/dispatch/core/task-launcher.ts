@@ -160,7 +160,7 @@ export async function startBackgroundTask(
       if (!promptResult) {
         // Spawn failed — sub-agent process never started
         task.status = "error";
-        task.error = "Failed to spawn Pi process for sub-agent";
+        task.error = "Failed to spawn sub-agent process";
         task.completedAt = new Date();
         debugLog("launch", taskId, `SPAWN-FAILED: prompt returned null for agent=${input.subagent}`);
         // Decrement inflight counter — status changed directly, not via transition()

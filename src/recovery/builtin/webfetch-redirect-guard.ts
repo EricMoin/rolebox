@@ -23,9 +23,14 @@ const WEBFETCH_ERROR_PATTERNS = [
 /**
  * Creates the webfetch-redirect-guard built-in hook.
  *
- * Intercepts `webfetch` tool results and detects redirect loops,
+ * Intercepts the webfetch tool's results and detects redirect loops,
  * HTTP errors, or network failures in the output text. Injects a
  * warning and recovery suggestion via `ctx.inject()`.
+ *
+ * The filter names the tool under BOTH host spellings — `webfetch`
+ * (opencode-style) and `web_fetch` (dsh-style) — because the registry's
+ * filter matches names exactly; naming only one would silently skip the
+ * guard on the other host.
  *
  * No engine dependency — pure guard with direct injection.
  *
@@ -38,7 +43,7 @@ export function createWebFetchRedirectGuardHook(): BuiltInHookDefinition {
     events: ["tool.execute.after"],
     phase: "after",
     priority: 10,
-    filter: { tools: ["webfetch"] },
+    filter: { tools: ["webfetch", "web_fetch"] },
     module: {
       onToolAfter: async (
         ctx: unknown,

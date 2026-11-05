@@ -33,6 +33,23 @@ import type { CompletionSignal, SessionMessageSnapshot, TaskEventState } from ".
  */
 export type NonTerminalFinishReason = "tool-calls" | "tool_use" | "toolUse";
 
+/**
+ * True when a host finish reason means the model issued tool calls and expects
+ * their execution, so the turn is NOT final.
+ *
+ * This is the single /tool/i rule: "tool-calls" (opencode-style), "tool_use"
+ * (Pi adapter — `stopReason` copied verbatim) and "toolUse" (alternate Pi
+ * casing) all match, and a further tool-related spelling cannot slip through.
+ * Other reasons ("stop" for OpenAI, "end_turn" for Claude, …) are not tool
+ * related and are answered `false`; terminality is never read from them here.
+ *
+ * Exported so every consumer of a host finish reason asks this one question
+ * instead of hard-coding a spelling (see `src/team/runtime.ts`).
+ */
+export function isToolFinishReason(finish: string | undefined): boolean {
+  return typeof finish === "string" && /tool/i.test(finish);
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /** Session status types that indicate active processing. */
@@ -170,11 +187,11 @@ export function detectCompletion(
   }
 
   // If finish is a tool-related reason, the model expects tool execution →
-  // not ready. Match /tool/i to cover every adapter's vocabulary
-  // ("tool-calls", Pi's "tool_use", camelCase "toolUse", etc.) instead of
-  // hard-coding one spelling.
+  // not ready. The shared /tool/i rule ({@link isToolFinishReason}) covers
+  // every adapter's vocabulary ("tool-calls", Pi's "tool_use", camelCase
+  // "toolUse", etc.) instead of hard-coding one spelling.
   const finish = lastAssistant.info.finish;
-  if (typeof finish === "string" && /tool/i.test(finish)) {
+  if (isToolFinishReason(finish)) {
     return { type: "not_ready" };
   }
 

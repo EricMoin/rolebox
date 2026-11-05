@@ -321,7 +321,9 @@ describe("F-28: the channel keeps the tool record's declared types", () => {
   it("still executes a legitimate call and answers its typed result", async () => {
     const root = mkdtempSync(join(tmpdir(), "refusal-shape-"));
     roots.push(root);
-    const channel = await openGraphWorkerChannel(WORKER_TOOLS, root, join(root, "store"));
+    const channel = await openGraphWorkerChannel(WORKER_TOOLS, root, join(root, "store"), {
+      routeDir: join(root, "routes"),
+    });
     channels.push(channel);
     const grant = channel.issue("session-one", "worker");
 

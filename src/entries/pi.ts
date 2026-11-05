@@ -23,7 +23,7 @@ import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
  * @module
  */
 
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { PiLightweightServiceStack } from "../platform/adapters/pi/service-stack.ts";
@@ -973,6 +973,9 @@ export default async function(pi: any): Promise<void> {
     let workerToolDefinitions: Readonly<Record<string, CanonicalToolDef>> = {};
     const workerToolConfigs = new Map<string, PiWorkerToolConfig>();
     const graphWorkerChannel = await openGraphWorkerChannel(graphApplication.createTools(), process.cwd(), graphStoreRoot(getDataDir(), process.cwd()), {
+      // Pi owns its native session layout, so the entry — not the neutral graph
+      // layer — places the channel's route files beside the native sessions.
+      routeDir: join(process.cwd(), ".rolebox", "pi-sessions", "native"),
       resolveTool(name, context) {
         const principal = outcomeHost?.workerPrincipalOf(context.sessionID);
         const grant = principal === undefined ? undefined : outcomeHost?.workerToolGrantOf(principal);

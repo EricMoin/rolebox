@@ -104,7 +104,9 @@ async function servedChannel() {
       },
     },
   };
-  const channel = await openGraphWorkerChannel(tools, root, join(root, "store"));
+  const channel = await openGraphWorkerChannel(tools, root, join(root, "store"), {
+    routeDir: join(root, "routes"),
+  });
   channels.push(channel);
   return { channel, grant: channel.issue("session-one", "worker"), readerCalls };
 }

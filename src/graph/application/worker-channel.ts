@@ -138,6 +138,21 @@ const workerChannelToolResult: z.ZodType<ToolResult> = z.union([
 const workerChannelEnvelope = z.object({ result: workerChannelToolResult }).loose();
 
 /**
+ * THE CHANNEL'S CALLER-SUPPLIED INPUTS.
+ *
+ * `routeDir` is where the per-session route files are published. It is REQUIRED
+ * and passed in rather than derived here: the neutral graph layer does not own a
+ * platform's session layout, so the host entry that does own it decides the
+ * directory (Pi passes its native session directory). `resolveTool` is the
+ * optional host-tool resolver described at the call site.
+ */
+export interface GraphWorkerChannelOptions {
+  /** Directory the per-session `<sessionId>.channel.json` route files land in. */
+  routeDir: string;
+  resolveTool?(name: string, context: CanonicalToolContext): CanonicalToolDef | undefined;
+}
+
+/**
  * A worker submits to its owning host; it never starts a second scheduler.
  *
  * THE TOOL RECORD IS THE CALLER'S OWN TYPE. `T` is inferred from the record the
@@ -150,7 +165,7 @@ export async function openGraphWorkerChannel<T extends Record<string, CanonicalT
   tools: T,
   directory: string,
   storeRoot: string,
-  options?: { resolveTool?(name: string, context: CanonicalToolContext): CanonicalToolDef | undefined },
+  options: GraphWorkerChannelOptions,
 ) {
   const store = GraphStore.openFile(storeRoot);
   const invocations = new Map<string, AbortController>();
@@ -236,7 +251,7 @@ export async function openGraphWorkerChannel<T extends Record<string, CanonicalT
   } catch (error) { store.close(); throw error; }
   server.unref();
   const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/invoke`;
-  const routeFor = (sessionId: string) => join(directory, ".rolebox", "pi-sessions", "native", `${sessionId}.channel.json`);
+  const routeFor = (sessionId: string) => join(options.routeDir, `${sessionId}.channel.json`);
   const publishRoute = (sessionId: string) => {
     const path = routeFor(sessionId);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });

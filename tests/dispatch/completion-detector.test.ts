@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectCompletion, extractAssistantError } from "../../src/dispatch/completion/completion-detector.ts";
+import { detectCompletion, extractAssistantError, isToolFinishReason } from "../../src/dispatch/completion/completion-detector.ts";
 import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types.ts";
 
 // ── Test Helpers ──────────────────────────────────────────────────────
@@ -521,5 +521,25 @@ describe("extractAssistantError", () => {
 
   it("converts booleans to strings", () => {
     expect(extractAssistantError(true)).toBe("true");
+  });
+});
+
+// ── isToolFinishReason ───────────────────────────────────────────────
+
+describe("isToolFinishReason", () => {
+  it("treats every tool-related spelling as non-final", () => {
+    for (const finish of ["tool-calls", "tool_use", "toolUse"]) {
+      expect(isToolFinishReason(finish), finish).toBe(true);
+    }
+  });
+
+  it("does not treat terminal reasons as tool-related", () => {
+    for (const finish of ["stop", "end_turn"]) {
+      expect(isToolFinishReason(finish), finish).toBe(false);
+    }
+  });
+
+  it("answers false for an absent finish reason", () => {
+    expect(isToolFinishReason(undefined)).toBe(false);
   });
 });

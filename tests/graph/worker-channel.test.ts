@@ -23,6 +23,7 @@ afterEach(() => {
 });
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "graph-channel-")); roots.push(root);
+  const routeDir = join(root, "routes");
   const tools: Record<string, CanonicalToolDef> = {
     graph_submit_outcome: {
       description: "Verify authenticated caller", args: { value: z.string() },
@@ -30,10 +31,10 @@ function fixture() {
     },
   };
   const open = async () => {
-    const channel = await openGraphWorkerChannel(tools, root, join(root, "store"));
+    const channel = await openGraphWorkerChannel(tools, root, join(root, "store"), { routeDir });
     channels.push(channel); return channel;
   };
-  return { root, open };
+  return { root, routeDir, open };
 }
 
 it("binds added host tools to the authenticated caller and aborts them when HTTP disconnects", async () => {
@@ -43,6 +44,7 @@ it("binds added host tools to the authenticated caller and aborts them when HTTP
   const entered = new Promise<void>(resolve => { started = resolve; });
   const cancelled = new Promise<void>(resolve => { aborted = resolve; });
   const channel = await openGraphWorkerChannel({}, root, join(root, "store"), {
+    routeDir: join(root, "routes"),
     resolveTool(name, context) {
       if (name !== "custom_wait" || context.sessionID !== "worker") return undefined;
       return { description: "Wait", args: {}, execute: async (_args, ctx) => {
@@ -85,11 +87,15 @@ it("never replays a host tool after its response is lost", async () => {
 });
 
 it("preserves caller authentication across host restart without storing the bearer", async () => {
-  const { root, open } = fixture();
+  const { root, routeDir, open } = fixture();
   const first = await open();
   const grant = first.issue("session-one", "worker");
   expect(JSON.parse(String(await invokeGraphWorkerChannel(grant, "graph_submit_outcome", { value: "before" })))).toEqual({ value: "before", caller: "session-one" });
   expect(readFileSync(graphStoreFilePath(join(root, "store"))).includes(Buffer.from(grant.token))).toBe(false);
+  // The route file is published under the SUPPLIED routeDir, and it carries the
+  // endpoint alone — never the bearer.
+  expect(grant.routeFile).toBe(join(routeDir, "session-one.channel.json"));
+  expect(JSON.parse(readFileSync(grant.routeFile!, "utf8"))).toEqual({ endpoint: grant.endpoint });
   expect(readFileSync(grant.routeFile!, "utf8")).not.toContain(grant.token);
   first.close();
   const second = await open();

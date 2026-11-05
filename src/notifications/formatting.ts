@@ -30,14 +30,19 @@ export function escapeBashText(input: string): string {
 /**
  * Generate a complete PowerShell script that creates a Windows toast
  * notification using `[Windows.UI.Notifications.ToastNotificationManager]`.
+ * `applicationId` is the app id registered with the Windows toast notifier
+ * (defaults to `"Rolebox"`); it is escaped with the same PowerShell
+ * single-quote escaping as the title and message.
  * Returns a single-line script with `; ` separators.
  */
 export function buildWindowsToastScript(
   title: string,
   message: string,
+  applicationId = "Rolebox",
 ): string {
   const escapedTitle = escapePowerShellSingleQuotedText(title);
   const escapedMessage = escapePowerShellSingleQuotedText(message);
+  const escapedApplicationId = escapePowerShellSingleQuotedText(applicationId);
 
   const lines = [
     "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null",
@@ -48,7 +53,7 @@ export function buildWindowsToastScript(
     "$SerializedXml = New-Object Windows.Data.Xml.Dom.XmlDocument",
     "$SerializedXml.LoadXml($RawXml.OuterXml)",
     "$Toast = [Windows.UI.Notifications.ToastNotification]::new($SerializedXml)",
-    "$Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('OpenCode')",
+    `$Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${escapedApplicationId}')`,
     "$Notifier.Show($Toast)",
   ];
 
