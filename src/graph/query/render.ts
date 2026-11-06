@@ -55,7 +55,7 @@ function presentNode(node: GraphNodeView, includePrompt: boolean | undefined): O
   return includePrompt ? { ...summary, prompt } : summary;
 }
 
-function snapshot(graph: GraphView, args: GraphStatusArgs) {
+export function graphSnapshot(graph: GraphView, args: GraphStatusArgs) {
   const run = args.run_id === undefined ? graph.current : graph.runs.find((item) => item.runId === args.run_id);
   if (args.run_id !== undefined && run === undefined) throw new Error(`Unknown run ${args.run_id}`);
   const loop = args.loop_id === undefined ? undefined : graph.declaration.loop_groups?.find((item) => item.id === args.loop_id);
@@ -102,12 +102,12 @@ function snapshot(graph: GraphView, args: GraphStatusArgs) {
  * is the ledger's own set, so this view cannot drift from the guard the
  * acceptance core applies.
  */
-function stoppedAttemptDecisions(view: ReturnType<typeof snapshot>) {
+function stoppedAttemptDecisions(view: ReturnType<typeof graphSnapshot>) {
   return view.decisions.filter(decision => STOPPING_CONTROL_COMMANDS.includes(decision.command) &&
     view.nodes.some(node => node.status === "dispatched" && node.attemptId === decision.attemptId));
 }
 
-function tree(graph: GraphView, args: GraphStatusArgs, view: ReturnType<typeof snapshot>): string {
+function tree(graph: GraphView, args: GraphStatusArgs, view: ReturnType<typeof graphSnapshot>): string {
   const selected = new Map(view.nodes.map((node) => [node.node_id, node]));
   const emitted = new Set<string>();
   const lines: string[] = [];
@@ -148,7 +148,7 @@ export function renderGraphQuery(query: GraphQueryResult, args: GraphStatusArgs,
   // declaration edges) and the snapshot of it, so carrying them together is
   // what keeps the two facts associated: an index shared between two passes
   // would silently break the day a filter is added between them.
-  const entries = graphs.map((graph) => ({ graph, view: snapshot(graph, args) }));
+  const entries = graphs.map((graph) => ({ graph, view: graphSnapshot(graph, args) }));
   let text: string;
   if (args.group_by) {
     const groups = new Map<string, number>();

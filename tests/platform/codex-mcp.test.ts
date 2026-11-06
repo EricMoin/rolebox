@@ -774,6 +774,84 @@ describe("CodexMcpServer", () => {
     expect(seen).toEqual([{ name: "echo", args: { text: "hi" } }]);
   });
 
+  it("allows graph_control to release a graph_wait without changing ordinary request ordering", async () => {
+    let release = () => {};
+    let started = () => {};
+    const waitingStarted = new Promise<void>(resolve => { started = resolve; });
+    const tools: Record<string, CanonicalToolDef> = {
+      graph_wait: defineTool({ description: "Wait for graph completion.", args: {},
+        async execute() {
+          started();
+          await new Promise<void>(resolve => { release = resolve; });
+          return "complete";
+        } }),
+      graph_control: defineTool({ description: "Complete the fixture graph.", args: {},
+        async execute() { release(); return "applied"; } }),
+    };
+    const harness = createHarness(tools);
+    const serving = harness.server.serve();
+    try {
+      harness.input.write(request(1, "tools/call", { name: "graph_wait" }) + "\n");
+      await waitingStarted;
+      harness.input.write(request(2, "tools/call", { name: "graph_control" }) + "\n");
+      const messages = await waitForMessages(harness, 2);
+      expect(messages.find(message => message.id === 2)?.result.content[0].text).toBe("applied");
+      expect(messages.find(message => message.id === 1)?.result.content[0].text).toBe("complete");
+    } finally { release(); harness.input.end(); await serving; }
+  });
+
+  it("starts graph_wait after earlier requests finish", async () => {
+    let release = () => {};
+    let started = () => {};
+    const declarationStarted = new Promise<void>(resolve => { started = resolve; });
+    let declared = false;
+    let waited = false;
+    const tools: Record<string, CanonicalToolDef> = {
+      graph_declare: defineTool({ description: "Declare the fixture graph.", args: {},
+        async execute() {
+          started(); await new Promise<void>(resolve => { release = resolve; });
+          declared = true; return "started";
+        } }),
+      graph_wait: defineTool({ description: "Read the completed fixture graph.", args: {},
+        async execute() { waited = true; expect(declared).toBe(true); return "complete"; } }),
+    };
+    const harness = createHarness(tools);
+    const serving = harness.server.serve();
+    try {
+      harness.input.write(request(1, "tools/call", { name: "graph_declare" }) + "\n");
+      harness.input.write(request(2, "tools/call", { name: "graph_wait" }) + "\n");
+      await declarationStarted;
+      expect(waited).toBe(false);
+      release();
+      const messages = await waitForMessages(harness, 2);
+      expect(messages.find(message => message.id === 2)?.result.content[0].text).toBe("complete");
+    } finally { release(); harness.input.end(); await serving; }
+  });
+
+  it.each(["end", "cancel", "close"] as const)("releases graph_wait on connection %s", async ending => {
+    let started = () => {};
+    const waitingStarted = new Promise<void>(resolve => { started = resolve; });
+    const harness = createHarness({ graph_wait: defineTool({ description: "Wait until cancelled.", args: {},
+      async execute(_args, ctx) {
+        started();
+        await new Promise<void>(resolve => {
+          if (ctx.abort.aborted) resolve();
+          else ctx.abort.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return "cancelled";
+      } }) });
+    const serving = harness.server.serve();
+    harness.input.write(request(1, "tools/call", { name: "graph_wait" }) + "\n");
+    await waitingStarted;
+    if (ending === "end") harness.input.end();
+    else if (ending === "close") harness.server.close();
+    else harness.input.write(notify("notifications/cancelled", { requestId: 1 }) + "\n");
+    const messages = await waitForMessages(harness, 1);
+    expect(messages[0]?.result.content[0].text).toBe("cancelled");
+    harness.input.end();
+    await serving;
+  });
+
   it("aborts an in-flight tool call when notifications/cancelled arrives out of band", async () => {
     let started: () => void = () => {};
     const startedPromise = new Promise<void>((resolve) => {
@@ -1174,6 +1252,18 @@ describe("entries/codex", () => {
 // suite): the module's first evaluation is observed there.
 
 describe("buildCodexInstructions", () => {
+  it("directs graph callers to wait, including bounded wait renewal and attention handling", async () => {
+    const { buildCodexInstructions } = await import("../../src/entries/codex.ts");
+    const instructions = buildCodexInstructions({ graph_declare: {}, graph_wait: {} });
+    expect(instructions).toContain("call graph_wait");
+    expect(instructions).toContain("instead of repeatedly polling graph_status");
+    expect(instructions).toContain("On timeout");
+    expect(instructions).toContain("Continue dependent work only after status=complete");
+    expect(instructions).toContain("parent_notification.available");
+    expect(instructions).toContain("end the turn; do not poll graph_status or call graph_wait");
+    expect(buildCodexInstructions({ graph_declare: {} })).not.toContain("call graph_wait");
+  });
+
   it("carries one workflow block per registered family and nothing for an absent one", async () => {
     const { buildCodexInstructions } = await import("../../src/entries/codex.ts");
 

@@ -100,7 +100,16 @@ export function buildCodexInstructions(tools: Record<string, unknown>): string {
       "## Codex rolebox execution\n" +
       "Public roles are native agents named rolebox--<role-id>; private children are canonical graph targets available only to their owning role. " +
       "graph_declare starts Codex workers whose native tools run in a sandboxed exec-server; model requests stay in app-server. Only accepted graph_submit_outcome submissions settle explicit outcomes. " +
-      "Use graph_status to collect results and graph_control for lifecycle changes. This stdio connection cannot wake an external UI-owned chat; keep collecting status while work runs, or check it in a later turn. " +
+      ("graph_wait" in tools
+        ? "After graph_declare, inspect parent_notification.available. If true, the shared host can notify this parent after its current turn ends: " +
+          "tell the user work is running in the background and end the turn; do not poll graph_status or call graph_wait. " +
+          "A committed graph completion or attention notification will continue this session through a new turn. " +
+          "If parent_notification.available is false, use graph_wait with the graph_id as a fallback instead of repeatedly polling graph_status. " +
+          "It returns when the selected run completes, stops, or needs attention, with the committed snapshot and accepted output. " +
+          "On timeout, call graph_wait again with the returned graph_id and run_id. Continue dependent work only after status=complete; handle attention, stopped, or cancelled results explicitly. " +
+          "Cancellation only ends the wait; use graph_control for lifecycle changes. "
+        : "Use graph_status to collect results and graph_control for lifecycle changes. ") +
+      "An external UI-owned chat can only be woken through its own shared app-server; do not assume this capability without parent_notification.available=true. " +
       "Graph workers use native Codex task tools and role-scoped resource loaders; recursive agents and graph control remain unavailable. " +
       "Execution and session forks require Codex's host-supplied thread and sandbox metadata; never supply or invent these as tool arguments.",
     ] : []),
@@ -161,6 +170,7 @@ export async function startCodexMcpServer(
     roles: resolvedRoles,
     directory: workingDir,
     storeRoot: graphStoreRoot(getDataDir(), workingDir),
+    codexHome: dirs.configDir,
     rpcFactory: options.rpcFactory,
     computerUse: computerUseGate.enabled,
     browseUse: browseUseGate.enabled,

@@ -18,10 +18,12 @@
  * never a complete frame, and a trailing incomplete UTF-8 sequence inside it
  * stays undecoded for the same reason.
  *
- * Ordering: REQUESTS are handled strictly one at a time, awaited sequentially.
+ * Ordering: ordinary REQUESTS are handled one at a time, awaited sequentially.
  * A slow tool call therefore delays the next request, but responses stay in
  * request order and the canonical tools' shared state (terminals, hashline
- * edits, memory writes) never runs two calls concurrently by accident.
+ * edits, memory writes) never runs two calls concurrently by accident. A
+ * graph_wait starts after earlier requests, but does not delay later requests:
+ * graph_control must remain usable while the graph is being awaited.
  * NOTIFICATIONS are the deliberate exception: a message without an id is
  * handled immediately on arrival and never queues behind the in-flight
  * request, so notifications/cancelled can abort the call it names while that
@@ -139,9 +141,12 @@ export class CodexMcpServer {
   #clientInfo: Record<string, unknown> | undefined;
   /** AbortController of each request currently inside a tool call, by id. */
   #inflight = new Map<JsonRpcId, AbortController>();
+  #waitControllers = new Set<AbortController>();
+  #waitRequests = new Set<Promise<void>>();
+  #inputEnded = false;
   /** Set once the output stream has failed; later writes are skipped. */
   #outputBroken = false;
-  /** Sequential request chain — notifications bypass it (module docstring). */
+  /** Ordinary requests remain ordered; graph waits do not extend this chain. */
   #chain: Promise<void> = Promise.resolve();
   #servePromise: Promise<void> | undefined;
 
@@ -242,6 +247,8 @@ export class CodexMcpServer {
       const finish = (): void => {
         if (settled) return;
         settled = true;
+        this.#inputEnded = true;
+        for (const controller of this.#waitControllers) controller.abort(new Error("MCP input closed"));
         resolve();
       };
 
@@ -270,6 +277,7 @@ export class CodexMcpServer {
     });
 
     await this.#chain;
+    await Promise.all(this.#waitRequests);
     // Any bytes left in the buffer had no newline terminator: they were never
     // a complete frame, so they are intentionally dropped.
   }
@@ -282,6 +290,18 @@ export class CodexMcpServer {
       void this.handleLine(line).catch((err: unknown) => {
         this.#report("unhandled notification error: " + formatError(err).message);
       });
+      return;
+    }
+
+    const parsed = parseMessageLine(line);
+    if (parsed.ok && parsed.value.kind === "request" && parsed.value.method === "tools/call" &&
+      asRecord(parsed.value.params)?.name === "graph_wait" &&
+      this.#descriptors.some(tool => tool.name === "graph_wait")) {
+      const waiting = this.#chain.then(() => this.handleLine(line)).catch((err: unknown) => {
+        this.#report("unhandled graph wait error: " + formatError(err).message);
+      });
+      this.#waitRequests.add(waiting);
+      void waiting.then(() => { this.#waitRequests.delete(waiting); });
       return;
     }
 
@@ -360,6 +380,10 @@ export class CodexMcpServer {
     // up here and aborts the signal the tool context carries.
     const controller = new AbortController();
     this.#inflight.set(id, controller);
+    if (name === "graph_wait") {
+      this.#waitControllers.add(controller);
+      if (this.#closed || this.#inputEnded) controller.abort(new Error("MCP connection closed"));
+    }
     try {
       let context: CanonicalToolContext;
       if (this.#contextFactory) {
@@ -385,6 +409,7 @@ export class CodexMcpServer {
       this.#writeResult(id, result);
     } finally {
       this.#inflight.delete(id);
+      this.#waitControllers.delete(controller);
     }
   }
 

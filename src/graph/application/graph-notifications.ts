@@ -169,7 +169,8 @@ function terminalStopReason(run: Run): string {
   return `${stop.reason}: ${describeOutcomeStop(stop)} — ${detail}`;
 }
 
-function notices(
+/** Shared by push delivery and bounded waits so both report the same committed condition. */
+export function graphRunNotices(
   run: Run,
   phase: OutcomeGraphState["phase"] | undefined,
   readObservation: (executionId: string) => TerminalExecutionObservation | undefined,
@@ -383,7 +384,7 @@ export class GraphNotifications {
         // The phase is the run view's OWN decode of the persisted body — the
         // versioned reader already ran inside `readGraphView` — so this loop
         // never re-reads the row and asserts `GraphStateRecord.body` (F-03).
-        for (const { key, ...notice } of notices(
+        for (const { key, ...notice } of graphRunNotices(
           run,
           run.recordedPhase,
           executionId => this.store.readExecutionObservation(executionId),
@@ -522,7 +523,7 @@ export class GraphNotifications {
     const graph = readGraphView(this.store, notification.graphId);
     const run = graph.current;
     if (run?.runId !== notification.runId || run.phase === "complete" || run.phase === "stopped") return true;
-    return !notices(
+    return !graphRunNotices(
       run,
       run.recordedPhase,
       executionId => this.store.readExecutionObservation(executionId),

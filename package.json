@@ -73,6 +73,7 @@
     "test:browse:e2e": "node --import tsx scripts/test-browse-e2e.ts",
     "test:hosts:e2e": "node --import tsx scripts/test-hosts-e2e.ts",
     "test:codex:e2e": "node --import tsx scripts/test-codex-e2e.ts",
+    "test:codex:wake": "node --import tsx scripts/test-codex-wake.ts",
     "check:hosts": "node --import tsx scripts/host-versions.ts check",
     "update:hosts": "node --import tsx scripts/host-versions.ts update",
     "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\"",

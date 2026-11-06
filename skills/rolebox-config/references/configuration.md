@@ -148,7 +148,8 @@ Sync registers and enables the marketplace entry; Codex's plugin installation
 populates its cache. Run `codex plugin add rolebox@rolebox` after first sync or to
 refresh the bundle. The generated MCP configuration forwards the launching
 process's `CODEX_HOME`, `ROLEBOX_CONFIG_DIR`, `ROLEBOX_DATA_DIR`,
-`ROLEBOX_CODEX_COMMAND` and `ROLEBOX_SESSION_ID` by name. Unset values stay unset;
+`ROLEBOX_CODEX_COMMAND`, `ROLEBOX_SESSION_ID` and `ROLEBOX_CODEX_PARENT_SOCKET`
+by name. Unset values stay unset;
 their contents are never embedded in the bundle. Restart Codex after changes.
 The same whitelist forwards uppercase and lowercase `HTTP_PROXY`, `HTTPS_PROXY`,
 `ALL_PROXY` and `NO_PROXY`, plus `SSL_CERT_FILE`, `SSL_CERT_DIR` and
@@ -186,7 +187,25 @@ refuses the operation, so update Codex and restart its MCP connection. The proto
 was checked against `0.166.0-alpha.5.1`; rolebox enforces capabilities rather than a
 numeric Codex version.
 
-The runtime registers 29 base tools, including six `session_*` and five `graph_*`
+Graph parent notifications use an existing shared app-server Unix socket. With
+`ROLEBOX_CODEX_PARENT_SOCKET` unset or blank, startup discovers
+`<codex-home>/app-server-control/app-server-control.sock` if it exists. Set an
+absolute path to select another socket, or `off` to disable parent notifications.
+An explicit path takes precedence over discovery. This does not start a daemon,
+resume an external thread, or expose a new listener. The selected server must
+already own the loaded parent thread; `graph_declare.parent_notification.available`
+reports the actual per-session probe. A missing socket, refused connection or
+unowned thread selects the `graph_wait` fallback.
+
+For a CLI parent, start `codex app-server --listen unix://` and connect the main
+client with `codex --remote unix://`. Custom sockets require the same path on the
+server, main client and `ROLEBOX_CODEX_PARENT_SOCKET`. Starting another server does
+not attach an already-running desktop stdio conversation. That conversation stays
+in fallback mode until its host provides a shared connection. Refresh the plugin
+with `rolebox sync codex` and `codex plugin add rolebox@rolebox`, then restart Codex
+to load the environment whitelist and new entry instructions.
+
+The runtime registers 30 base tools, including six `session_*` and six `graph_*`
 tools; gated desktop/browser families add up to 35. Per-call thread identity binds
 native role policy and graph submissions. Project `defaultRole` does not select a
 native agent or replace the current conversation's prompt. Codex native UI hooks,

@@ -6,6 +6,7 @@ import type { CanonicalToolDef } from "../../types.ts";
 import { CodexGraphHost } from "./graph-host.ts";
 import { CodexSessionAdapter, type CodexSessionOptions } from "./session.ts";
 import { codexRoleToolAllowed } from "./tool-policy.ts";
+import { CodexParentNotifications } from "./parent-notifications.ts";
 
 export interface CodexRuntimeOptions {
   directory: string;
@@ -15,11 +16,13 @@ export interface CodexRuntimeOptions {
   browseUse?: boolean;
   rpcFactory?: CodexSessionOptions["rpcFactory"];
   env?: Readonly<Record<string, string | undefined>>;
+  codexHome?: string;
 }
 
 export function createCodexRuntime(options: CodexRuntimeOptions) {
   const sessions = new CodexSessionAdapter({ directory: options.directory, roles: options.roles, rpcFactory: options.rpcFactory });
-  const graph = new CodexGraphHost({ ...options, sessions });
+  const parentNotifications = new CodexParentNotifications({ codexHome: options.codexHome, env: options.env });
+  const graph = new CodexGraphHost({ ...options, sessions, parentNotifications });
   const assembled = buildCanonicalTools({
     directory: options.directory, resolvedRoles: [...options.roles], capabilities: codexCapabilities(),
     sessionClient: sessions, outcomeGraphTools: graph.createTools(), getEffectiveAgent: id => sessions.agentOf(id),

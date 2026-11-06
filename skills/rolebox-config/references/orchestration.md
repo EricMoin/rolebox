@@ -126,7 +126,7 @@ submission instead of inventing shell or file wrapper APIs.
 
 ### Codex execution
 
-Codex registers `graph_declare`, `graph_submit_outcome`, `graph_status`,
+Codex registers `graph_declare`, `graph_submit_outcome`, `graph_wait`, `graph_status`,
 `graph_audit` and `graph_control` over the same graph application and acceptance
 ledger. Public native agents have names such as `rolebox--reviewer`, while graph
 nodes use canonical IDs such as `reviewer` or the acting role's direct private
@@ -184,12 +184,47 @@ timeout. Expiry does not retry work automatically or confirm that a turn stopped
 Codex node `max_input_tokens`, `max_output_tokens` and
 `max_cost_usd` are refused because this adapter has no measured token/cost feed.
 
-Collect results through `graph_status`, including output/history as needed, and
-apply explicit lifecycle changes through `graph_control`. A fresh stdio app-server
-cannot wake or automatically resume an external UI-owned conversation. Keep
-collecting status while workers run or inspect it in a later turn; do not expect a
-completion notification to start the parent agent. Boot does not redispatch
-persisted graphs. Fatal transport failure terminates its app-server process tree;
+After declaring a graph, inspect `parent_notification.available`. When `true`, the
+adapter verified that the existing shared app-server owns this loaded parent
+thread. Report that work is running in the background and end the current turn;
+do not poll `graph_status` or hold `graph_wait`. Graph completion, stop or attention
+events enter a durable notification outbox and are delivered as standalone tool
+output through that same host. An idle parent starts a new turn; an active parent
+receives the output in its current turn. Notifications carry stable IDs; uncertain
+RPC acknowledgments may cause repeat delivery, so do not repeat completed external
+actions solely because a notification was repeated.
+
+When `parent_notification.available` is `false`, use Codex's `graph_wait` as the
+fallback with the returned `graph_id`; do not loop on `graph_status`. The wait
+returns `graph_id`, `run_id`, `status`, `reason`,
+`notices`, and a committed `graph` snapshot. Continue dependent work only after
+`status: "complete"`. `attention` returns approval pauses, unavailable inputs,
+stopped attempts or completed executions without settled outcomes; `stopped`
+returns a stopped run. Handle the reported condition before continuing. Ordinary
+intermediate node completion keeps waiting.
+
+`run_id` defaults to the current run when waiting starts and stays pinned through
+retries; supply it to wait for a specific archived run. `timeout_ms` accepts integers
+from `1` to `540000`, default `540000`. On `status: "timeout"`, call `graph_wait`
+again with the returned graph/run IDs. `include_output` defaults to `true`; set it
+to `false` to omit accepted data. Node prompts are omitted. Only the session that
+declared the graph may wait, and graph workers are refused. This wait tool is
+currently registered on Codex only; other hosts retain their notification workflow.
+
+Cancellation stops waiting and returns `status: "cancelled"`; it does not cancel
+workers. Use `graph_control` for explicit lifecycle changes and `graph_status` for
+targeted inspection. The generated plugin sets a 600-second MCP tool timeout, so
+keep custom host timeouts longer than the requested wait. While waiting, later MCP
+queries/control requests and cancellation remain usable. Server-side commit
+observers and a one-second fallback check release waits without model polling.
+Restart Codex after refreshing the installed plugin to load the new tool and entry
+instructions. Parent delivery auto-discovers the existing default control socket;
+`ROLEBOX_CODEX_PARENT_SOCKET` selects an absolute custom path or `off`. Read
+[Codex connection setup](configuration.md#codex-native-agents-and-session-execution)
+for precedence and activation. Only a shared server that already owns the loaded
+parent is eligible: this feature does not resume it in another process. An external
+desktop stdio conversation without that channel stays in `graph_wait`. Boot does
+not redispatch persisted graphs. Fatal transport failure terminates its app-server process tree;
 local close and connection loss leave an execution without a native terminal event
 unknown, without inventing failure, completion or interruption. Uncertain create
 claims are retained; credentials are not retained durably. Diagnose the recorded state before

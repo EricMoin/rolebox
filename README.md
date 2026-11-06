@@ -232,12 +232,15 @@ codex plugin add rolebox@rolebox
 and generates public native agents under `$CODEX_HOME/agents` (`~/.codex/agents` by
 default). Restart Codex, then ask it to delegate using a generated agent such as
 `rolebox--reviewer`.
-Private children remain scoped graph targets. The MCP runtime exposes 29 base tools,
+Private children remain scoped graph targets. The MCP runtime exposes 30 base tools,
 including native session browsing and declared-graph execution, plus optional desktop
 and browser families. Delegated workers require Codex's host-supplied sandbox metadata
-and use native Codex tools inside that sandbox. Read completion through `graph_status`;
-this stdio integration does not wake an external UI-owned chat. Details and supported
-boundaries: [docs/codex.md](docs/codex.md).
+and use native Codex tools inside that sandbox. After declaring a graph, inspect
+`parent_notification.available`: a verified shared app-server can wake the parent
+after its turn ends. Otherwise, use `graph_wait` as the fallback instead of polling
+`graph_status`. An external UI-owned stdio conversation needs its own host connection
+before background notifications can wake it.
+Details and supported boundaries: [docs/codex.md](docs/codex.md).
 
 <details>
 <summary><strong>Deprecated entry paths</strong></summary>

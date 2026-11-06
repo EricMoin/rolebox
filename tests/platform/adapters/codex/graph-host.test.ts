@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../../src/types.ts";
 import type { CanonicalToolContext } from "../../../../src/platform/types.ts";
@@ -14,6 +15,8 @@ import {
 } from "../../../../src/platform/adapters/codex/app-server.ts";
 import { CodexGraphHost } from "../../../../src/platform/adapters/codex/graph-host.ts";
 import { CodexSessionAdapter } from "../../../../src/platform/adapters/codex/session.ts";
+import { createCodexMcpServer } from "../../../../src/platform/adapters/codex/server.ts";
+import { CodexParentNotifications } from "../../../../src/platform/adapters/codex/parent-notifications.ts";
 
 class MemoryRpc implements CodexRpc {
   readonly calls: Array<{ method: string; params: CodexRecord }> = [];
@@ -141,6 +144,7 @@ async function fixture(options: {
   metadata?: "complete" | "identity-only" | "missing";
   start?: (params: CodexRecord) => Promise<CodexRecord>;
   turnStart?: (params: CodexRecord) => Promise<CodexRecord>;
+  parentNotifications?: CodexParentNotifications;
 } = {}) {
   const root = options.root ?? mkdtempSync(join(tmpdir(), "rolebox-codex-graph-"));
   if (!options.root) roots.push(root);
@@ -202,7 +206,7 @@ async function fixture(options: {
     }),
   });
   await sessions.resolveAgent("parent");
-  const host = new CodexGraphHost({ directory, storeRoot, roles, sessions, env: {} });
+  const host = new CodexGraphHost({ directory, storeRoot, roles, sessions, env: {}, parentNotifications: options.parentNotifications });
   runtimes.push({ host, sessions });
   const tools = host.createTools();
   sessions.setTools(tools);
@@ -268,6 +272,86 @@ afterEach(async () => {
 });
 
 describe("Codex graph host integration", () => {
+  it("reports a verified wake channel and sends graph completion through its durable notifier", async () => {
+    const calls: Array<{ method: string; params: CodexRecord }> = [];
+    const channel = new CodexParentNotifications({ env: { ROLEBOX_CODEX_PARENT_SOCKET: "/path/to/host.sock" },
+      rpcFactory: () => ({ async request(method, params) {
+        calls.push({ method, params });
+        return method === "thread/loaded/list" ? { data: ["parent"] } : { turn: { id: "woken-turn" } };
+      }, close() {} }) });
+    const runtime = await fixture({ parentNotifications: channel });
+    const declared = await runtime.declare();
+    expect(declared).toMatchObject({ parent_notification: { available: true } });
+    const delivery = await runtime.delivered();
+    expect(calls.some(call => call.method === "turn/start")).toBe(false);
+    await submit(delivery);
+    await runtime.host.application.notifications!.flush();
+    expect(calls.filter(call => call.method === "turn/start")).toHaveLength(1);
+    expect(JSON.stringify(calls.find(call => call.method === "turn/start")?.params.toolOutput)).toContain("[GRAPH COMPLETE]");
+    finish(delivery, "completed");
+  });
+
+  it("reports the wait fallback without promising an unsupported wake-up", async () => {
+    const runtime = await fixture();
+    expect(await runtime.declare()).toMatchObject({ parent_notification: { available: false } });
+  });
+
+  it("waits for an accepted worker outcome and returns its committed snapshot", async () => {
+    const runtime = await fixture();
+    await runtime.declare();
+    const delivery = await runtime.delivered();
+    const waiting = runtime.call("graph_wait", { graph_id: delivery.graphId });
+    expect((await submit(delivery)).value.decision).toBe("accepted");
+    const result = JSON.parse(await waiting);
+    expect(result.status).toBe("complete");
+    expect(result.graph.nodes[0].outcomeId).toBe("done");
+    expect(result.graph.attempts[0].result.payload).toEqual({ kind: "value", value: { summary: "Work completed." } });
+    expect(JSON.stringify(result)).not.toContain(delivery.credential);
+    finish(delivery, "completed");
+  });
+
+  it("keeps graph_wait unavailable to a bound worker", async () => {
+    const runtime = await fixture(); await runtime.declare();
+    const delivery = await runtime.delivered();
+    const result = JSON.parse(await runtime.call("graph_wait", { graph_id: delivery.graphId },
+      context(delivery.threadId, "reviewer--researcher", runtime.directory)));
+    expect(result.code).toBe("worker-tool-forbidden");
+    expect((await dynamic(delivery, "graph_wait", { graph_id: delivery.graphId })).success).toBe(false);
+  });
+
+  it("accepts a real graph_control over MCP while graph_wait is pending", async () => {
+    const runtime = await fixture(); await runtime.declare(); await runtime.delivered();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const messages: Array<{ id: number; result: { content: Array<{ text: string }> } }> = [];
+    output.on("data", chunk => {
+      for (const line of String(chunk).trim().split("\n")) messages.push(JSON.parse(line));
+    });
+    let started = () => {};
+    const waitStarted = new Promise<void>(resolve => { started = resolve; });
+    const server = createCodexMcpServer({ tools: runtime.tools, input, output, serverVersion: "test",
+      contextFactory(info, signal) {
+        if (info.name === "graph_wait") started();
+        return { ...runtime.parent, abort: signal };
+      } });
+    const serving = server.serve();
+    try {
+      input.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "graph_wait", arguments: { graph_id: "codex.graph.single" },
+      } }) + "\n");
+      await waitStarted;
+      input.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: "graph_control", arguments: { graph_id: "codex.graph.single", command: "cancel", reason: "Stop while waiting" },
+      } }) + "\n");
+      await eventually(() => messages.length, count => count === 2, "both MCP replies");
+      const waited = JSON.parse(messages.find(message => message.id === 1)!.result.content[0]!.text);
+      const controlled = JSON.parse(messages.find(message => message.id === 2)!.result.content[0]!.text);
+      expect(controlled.kind).toBe("applied");
+      expect(waited.status).toBe("stopped");
+      expect(waited.graph.control.reason).toBe("Stop while waiting");
+    } finally { server.close(); input.end(); await serving; }
+  });
+
   it("starts a private role with its native model and settles a real SQLite graph through the bound callback", async () => {
     const runtime = await fixture();
     const result = await runtime.declare();
@@ -426,6 +510,9 @@ describe("Codex graph host integration", () => {
     expect(status.nodes[0]?.status).toBe("dispatched");
     expect(status.nodes[0]?.outcomeId).toBeUndefined();
     expect(status.decisions.filter(decision => decision.command === "failure")).toEqual([]);
+    const waited = JSON.parse(await runtime.call("graph_wait", { graph_id: delivery.graphId, timeout_ms: 2_000 }));
+    expect(waited.status).toBe("attention");
+    expect(waited.reason).toContain("no outcome was settled");
   });
 
   it.each(["failed", "interrupted"] as const)("records a %s turn as a failure without an accepted graph outcome", async terminal => {

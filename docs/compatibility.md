@@ -130,6 +130,7 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | load_role_skill | — (native skill tool) | ✓ | ✓ |
 | session_list / session_read / session_search / session_info / session_diff / session_fork | ✓ | ✓ | ✓ (native threads; completed-turn forks) |
 | graph_declare / graph_submit_outcome / graph_status / graph_audit / graph_control | ✓ | ✓ | ✓ (managed app-server workers; native presentation) |
+| graph_wait | — | — | ✓ (wait for the selected run; no status polling) |
 | task_search / task_budget / task_graph / task_chronology / task_export (task_retry withheld) | ✓ | ✓ | — (not exposed) |
 | lsp_* (32 tools) | ✓ | ✓ | — (not exposed) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not exposed) |

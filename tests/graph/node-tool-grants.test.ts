@@ -37,7 +37,7 @@ describe("legacy node tools compatibility", () => {
     expect(workerTaskToolAllowed("hashline_edit", parsed.declaration.nodes[0].tools, ["hashline_edit"])).toBe(true);
   });
 
-  it.each(["graph_control", "graph_status", "rb_graph_control", "dispatch", "rb_dispatch", "team_create", "task", "task_retry", "session_fork"])(
+  it.each(["graph_control", "graph_status", "graph_wait", "rb_graph_control", "dispatch", "rb_dispatch", "team_create", "task", "task_retry", "session_fork"])(
     "keeps orchestration unavailable even when inherited and listed: %s", name => {
       expect(workerTaskToolAllowed(name, [name, "rb_*", "graph_*"], [name])).toBe(false);
     },

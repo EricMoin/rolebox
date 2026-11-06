@@ -165,7 +165,7 @@ describe("writeCodexPluginBundle", () => {
           command: "node",
           args: [SERVER_ENTRY],
           env_vars: [
-            "CODEX_HOME", "ROLEBOX_CONFIG_DIR", "ROLEBOX_DATA_DIR", "ROLEBOX_CODEX_COMMAND", "ROLEBOX_SESSION_ID",
+            "CODEX_HOME", "ROLEBOX_CONFIG_DIR", "ROLEBOX_DATA_DIR", "ROLEBOX_CODEX_COMMAND", "ROLEBOX_SESSION_ID", "ROLEBOX_CODEX_PARENT_SOCKET",
             "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
             "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
           ],

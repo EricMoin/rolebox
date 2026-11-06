@@ -199,6 +199,17 @@ dedicated outcome-submission channel remains available.
 - `rolebox mcp` (or `node dist/entries/codex.js`) starts the same server the plugin
   starts; its `initialize` result reports `serverInfo.name` `rolebox`.
 
+### Parent wake-up acceptance
+
+Run `npm run test:codex:wake` from the checkout with a current Codex CLI available
+on `PATH` (or selected by `ROLEBOX_CODEX_COMMAND`). It starts an isolated real
+app-server with a loopback model fixture and a real graph store. The parent turn
+ends while a fixture worker remains in flight; accepting that worker's outcome
+then delivers the durable notification and produces a second completed parent turn.
+The probe also checks that the notification reached the model and that disconnecting
+the notifier preserves the shared host. It uses no real model credentials or paid
+inference and does not establish that an unrelated desktop stdio session is reachable.
+
 ### Authenticated end-to-end acceptance
 
 After building and syncing this checkout, run:
@@ -279,9 +290,12 @@ and `SIGTERM` flush handlers on first evaluation.
 - **Errors**: malformed JSON line → `-32700` (null id); invalid request → `-32600`;
   unknown method → `-32601`; malformed `tools/call` envelope → `-32602`; internal error
   → `-32603`.
-- **Ordering and lifetime**: requests are handled strictly one at a time and answered in
-  request order; notifications are the one exception (above). `serve()` resolves when
-  stdin ends and closes the graph/session runtime and its app-server process trees.
+- **Ordering and lifetime**: ordinary requests are handled one at a time and answered
+  in request order. `graph_wait` starts after earlier ordinary requests finish, but
+  stays pending independently so later queries and `graph_control` can run; its response
+  can arrive out of order. Notifications also bypass the queue (above). When stdin
+  ends, pending waits are cancelled and queued responses drain before `serve()` closes
+  the graph/session runtime and its app-server process trees.
   `SIGINT` and `SIGTERM` also release those descendants. A fatal transport failure
   terminates its process tree and rejects pending calls. Cleanup or connection loss
   does not establish a native turn outcome. The server never calls `process.exit`;
@@ -299,8 +313,8 @@ and `SIGTERM` flush handlers on first evaluation.
 
 ## Tool surface on Codex
 
-The MCP server registers 29 base tools. With both optional families enabled, it
-registers 64; role and host policies can further restrict execution.
+The MCP server registers 30 base tools. With both optional families enabled, it
+registers 65; role and host policies can further restrict execution.
 
 | Group | Tools |
 |---|---|
@@ -310,7 +324,7 @@ registers 64; role and host policies can further restrict execution.
 | Assets and references | `asset_search`, `asset_inspect`, `asset_validate`, `reference_search`, `load_reference`, `load_role_skill` |
 | Runtime | `signal`, `interactive_terminal` |
 | Sessions | `session_list`, `session_read`, `session_search`, `session_info`, `session_diff`, `session_fork` |
-| Graphs | `graph_declare`, `graph_submit_outcome`, `graph_status`, `graph_audit`, `graph_control` |
+| Graphs | `graph_declare`, `graph_submit_outcome`, `graph_wait`, `graph_status`, `graph_audit`, `graph_control` |
 | Desktop, enabled by default | 12 `computer_*` tools, subject to the global gate and OS permissions |
 | Browser, enabled by its gate | 23 `browse_*` tools, with optional Playwright support |
 
@@ -373,10 +387,60 @@ Codex tools inside the inherited sandbox. Mutating outer-process tools such as
 `hashline_edit` and `interactive_terminal` are not exposed through that callback.
 Only native worker presentation is supported; `discover` and `code` are refused.
 
-Read results with `graph_status` and use `graph_control` for explicit lifecycle
-changes. A new stdio app-server cannot wake an external UI-owned chat, so keep
-collecting status while work runs or inspect it in a later turn. Boot does not
-redispatch persisted work automatically. Lost execution ownership remains unknown;
+After `graph_declare`, inspect `parent_notification.available`. When `true`, the
+adapter has verified that the parent thread is already loaded in the shared
+app-server. End the current turn while workers run; do not hold `graph_wait` or
+poll status. The durable graph notifier submits `[GRAPH COMPLETE]` / `[GRAPH BLOCKED]`
+as `turn/start.toolOutput` to that same host. An idle parent starts a new turn;
+an active parent receives the output in its existing turn. Delivery uses stable
+notification IDs and retry leases. An uncertain RPC acknowledgment may result in
+repeat delivery, so notifications identify themselves for deduplication by the
+receiver. The notification asks the parent to inspect committed status once and
+continue or report the result.
+
+The connection auto-discovers `<codex-home>/app-server-control/app-server-control.sock`
+at startup. `ROLEBOX_CODEX_PARENT_SOCKET` accepts an absolute custom socket path or
+`off`; an explicit value takes precedence. The adapter only uses existing Unix
+WebSocket listeners and checks `thread/loaded/list` before declaration and delivery.
+It never starts another server or cold-resumes the parent. Closing rolebox closes
+its client socket, not the shared host. Unavailable delivery stays in the durable
+outbox for retry.
+
+For a CLI main session, start `codex app-server --listen unix://`, then connect the
+main client with `codex --remote unix://`. For a custom path, use
+`--listen unix:///path/to/control.sock`, `--remote unix:///path/to/control.sock` and
+`ROLEBOX_CODEX_PARENT_SOCKET=/path/to/control.sock` for that same host. A desktop
+stdio session does not acquire this capability merely because another daemon was
+started; without its own shared endpoint it reports `available: false`.
+
+When the notification channel is unavailable, call `graph_wait` with the returned
+`graph_id` as a fallback instead of repeatedly polling `graph_status`.
+The tool waits for the entire selected run to complete,
+stop, or need attention, then returns `{ graph_id, run_id, status, reason, notices,
+graph }`. `graph` is the committed JSON status snapshot, with accepted output
+included by default and node prompts omitted. Ordinary intermediate node completion
+does not return the wait. Continue dependent work only when `status` is `complete`;
+handle `attention` or `stopped` results before proceeding. An approval pause, failed
+attempt, unavailable inputs, or a completed execution without a settled outcome can
+require attention.
+
+`run_id` is optional and pins the current run when waiting starts; an explicit ID
+can select an archived run. A retry does not redirect an existing wait to another
+run. `timeout_ms` is an integer from `1` to `540000`, default `540000`, below the
+generated plugin's 600-second MCP tool timeout. On `status: "timeout"`, call
+`graph_wait` again with the returned graph and run IDs. Set `include_output: false`
+to omit accepted data from the snapshot. Only the declaring session can wait;
+workers cannot use this tool. Committed changes wake waits in-process, with a
+one-second server-side check covering other processes and execution observations.
+
+Cancelling the tool, ending the MCP input, or closing the runtime releases waits
+with `status: "cancelled"`; it does not cancel graph execution. Use `graph_control`
+for explicit lifecycle changes and `graph_status` for targeted inspection. Waiting
+keeps the current turn open. Without a verified parent channel, a new stdio
+app-server cannot wake an external UI-owned chat after that turn ends.
+Restart Codex after updating the installed plugin so its
+tool inventory and entry instructions refresh. Boot does not redispatch persisted
+work automatically. Lost execution ownership remains unknown;
 the adapter retains uncertain create claims rather than creating another worker.
 Attempt credential values are not retained durably. Node `max_input_tokens`,
 `max_output_tokens` and `max_cost_usd` budgets are refused because this adapter does

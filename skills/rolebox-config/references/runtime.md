@@ -296,8 +296,18 @@ for standalone tools but cannot execute graph tools. Native role attribution rea
 the thread's `agentRole`; attributed roles narrow rolebox tool calls. Global
 browser/desktop gates still control registration, and OS permissions still apply.
 
-Codex's `graph_wait` holds the current tool call until its selected run completes,
-stops or needs attention. Use it after `graph_declare` instead of polling status.
+Codex graph declarations report `parent_notification.available`. A verified shared
+app-server connection lets the parent end its turn; graph completion or attention
+then delivers tool output to that host and starts a new parent turn if idle.
+The durable outbox retries unavailable delivery with the same notification ID.
+Delivery never starts another app-server or cold-resumes an external UI thread.
+Missing or unowned shared connections report unavailable rather than promising a
+wake-up. `ROLEBOX_CODEX_PARENT_SOCKET` selects an absolute socket path, defaults to
+discovery under the Codex home, and accepts `off` to disable this channel.
+
+As a fallback, Codex's `graph_wait` holds the current tool call until its selected
+run completes, stops or needs attention. Use it instead of polling status when the
+parent notification channel is unavailable.
 It returns a committed snapshot and accepted output; only `status: "complete"`
 permits dependent work. Timeout defaults to 540000 ms; renew a timed-out wait with
 its returned graph/run IDs. Cancelling a wait or closing the MCP connection releases

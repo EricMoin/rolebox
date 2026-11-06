@@ -142,6 +142,7 @@ export const GRAPH_TOOL_NAMES = Object.freeze([
   "graph_audit",
   /** The authoritative store's status query. */
   "graph_status",
+  "graph_wait",
   /** The trusted lifecycle control entry. */
   "graph_control",
   "graph_worker_tools",

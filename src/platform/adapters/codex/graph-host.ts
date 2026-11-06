@@ -1,6 +1,8 @@
 import type { ResolvedRole } from "../../../types.ts";
 import type { CanonicalToolDef } from "../../types.ts";
 import { GraphApplication } from "../../../graph/application/graph-application.ts";
+import { GraphWait } from "../../../graph/application/graph-wait.ts";
+import { createGraphWaitTool } from "../../../graph/tools/wait.ts";
 import { buildAttemptDeliveryPrompt, type HostDispatchDelivery, type DeliveredInputView } from "../../../graph/host/index.ts";
 import type { OutcomeHost, HostExecutionObservation } from "../../../graph/host/outcome-host.ts";
 import type { OutcomeDispatchEffectKey, OutcomeDispatchRequest } from "../../../graph/outcome/dispatch-effects.ts";
@@ -11,6 +13,7 @@ import { GraphStore } from "../../../graph/store/graph-store.ts";
 import { decodeStoredDefinition } from "../../../graph/persistence/declared-record.ts";
 import { applyGraphControl } from "../../../graph/control/application.ts";
 import { createSubLogger } from "../../../logger.ts";
+import type { CodexParentNotifications } from "./parent-notifications.ts";
 
 export interface CodexGraphHostOptions {
   directory: string;
@@ -18,12 +21,14 @@ export interface CodexGraphHostOptions {
   roles: readonly ResolvedRole[];
   sessions: CodexSessionAdapter;
   env?: Readonly<Record<string, string | undefined>>;
+  parentNotifications?: CodexParentNotifications;
 }
 
 export class CodexGraphHost {
   readonly application: GraphApplication;
   readonly host: OutcomeHost;
   private closed = false;
+  private readonly waits: GraphWait;
   private readonly deadlines = new Set<ReturnType<typeof setTimeout>>();
   private readonly log = createSubLogger("codex-graph");
 
@@ -61,6 +66,9 @@ export class CodexGraphHost {
     };
     this.application = GraphApplication.open({
       workspaceDir: options.directory, storeRoot: options.storeRoot, env: options.env ?? process.env,
+      ...(options.parentNotifications?.configured ? { notifications: {
+        send: notice => options.parentNotifications!.send(notice),
+      } } : {}),
       deliver, declareInvocationIdentity: false, workerSessionOf: execution => execution.executionId,
       workerTaskToolsOf: () => ["load_role_skill", "load_reference", "reference_search", "asset_search", "asset_inspect", "asset_validate"],
       observeExecution: execution => this.observe(execution.executionId),
@@ -82,10 +90,16 @@ export class CodexGraphHost {
       } },
     });
     this.host = this.application.host;
+    this.waits = new GraphWait(options.storeRoot);
   }
 
   createTools(): Record<string, CanonicalToolDef> {
-    return Object.fromEntries(Object.entries(this.application.createTools(id => this.options.sessions.agentOf(id))).map(([name, tool]) => [name, {
+    const agentOf = (id?: string) => this.options.sessions.agentOf(id);
+    const tools: Record<string, CanonicalToolDef> = {
+      ...this.application.createTools(agentOf),
+      ...this.host.bindTools({ graph_wait: createGraphWaitTool(this.waits) }, agentOf),
+    };
+    return Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, {
       ...tool,
       execute: async (input, context) => {
         if (!this.options.sessions.hasThreadIdentity(context.sessionID)) {
@@ -94,6 +108,17 @@ export class CodexGraphHost {
         if (name === "graph_declare") {
           this.options.sessions.assertLaunchable(context.sessionID);
           this.validateTargets(input.declaration, context.agent);
+          const notification = await this.options.parentNotifications?.inspect(context.sessionID) ?? {
+            available: false, reason: "No shared parent app-server connection is configured; use graph_wait.",
+          };
+          const result = await tool.execute(input, context);
+          if (typeof result === "string") {
+            try {
+              const declaration = codexRecord(JSON.parse(result));
+              if (declaration) return JSON.stringify({ ...declaration, parent_notification: notification }, null, 2);
+            } catch { /* Preserve plain-text declaration errors. */ }
+          }
+          return result;
         }
         return tool.execute(input, context);
       },
@@ -105,7 +130,9 @@ export class CodexGraphHost {
     this.closed = true;
     for (const deadline of this.deadlines) clearTimeout(deadline);
     this.deadlines.clear();
+    this.waits.close();
     this.application.close();
+    this.options.parentNotifications?.close();
   }
 
   private observe(id: string): HostExecutionObservation {
@@ -187,9 +214,10 @@ export class CodexGraphHost {
       }] });
       await this.options.sessions.wait(session.id);
       if (this.closed) return;
-      if (this.observe(session.id).kind === "failed") {
+      const observation = this.host.recordExecutionObservation(request.graphId, request.attemptId);
+      if (observation.kind === "failed") {
         await this.host.failObservedExecution(request.graphId, request.nodeId, request.attemptId);
-      } else if (this.observe(session.id).kind === "completed") {
+      } else if (observation.kind === "completed") {
         await this.host.complete(request.graphId, request.attemptId);
       }
     } catch {
