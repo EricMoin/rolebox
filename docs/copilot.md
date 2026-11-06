@@ -2,7 +2,7 @@
 
 > Part of the rolebox documentation. See [README](../README.md) for overview.
 
-Copilot suggests the next message the human user is likely to send. When a session goes idle with an empty composer, the dsh web client asks the host for one short draft, and — if the host returns one — writes it into the composer as a normal, editable draft. The user decides whether to edit it, send it, or clear it. Nothing is ever sent automatically.
+Copilot suggests the next message the human user is likely to send. When a session goes idle with an empty composer, the dsh web client asks the host for one short draft and — if the host returns one — shows it as a **hint card** above the suggestion button in the composer tool row. Nothing is written into the composer until the user chooses **Fill**, and nothing is ever sent automatically.
 
 This replaced the former turn-end decision pipeline (heuristic `rules` and the LLM `llm` verdict). Those modes are **removed**; see [Removed turn-end modes](#removed-turn-end-modes). Built-in function auto-continuation is a separate policy and is unchanged.
 
@@ -11,7 +11,7 @@ This replaced the former turn-end decision pipeline (heuristic `rules` and the L
 Composer draft suggestions are a **dsh web** feature:
 
 - the **host half** (`src/copilot/draft/`, `src/copilot/config.ts`, `src/copilot/config-sources.ts`, `src/platform/adapters/dsh/copilot-suggest.ts`, `src/platform/adapters/dsh/web-copilot-route.ts`) resolves the acting role, composes the role/project/global config, reads the transcript and makes the one-shot model call;
-- the **browser half** (`src/platform/adapters/dsh/web-ui/suggest-dock.tsx`) is the composer tool-row pill — a sparkle glyph plus a short label — that watches the session and fills the composer.
+- the **browser half** (`src/platform/adapters/dsh/web-ui/suggest-dock.tsx`) is the composer tool-row pill — a sparkle glyph plus a short label — that watches the session and shows the hint card;
 
 No other host (opencode, Pi, Codex) registers the button or the route. A dsh profile without the host `llm` service still boots; a fully configured suggestion request then answers `disabled` with reason `llm-unavailable`, and the button stops asking for that session.
 
@@ -26,9 +26,22 @@ No other host (opencode, Pi, Codex) registers the button or the route. A dsh pro
    - makes **exactly one** model call, bounded by `timeout_ms` (default `4000` ms), with provider-neutral request options and **reasoning disabled** (`reasoningEffort: "off"`) when the selected route advertises that effort; there is no retry;
    - sanitizes the answer to at most `max_chars` characters. An empty answer, the literal `[none]` marker, a timeout, an abort or a provider error all become `none` (never an error shown to the user).
 4. The browser re-reads the **latest** state before applying the answer — the draft must still be empty, the phase still `plain`, the session still idle and the same, and the component still mounted. Anything else drops the answer.
-5. A returned draft is written with `inputActions.setDraft(text)`. The component remembers its own text, so the host echo of that write is not mistaken for the user typing. While an injected draft is present the pill's label becomes **Clear** (`清除`) and a click clears the composer with `setDraft('')`; clearing never sends the draft.
+5. A returned draft is held in component state and rendered as a **hint card** above the pill: a small eyebrow (`Suggestion` / `建议`), the wrapped text, and two real buttons — **Fill** (`填入`) and **Dismiss** (`忽略`). Only Fill writes the draft, with `inputActions.setDraft(text)`; Dismiss drops it. Nothing is inserted automatically.
 
-The pill's short label names the current action — **Suggest** / **Suggesting** / **Clear** (`建议` / `生成中` / `清除`) — and a tooltip on hover or keyboard focus explains the state without a native `title` attribute. Its title and one-sentence body are localized (`en`/`zh`) and follow the dsh UI locale. When the control is unavailable, the tooltip title is **Suggestion unavailable** (`建议不可用`) and the body states the specific reason: the session has no conversation yet, the session is a subagent conversation, copilot draft suggestions are disabled for the role or host, or the composer already holds the user's own text (which is never overwritten). The control stays mounted in every state, so the composer row does not reflow; only the label text changes.
+The pill's short label names the control: **Suggest** (`建议`) when idle or when a suggestion is ready, **Suggesting** (`生成中`) while the one request is in flight. It has exactly three states — `idle`, `loading` and `disabled`; there is no `injected`/`Clear` state any more. While a suggestion is available the pill keeps its idle label and gains an accent background. A tooltip on hover or keyboard focus explains the state without a native `title` attribute; its title and one-sentence body are localized (`en`/`zh`) and follow the dsh UI locale. While the hint card is open the tooltip is hidden, so the two can never overlap. When the control is unavailable, the tooltip title is **Suggestion unavailable** (`建议不可用`) and the body states the specific reason: the session has no conversation yet, the session is a subagent conversation, copilot draft suggestions are disabled for the role or host, or the composer already holds text (which is never overwritten). The control stays mounted in every state, so the composer row does not reflow; only the label text changes.
+
+### The hint card
+
+A `suggested` answer is never inserted on its own. The component stores it in state and shows the card above the suggestion button while a suggestion exists, the composer draft is empty, the session is not running, and the component is mounted. The card shows the eyebrow **Suggestion** (`建议`), the suggestion text wrapped to about 300px, and two `<button>` actions:
+
+| Action | Effect |
+| --- | --- |
+| **Fill** (`填入`) | Calls `inputActions.setDraft(text)` once and closes the card. |
+| **Dismiss** (`忽略`) | Closes the card and writes nothing. |
+
+The card takes no focus and does not block the composer: its buttons are ordinary buttons reachable by pointer or Tab, and nothing is focused automatically. It is announced as a group labelled by the eyebrow and uses `aria-live="polite"`.
+
+The card clears on Fill, on Dismiss, when the user types anything (any non-empty draft), on a new turn (`running` true), on a session change, and on unmount. It does not reappear for the same idle: dismissal closes the card without re-asking, and the automatic path has already spent its one request for that idle. The pill can still ask again explicitly (a `manual` request, which replaces the card).
 
 ### Request intent: `auto` vs `manual`
 
@@ -168,11 +181,11 @@ Anything missing yields `disabled` with the corresponding reason — never an er
 
 ## Privacy
 
-The most recent `window_size` messages of the session transcript — truncated to `transcript_max_chars` characters, including brief tool-result summaries — are sent to the **configured provider/model** to build one suggestion. That provider is the one named in the effective `copilot.draft` config, not necessarily the model running the session. Rolebox does not persist the draft request or the transcript copy; the generated text lives only in the composer draft and is never sent to the agent unless the user submits it. Leave `enabled` off (the default) on roles or projects whose transcripts must not leave for another provider.
+The most recent `window_size` messages of the session transcript — truncated to `transcript_max_chars` characters, including brief tool-result summaries — are sent to the **configured provider/model** to build one suggestion. That provider is the one named in the effective `copilot.draft` config, not necessarily the model running the session. Rolebox does not persist the draft request or the transcript copy; the generated text lives only in the hint card's component state (and, after Fill, in the composer draft) and is never sent to the agent unless the user submits it. Leave `enabled` off (the default) on roles or projects whose transcripts must not leave for another provider.
 
 ## Limitations
 
-- **Real draft text, not ghost text.** The suggestion is written into the composer as ordinary editable text. There is no inline completion, no per-token streaming into the editor and no accept/decline overlay.
+- **A hint card, not ghost or auto-inserted text.** The suggestion appears in a card above the button; only Fill writes it into the composer as ordinary editable text. There is no inline completion, no per-token streaming into the editor and no automatic insertion.
 - **Never auto-sent.** Filling the composer does not submit it. The user must send it.
 - **One suggestion per idle.** An automatic `none` is not retried until the next turn; only an explicit button click can ask again within the same idle.
 - **One bounded call, provider-neutral options.** Each suggestion is a single model call bounded by `timeout_ms` and a fixed output-token cap; there is no retry. The request carries only options that every supported provider route accepts — in particular no stop sequences — because a host adapter that rejects an unsupported option fails the call before the model runs. Reasoning is explicitly disabled (`reasoningEffort: "off"`) when the selected route advertises an `off` effort: a one-line next-message prediction must not pay for chain-of-thought. The suggester reads the route's capability metadata first (a read-only lookup, not a model call) and omits the field for a route with no reasoning metadata, because the host rejects an unsupported effort (`UNSUPPORTED_REASONING_EFFORT`) before the adapter runs; such a route keeps the provider's own reasoning default instead of failing.

@@ -1,5 +1,6 @@
 /**
- * SuggestDock CSS — the composer tool-row button for draft suggestions.
+ * SuggestDock CSS — the composer tool-row button for draft suggestions and the
+ * hint card that holds a suggested text above it.
  *
  * One self-mounted `<style data-plugin-css="rolebox/SuggestDock">` element is
  * appended to `document.head` on module load, exactly like
@@ -78,10 +79,10 @@ export const suggestCss = `
   opacity: 0.45;
 }
 
-/* An injected suggestion is a live, owned draft: the control becomes the
-   clear affordance and adopts the accent so it reads as active rather than
-   merely hovered. */
-.rolebox-suggest-button[data-state="injected"] {
+/* A held suggestion turns the pill's label accent-colored so it reads as ready
+   to be filled; the hint card above it carries the actual Fill/Dismiss
+   actions. There is no injected/clear state on the pill any more. */
+.rolebox-suggest[data-has-suggestion="true"] .rolebox-suggest-button {
   color: var(--rolebox-accent, rgb(65, 118, 230));
   background: var(--rolebox-surface-accent, rgb(228, 237, 253));
 }
@@ -144,6 +145,97 @@ export const suggestCss = `
   transform: translateY(0);
 }
 
+/* While the hint card is open it owns the space above the pill: the tooltip is
+   removed from layout (not merely transparent) so it can never overlap the
+   card or its buttons. */
+.rolebox-suggest[data-has-suggestion="true"] .rolebox-suggest-tip {
+  display: none;
+}
+
+/* The hint card: an absolutely positioned panel above the pill. It is the only
+   interactive overlay (the tooltip stays pointer-inert); its buttons are real
+   <button>s, take no focus on their own and never move focus into the composer
+   row. */
+.rolebox-suggest-card {
+  box-sizing: border-box;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 61;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  max-width: 300px;
+  padding: 10px 12px;
+  color: var(--rolebox-ink, rgb(15, 17, 21));
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  background: var(--rolebox-popover-surface, rgb(255, 255, 255));
+  border: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
+  border-radius: var(--rolebox-radius-control, 8px);
+  box-shadow: 0 6px 18px rgba(15, 17, 21, 0.14);
+  pointer-events: auto;
+}
+
+.rolebox-suggest-card-eyebrow {
+  display: block;
+  color: var(--rolebox-accent, rgb(65, 118, 230));
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.rolebox-suggest-card-text {
+  display: block;
+  max-width: 300px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.rolebox-suggest-card-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.rolebox-suggest-card-action {
+  box-sizing: border-box;
+  height: 24px;
+  margin: 0;
+  padding: 0 10px;
+  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
+  border-radius: var(--rolebox-radius-control, 8px);
+  cursor: pointer;
+}
+
+.rolebox-suggest-card-action:hover {
+  color: var(--rolebox-ink, rgb(15, 17, 21));
+  background: var(--rolebox-surface-hover, rgba(38, 49, 72, 0.06));
+}
+
+.rolebox-suggest-card-action:focus-visible {
+  outline: 2px solid var(--rolebox-focus-ring, rgb(65, 118, 230));
+  outline-offset: -2px;
+}
+
+/* Fill is the primary action: the only one that writes the composer. */
+.rolebox-suggest-card-fill {
+  color: var(--rolebox-accent, rgb(65, 118, 230));
+  background: var(--rolebox-surface-accent, rgb(228, 237, 253));
+  border-color: transparent;
+}
+
 .rolebox-suggest-tip-title {
   display: block;
   font-weight: 600;
@@ -188,6 +280,13 @@ export const suggestClass = {
   tip: "rolebox-suggest-tip",
   tipTitle: "rolebox-suggest-tip-title",
   tipBody: "rolebox-suggest-tip-body",
+  card: "rolebox-suggest-card",
+  cardEyebrow: "rolebox-suggest-card-eyebrow",
+  cardText: "rolebox-suggest-card-text",
+  cardActions: "rolebox-suggest-card-actions",
+  cardAction: "rolebox-suggest-card-action",
+  cardFill: "rolebox-suggest-card-fill",
+  cardDismiss: "rolebox-suggest-card-dismiss",
 } as const;
 
 if (

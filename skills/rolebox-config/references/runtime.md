@@ -187,10 +187,10 @@ consistent policy rather than relying on role discovery order. Disabling
 
 ## Composer draft suggestions (Copilot)
 
-`copilot.draft` suggests the next human message into the composer. It is a dsh
-web feature: the host exposes `POST /rolebox/copilot/suggest` and the dsh web
-client adds the composer tool-row button. Other harnesses do not register either
-half.
+`copilot.draft` shows the next human message as a hint card above the composer
+tool-row button. It is a dsh web feature: the host exposes
+`POST /rolebox/copilot/suggest` and the dsh web client adds the button. Other
+harnesses do not register either half.
 
 Configure it in any of three places; the effective config merges field by field
 with the highest source first:
@@ -258,12 +258,21 @@ reads the route's capability metadata first (a read-only lookup, not a model
 call) and omits the field for a route with no reasoning metadata, because the
 host rejects an unsupported effort (`UNSUPPORTED_REASONING_EFFORT`) before the
 adapter runs; that route then uses the provider's own reasoning default instead
-of failing. After a turn ends with an empty draft,
-the browser waits 300 ms and posts once; typing before the answer aborts the
-request and a late answer is dropped. An automatic `none` is not retried until
-the next turn, while the button can ask again. A returned draft is written into
-the composer as normal editable text: it is never ghost text and never sent
-automatically.
+of failing. After a turn ends with an empty draft, the browser waits 300 ms and
+posts once; typing before the answer aborts the request and a late answer is
+dropped. An automatic `none` is not retried until the next turn, while the
+button can ask again. A returned draft is **never inserted automatically**: it
+is held in the button's state and shown as a hint card above the button — the
+eyebrow "Suggestion" / 建议, the text, and two buttons, Fill / 填入 and
+Dismiss / 忽略. Only Fill writes the composer (via `setDraft`); Dismiss writes
+nothing. Typing (any non-empty draft), a new turn, a session switch, unmount,
+Fill and Dismiss all clear the card, and it does not reappear for the same
+idle. The button has three states — idle (`Suggest` / 建议), loading
+(`Suggesting` / 生成中) and disabled (still labelled `Suggest`, with an
+"unavailable" tooltip) — and gains an accent background while a suggestion is
+available; the old injected/clear state is gone. The tooltip keeps explaining
+the button but is hidden while the card is open, so the two cannot overlap, and
+the card takes no focus (its two actions are ordinary buttons).
 
 The request body is `{ "session": "<id>", "intent": "auto" | "manual" }`.
 `intent` is optional and defaults to `"auto"` (any other present value is a

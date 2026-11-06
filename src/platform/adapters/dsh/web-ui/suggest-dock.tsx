@@ -5,7 +5,8 @@
  * The component contributes to `'conversation.input.right'`, the session-scoped
  * list seat immediately left of the model selector. It is a 28px-high pill —
  * sparkle glyph plus a short localized action label — with a state-aware
- * tooltip on hover and keyboard focus:
+ * tooltip on hover and keyboard focus, and it never writes the composer on its
+ * own:
  *
  *   - idle (the session is not running, the draft is empty, the session is not
  *     blank and not a subagent) — one click asks the host for a draft with
@@ -17,18 +18,23 @@
  *     final for that idle: the component does not re-ask until the next turn.
  *     The user can always ask again with the button;
  *   - loading — the single request is in flight and the button is disabled;
- *   - injected — a suggested draft was written into the composer with
- *     `inputActions.setDraft(text)`. The button turns into the clear
- *     affordance (`setDraft('')`), and the injected text is remembered so the
- *     host echo of our own write is not mistaken for the user typing;
- *   - draft non-empty and not ours — the user owns the draft; the button is
- *     disabled and never overwrites it.
+ *   - suggestion ready — a `suggested` answer is held in component state and
+ *     rendered as a HINT CARD above the pill: a small eyebrow, the text and
+ *     two real buttons, Fill (`inputActions.setDraft(text)`) and Dismiss.
+ *     Nothing is written until Fill. The pill keeps its idle label and gains
+ *     an accent while the card is open; the tooltip is hidden so it cannot
+ *     overlap the card. The card clears on Fill, Dismiss, typing (any
+ *     non-empty draft), a new turn (`running` true), a session change or
+ *     unmount, and never reappears for the same idle;
+ *   - draft non-empty — the user owns the draft; the button is disabled and
+ *     never overwrites it.
  *
  * The host contract is `POST /rolebox/copilot/suggest` with
  * `{ session: string, intent?: "auto" | "manual" }`:
  *
- *   - `200 { ok: true, status: "suggested", text, model, ms }` — fill the
- *     composer;
+ *   - `200 { ok: true, status: "suggested", text, model, ms }` — keep the text
+ *     in component state and show the hint card above the button; nothing is
+ *     written to the composer until the user chooses Fill;
  *   - `200 { ok: true, status: "none" }` — nothing sensible to offer;
  *   - `200 { ok: true, status: "disabled", reason }` — the feature is off for
  *     this role/profile. That answer is remembered per session id and stops
@@ -46,9 +52,9 @@
  *   - every request is bounded by its own `AbortController`, and the effect
  *     cleanup aborts it when the user edits before the response, the session
  *     starts running again, the session id changes, or the component unmounts;
- *   - before injecting, the LATEST values are re-read through a ref (draft
- *     still empty, phase still plain, still idle, same session, still mounted);
- *     a stale answer is dropped;
+ *   - before storing the answer, the LATEST values are re-read through a ref
+ *     (draft still empty, phase still plain, still idle, same session, still
+ *     mounted); a stale answer is dropped;
  *   - no state is written after unmount.
  *
  * The slot contract is consumed structurally: the component receives
@@ -125,7 +131,7 @@ export interface SuggestDockProps {
 }
 
 /** Button states (also rendered as `data-state` for styling and tests). */
-export type SuggestButtonState = "idle" | "loading" | "injected" | "disabled";
+export type SuggestButtonState = "idle" | "loading" | "disabled";
 
 /**
  * A transient notice raised by a MANUAL request that produced no draft:
@@ -186,15 +192,13 @@ export function SuggestDock({
 
   /** True while our single request is in flight. */
   const [inflight, setInflight] = useState(false);
-  /** The text WE injected; the host echo of it is not user typing. */
-  const [injectedText, setInjectedText] = useState<string | null>(null);
+  /** The last `suggested` answer; shown as a hint card, never auto-written. */
+  const [suggestion, setSuggestion] = useState<string | null>(null);
   /** True after the host answered `disabled` for the current session id. */
   const [disabled, setDisabled] = useState(false);
   /** A manual request's transient explanation; `null` when none is showing. */
   const [notice, setNotice] = useState<SuggestNotice | null>(null);
 
-  /** Latest injected text, readable from async continuations before render. */
-  const injectedRef = useRef<string | null>(null);
   /** Session ids the host reported `disabled` for (survives a re-render). */
   const disabledRef = useRef<Set<string>>(new Set());
   /** Whether this idle episode already spent its one automatic request. */
@@ -267,11 +271,10 @@ export function SuggestDock({
   }, []);
 
   // Session-scoped reset. A new session must never inherit the previous
-  // session's injected/loading/disabled posture or a stale notice.
+  // session's suggestion/loading/disabled posture or a stale notice.
   useEffect(() => {
     autoRequestedRef.current = false;
-    injectedRef.current = null;
-    setInjectedText(null);
+    setSuggestion(null);
     setDisabled(disabledRef.current.has(sessionId));
     clearNotice();
     const controller = activeControllerRef.current;
@@ -282,6 +285,14 @@ export function SuggestDock({
     inflightRef.current = false;
     setInflight(false);
   }, [sessionId]);
+
+  // The hint card belongs to an idle, empty composer. Typing (a non-empty
+  // draft) or a new turn (`running` true) clears it so it can never linger
+  // over the composer; Fill and Dismiss clear it directly. The auto path
+  // already spends one request per idle, so a cleared card does not reappear.
+  useEffect(() => {
+    if (draft !== "" || running) setSuggestion(null);
+  }, [draft, running]);
 
   // The transient manual notice belongs to the state it explains. Any later
   // state change the user can observe — typing, a new turn, a session switch,
@@ -345,8 +356,10 @@ export function SuggestDock({
     if (latest.phase !== "plain" || latest.draft !== "") return;
     if (disabledRef.current.has(latest.sessionId)) return;
 
-    // A new request replaces whatever the previous manual outcome explained.
+    // A new request replaces whatever the previous manual outcome explained
+    // and any card still on screen.
     clearNotice();
+    setSuggestion(null);
     const previous = activeControllerRef.current;
     if (previous !== null) previous.abort();
     const controller = new AbortController();
@@ -421,11 +434,9 @@ export function SuggestDock({
         return;
       }
 
-      // Remember the text BEFORE writing it, so the resulting draft change is
-      // recognised as ours (the clear affordance) rather than as typing.
-      injectedRef.current = text;
-      setInjectedText(text);
-      inputActions.setDraft(text);
+      // Hold the answer for the hint card. The composer is untouched until
+      // the user chooses Fill.
+      setSuggestion(text);
     } catch {
       // Aborted, offline or a malformed transport: a miss. The next idle (or
       // the button) may ask again.
@@ -442,23 +453,24 @@ export function SuggestDock({
     }
   }
 
-  const injected = draft !== "" && injectedText !== null && draft === injectedText;
-  const userDraft = draft !== "" && !injected;
   // Blank (no transcript) and subagent conversations have nothing to suggest.
   // The control stays mounted — the composer row must not reflow — but it is
   // inert; the tooltip still explains why.
   const unavailable = blank || subagent !== null || disabled;
 
+  // The hint card is shown while a suggestion is held, the composer is still
+  // empty and the session is idle. `suggestion` is also cleared by the effects
+  // above (typing, new turn, session change) and by Fill/Dismiss, so these
+  // guards are defensive: a stale render can never expose the card.
+  const cardVisible = suggestion !== null && draft === "" && !running && !unavailable;
+  // Any non-empty draft belongs to the user: only Fill ever writes one.
+  const userDraft = draft !== "";
+
   let state: SuggestButtonState;
   let labelKey: SuggestKey;
   let titleKey: SuggestKey;
   let bodyKey: SuggestKey;
-  if (injected) {
-    state = "injected";
-    labelKey = "label.injected";
-    titleKey = "title.injected";
-    bodyKey = "body.injected";
-  } else if (inflight) {
+  if (inflight) {
     state = "loading";
     labelKey = "label.loading";
     titleKey = "title.loading";
@@ -472,6 +484,14 @@ export function SuggestDock({
     else if (subagent !== null) bodyKey = "body.disabled.subagent";
     else if (disabled) bodyKey = "body.disabled.config";
     else bodyKey = "body.disabled.draft";
+  } else if (suggestion !== null) {
+    // A card is open: the pill keeps its idle label and click action, and
+    // explains the card through the ready copy. The tooltip itself is hidden
+    // (see `data-hidden` below) so it cannot overlap the card.
+    state = "idle";
+    labelKey = "label.idle";
+    titleKey = "title.ready";
+    bodyKey = "body.ready";
   } else {
     state = "idle";
     labelKey = "label.idle";
@@ -485,6 +505,7 @@ export function SuggestDock({
   const label = copy(labelKey);
   const title = copy(titleKey);
   const body = copy(bodyKey);
+  const eyebrow = copy("card.eyebrow");
 
   // A manual outcome's transient notice replaces the state copy in the tooltip
   // area for its short window. The `disabled` notice reuses the shipped
@@ -501,13 +522,20 @@ export function SuggestDock({
     tipBody = copy("body.disabled.config");
   }
 
+  /** Fill: the ONLY path that writes a suggestion into the composer. */
+  const onFill = (): void => {
+    const text = suggestion;
+    if (text === null) return;
+    setSuggestion(null);
+    inputActions.setDraft(text);
+  };
+
+  /** Dismiss: drop the card and write nothing. */
+  const onDismiss = (): void => {
+    setSuggestion(null);
+  };
+
   const onActivate = (): void => {
-    if (injected) {
-      injectedRef.current = null;
-      setInjectedText(null);
-      inputActions.setDraft("");
-      return;
-    }
     // A click is an explicit request: ask for the manual rule, never the
     // conservative automatic one.
     if (state === "idle") startRequest("manual");
@@ -519,6 +547,7 @@ export function SuggestDock({
       data-rolebox-suggest
       data-state={state}
       data-notice={notice ?? undefined}
+      data-has-suggestion={cardVisible ? "true" : undefined}
     >
       <button
         type="button"
@@ -536,7 +565,41 @@ export function SuggestDock({
           {label}
         </span>
       </button>
-      <div className={suggestClass.tip} role="tooltip" id={tooltipId}>
+      {cardVisible && suggestion !== null ? (
+        <div
+          className={suggestClass.card}
+          role="group"
+          aria-label={eyebrow}
+          aria-live="polite"
+        >
+          <span className={suggestClass.cardEyebrow} aria-hidden="true">
+            {eyebrow}
+          </span>
+          <span className={suggestClass.cardText}>{suggestion}</span>
+          <div className={suggestClass.cardActions}>
+            <button
+              type="button"
+              className={suggestClass.cardAction + " " + suggestClass.cardFill}
+              onClick={onFill}
+            >
+              {copy("card.fill")}
+            </button>
+            <button
+              type="button"
+              className={suggestClass.cardAction + " " + suggestClass.cardDismiss}
+              onClick={onDismiss}
+            >
+              {copy("card.dismiss")}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div
+        className={suggestClass.tip}
+        role="tooltip"
+        id={tooltipId}
+        data-hidden={cardVisible ? "true" : undefined}
+      >
         <span className={suggestClass.tipTitle}>{tipTitle}</span>
         <span className={suggestClass.tipBody}>{tipBody}</span>
       </div>

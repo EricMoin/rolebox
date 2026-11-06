@@ -210,7 +210,7 @@ interface HostInput {
 
 let host: { session: HostSession; input: HostInput };
 
-/** Every `setDraft` call, in order (the fill/clear contract). */
+/** Every `setDraft` call, in order (only Fill may write). */
 const drafts: string[] = [];
 
 /** A locale-seat fake; the component falls back to English when absent. */
@@ -305,6 +305,26 @@ function button(): VNode {
   return byClass(css.suggestClass.button)[0]!;
 }
 
+/** The mounted root (its `data-has-suggestion` / `data-notice` attributes drive the CSS). */
+function root(): VNode {
+  return byClass(css.suggestClass.root)[0]!;
+}
+
+/** The open hint card, or `undefined` when none is rendered. */
+function cardNode(): VNode | undefined {
+  return byClass(css.suggestClass.card)[0];
+}
+
+/** The card's Fill action. */
+function fillButton(): VNode {
+  return byClass(css.suggestClass.cardFill)[0]!;
+}
+
+/** The card's Dismiss action. */
+function dismissButton(): VNode {
+  return byClass(css.suggestClass.cardDismiss)[0]!;
+}
+
 /** The single tooltip block rendered beside the button. */
 function tooltip(): VNode {
   return allNodes().find((node) => node.props.role === "tooltip")!;
@@ -352,7 +372,7 @@ afterEach(() => {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("SuggestDock", () => {
-  it("fills the composer once an idle session has an empty draft", async () => {
+  it("shows a suggested response as a hint card and never writes the composer", async () => {
     mountDock();
     await advance(suggest.SUGGEST_DELAY_MS);
 
@@ -365,40 +385,56 @@ describe("SuggestDock", () => {
       session: "sess-1",
       intent: "auto",
     });
-
-    expect(drafts).toEqual([SUGGESTION]);
-    expect(host.input.draft).toBe(SUGGESTION);
-    // The filled draft is OURS: the control is the clear affordance.
-    expect(button().props["aria-label"]).toBe("Suggestion inserted");
-    expect(button().props.title).toBeUndefined();
-    expect(textOf(button())).toBe("Clear");
-    expect(button().props.disabled).toBe(false);
-    const tip = tooltip();
-    expect(tip.props.role).toBe("tooltip");
-    expect(typeof tip.props.id).toBe("string");
-    expect(button().props["aria-describedby"]).toBe(tip.props.id);
-    expect(textOf(tip)).toContain("Suggestion inserted");
-    expect(textOf(tip)).toContain("This draft was filled automatically.");
-    expect(textOf(tip)).toContain("Clearing it never sends it.");
     expect(suggest.SUGGEST_DELAY_MS).toBe(300);
+
+    // The response is held as a suggestion: the composer is untouched.
+    expect(drafts).toHaveLength(0);
+    expect(host.input.draft).toBe("");
+
+    const card = cardNode()!;
+    expect(card).toBeDefined();
+    expect(card.props.role).toBe("group");
+    expect(card.props["aria-label"]).toBe("Suggestion");
+    expect(card.props["aria-live"]).toBe("polite");
+    expect(textOf(card)).toContain(SUGGESTION);
+
+    // Two real buttons, not a synthetic click target.
+    expect(fillButton().type).toBe("button");
+    expect(dismissButton().type).toBe("button");
+    expect(textOf(fillButton())).toBe("Fill");
+    expect(textOf(dismissButton())).toBe("Dismiss");
+
+    // The pill keeps its idle label/click while the card is open and gains the
+    // accent attribute.
+    expect(root().props["data-has-suggestion"]).toBe("true");
+    expect(button().props["data-state"]).toBe("idle");
+    expect(textOf(button())).toBe("Suggest");
+    expect(button().props.disabled).toBe(false);
+
+    // The card owns the space above the pill: the tooltip is hidden under it.
+    expect(tooltip().props["data-hidden"]).toBe("true");
+    expect(button().props["aria-describedby"]).toBe(tooltip().props.id);
   });
 
-  it("renders the idle pill label and a tooltip explaining fill/decide semantics", () => {
+  it("renders the idle pill label and a tooltip explaining the hint-card flow", () => {
     mountDock();
 
     expect(textOf(button())).toBe("Suggest");
     expect(button().props.title).toBeUndefined();
     expect(button().props["aria-label"]).toBe("Suggest the next message");
     expect(button().props.disabled).toBe(false);
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-has-suggestion"]).toBeUndefined();
 
     const tip = tooltip();
     expect(tip).toBeDefined();
     expect(tip.props.role).toBe("tooltip");
     expect(typeof tip.props.id).toBe("string");
+    expect(tip.props["data-hidden"]).toBeUndefined();
     expect(button().props["aria-describedby"]).toBe(tip.props.id);
     expect(textOf(tip)).toContain("Suggest the next message");
     expect(textOf(tip)).toContain(
-      "Fills the composer with a likely next message from this conversation - you decide whether to send it.",
+      "Asks the configured fast model for one likely next message and shows it in a card above",
     );
   });
 
@@ -410,6 +446,7 @@ describe("SuggestDock", () => {
     expect(calls).toHaveLength(0);
     expect(drafts).toHaveLength(0);
     expect(host.input.draft).toBe("I already typed this");
+    expect(cardNode()).toBeUndefined();
     // The user owns the draft: the button cannot overwrite it.
     expect(button().props["aria-label"]).toBe("Suggestion unavailable");
     expect(textOf(button())).toBe("Suggest");
@@ -444,6 +481,7 @@ describe("SuggestDock", () => {
     await settle();
     expect(drafts).toHaveLength(0);
     expect(host.input.draft).toBe("Wait, instead");
+    expect(cardNode()).toBeUndefined();
     expect(button().props.disabled).toBe(true);
   });
 
@@ -464,6 +502,7 @@ describe("SuggestDock", () => {
 
     expect(calls).toHaveLength(1);
     expect(drafts).toHaveLength(0);
+    expect(cardNode()).toBeUndefined();
 
     // The button is the explicit re-ask path: an idle click asks once more.
     click(button());
@@ -477,6 +516,7 @@ describe("SuggestDock", () => {
     await advance(suggest.SUGGEST_DELAY_MS);
     expect(calls).toHaveLength(1);
     expect(drafts).toHaveLength(0);
+    expect(cardNode()).toBeUndefined();
 
     // The feature is off for this role/profile: neither the button nor another
     // idle/keystroke round trip may reach the route again.
@@ -492,21 +532,107 @@ describe("SuggestDock", () => {
     expect(button().props.disabled).toBe(true);
   });
 
-  it("clears an injected suggestion on click without re-requesting that idle", async () => {
+  it("Fill writes the draft once and closes the card", async () => {
     mountDock();
     await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+
+    click(fillButton());
+
+    expect(drafts).toEqual([SUGGESTION]);
     expect(host.input.draft).toBe(SUGGESTION);
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-has-suggestion"]).toBeUndefined();
+    // Filled draft is the user's now: the pill is inert and never clears it.
+    expect(button().props["aria-label"]).toBe("Suggestion unavailable");
+    expect(textOf(tooltip())).toContain(
+      "The composer already has your text - it is never overwritten.",
+    );
 
-    click(button());
-    expect(drafts).toEqual([SUGGESTION, ""]);
-    expect(host.input.draft).toBe("");
-    expect(button().props["aria-label"]).toBe("Suggest the next message");
-    expect(textOf(button())).toBe("Suggest");
-    expect(button().props.disabled).toBe(false);
-
-    // Clearing is not a new idle: no automatic request follows.
+    // Filling is not a new idle: no automatic request follows.
     await advance(3_000);
     expect(calls).toHaveLength(1);
+  });
+
+  it("Dismiss closes the card without writing the draft and never re-offers it that idle", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+
+    click(dismissButton());
+
+    expect(drafts).toHaveLength(0);
+    expect(host.input.draft).toBe("");
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-has-suggestion"]).toBeUndefined();
+    expect(button().props["aria-label"]).toBe("Suggest the next message");
+    expect(button().props.disabled).toBe(false);
+
+    await advance(3_000);
+    expect(cardNode()).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("hides the card the moment the user types and keeps it gone for that idle", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+
+    host.input.draft = "let me write";
+    rerender(propsFor());
+
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-has-suggestion"]).toBeUndefined();
+    expect(drafts).toHaveLength(0);
+
+    // Erasing the text does not bring the dismissed suggestion back.
+    host.input.draft = "";
+    rerender(propsFor());
+    await advance(3_000);
+    expect(cardNode()).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("clears the card when a new turn starts", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+
+    host.session.running = true;
+    rerender(propsFor());
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-has-suggestion"]).toBeUndefined();
+
+    // The next idle is a new opportunity: the automatic path may ask again.
+    host.session.running = false;
+    rerender(propsFor());
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(calls).toHaveLength(2);
+    expect(cardNode()).toBeDefined();
+  });
+
+  it("clears the card when the session changes", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+
+    rerender(propsFor("sess-2"));
+
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-has-suggestion"]).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("clears the card and its timers on unmount", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+
+    unmount();
+    expect(tree).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    await advance(3_000);
+    expect(drafts).toHaveLength(0);
   });
 
   it("skips blank and subagent sessions", async () => {
@@ -516,6 +642,7 @@ describe("SuggestDock", () => {
     click(button());
     await advance(suggest.SUGGEST_DELAY_MS);
     expect(calls).toHaveLength(0);
+    expect(cardNode()).toBeUndefined();
     expect(button().props.disabled).toBe(true);
 
     host.session = { running: false, blank: false, subagent: { address: { mode: "continuable" } } };
@@ -561,6 +688,7 @@ describe("SuggestDock", () => {
     mode = "disabled";
     mountDock();
     await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeUndefined();
     expect(textOf(tooltip())).toContain(
       "Copilot draft suggestions are disabled for this role or host.",
     );
@@ -574,23 +702,34 @@ describe("SuggestDock", () => {
     );
   });
 
-  it("renders the Chinese pill labels and tooltip copy through the locale seat", async () => {
+  it("renders the Chinese pill and hint-card copy through the locale seat", async () => {
     const t: TSeat = (key) => locales.zh[key] ?? key;
     mountDock("sess-1", t);
 
     expect(textOf(button())).toBe("建议");
     expect(button().props["aria-label"]).toBe("建议下一条消息");
     expect(textOf(tooltip())).toContain(
-      "根据当前对话生成一条下一条消息并填入输入框，是否发送由你决定。",
+      "让配置的快模型生成一条可能的下一条消息并显示在上方卡片中；在你选择“填入”前不会写入输入框。",
     );
+    expect(cardNode()).toBeUndefined();
 
     await advance(suggest.SUGGEST_DELAY_MS);
-    expect(textOf(button())).toBe("清除");
-    expect(button().props["aria-label"]).toBe("已填入建议");
-    expect(textOf(tooltip())).toContain("这条草稿是自动填入的；清除不会发送它。");
+    // The pill keeps its idle label while the card is open.
+    expect(textOf(button())).toBe("建议");
+    expect(button().props["aria-label"]).toBe("建议已就绪");
+    const card = cardNode()!;
+    expect(card.props["aria-label"]).toBe("建议");
+    expect(textOf(fillButton())).toBe("填入");
+    expect(textOf(dismissButton())).toBe("忽略");
+    expect(textOf(card)).toContain(SUGGESTION);
+    expect(drafts).toHaveLength(0);
+
+    click(fillButton());
+    expect(drafts).toEqual([SUGGESTION]);
+    expect(cardNode()).toBeUndefined();
   });
 
-  it("self-mounts namespaced CSS and ships a 28px-high pill", () => {
+  it("self-mounts namespaced CSS, ships a 28px pill and styles the hint card", () => {
     expect(css.suggestCss).toContain(".rolebox-suggest-button");
     expect(css.suggestCss).toContain("height: 28px");
     expect(css.suggestCss).toContain("padding: 0 8px");
@@ -605,21 +744,34 @@ describe("SuggestDock", () => {
     expect(css.suggestCss).toContain(
       ".rolebox-suggest[data-notice] .rolebox-suggest-tip",
     );
-    expect(css.suggestCss).toContain("data-state=\"injected\"");
+    // The hint card: wrapped text at ~300px, two real actions, and no card-only
+    // overlay or focus trap (the actions are ordinary <button> elements).
+    expect(css.suggestCss).toContain(".rolebox-suggest-card {");
+    expect(css.suggestCss).toContain("max-width: 300px");
+    expect(css.suggestCss).toContain("overflow-wrap: anywhere");
+    expect(css.suggestCss).toContain(".rolebox-suggest-card-fill");
+    expect(css.suggestClass.cardAction).toBe("rolebox-suggest-card-action");
+    expect(css.suggestClass.cardDismiss).toBe("rolebox-suggest-card-dismiss");
+    expect(css.suggestCss).toContain(
+      '.rolebox-suggest[data-has-suggestion="true"] .rolebox-suggest-button',
+    );
+    // The tooltip is hidden while the card is open so the two cannot overlap.
+    expect(css.suggestCss).toContain(
+      '.rolebox-suggest[data-has-suggestion="true"] .rolebox-suggest-tip',
+    );
+    // The old injected/clear state is gone.
+    expect(css.suggestCss).not.toContain('[data-state="injected"]');
+    expect(css.suggestCss).not.toContain("Clear");
     expect(css.suggestCss).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css.suggestClass.button).toBe("rolebox-suggest-button");
     expect(css.suggestClass.tip).toBe("rolebox-suggest-tip");
+    expect(css.suggestClass.card).toBe("rolebox-suggest-card");
   });
 });
 
 // ── Intent and the manual notice ──────────────────────────────────────────
 
 describe("SuggestDock — intent and manual notice", () => {
-  /** The mounted root (its `data-notice` attribute drives the CSS rule). */
-  function root(): VNode {
-    return byClass(css.suggestClass.root)[0]!;
-  }
-
   it("sends intent auto from the idle timer", async () => {
     mountDock();
     await advance(suggest.SUGGEST_DELAY_MS);
@@ -629,6 +781,8 @@ describe("SuggestDock — intent and manual notice", () => {
       session: "sess-1",
       intent: "auto",
     });
+    expect(drafts).toHaveLength(0);
+    expect(cardNode()).toBeDefined();
   });
 
   it("sends intent manual from a click", async () => {
@@ -642,7 +796,10 @@ describe("SuggestDock — intent and manual notice", () => {
       session: "sess-1",
       intent: "manual",
     });
-    expect(host.input.draft).toBe(SUGGESTION);
+    // Manual asks show the card too; only Fill writes the draft.
+    expect(drafts).toHaveLength(0);
+    expect(cardNode()).toBeDefined();
+    expect(textOf(cardNode()!)).toContain(SUGGESTION);
   });
 
   it("keeps an automatic none silent", async () => {
@@ -655,6 +812,7 @@ describe("SuggestDock — intent and manual notice", () => {
       session: "sess-1",
       intent: "auto",
     });
+    expect(cardNode()).toBeUndefined();
     expect(root().props["data-notice"]).toBeUndefined();
     expect(textOf(tooltip())).not.toContain("No suggestion right now");
   });
@@ -676,6 +834,7 @@ describe("SuggestDock — intent and manual notice", () => {
       session: "sess-1",
       intent: "manual",
     });
+    expect(cardNode()).toBeUndefined();
     expect(root().props["data-notice"]).toBe("none");
     expect(textOf(tooltip())).toContain("No suggestion right now");
     expect(textOf(tooltip())).toContain(
@@ -701,6 +860,7 @@ describe("SuggestDock — intent and manual notice", () => {
       intent: "manual",
     });
     expect(root().props["data-notice"]).toBe("disabled");
+    expect(cardNode()).toBeUndefined();
     expect(button().props["aria-label"]).toBe("Suggestion unavailable");
     expect(textOf(tooltip())).toContain("Suggestion unavailable");
     expect(textOf(tooltip())).toContain(

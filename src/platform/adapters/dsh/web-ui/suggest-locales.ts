@@ -2,10 +2,11 @@
  * Locale dictionaries for the composer draft-suggestion control.
  *
  * The Web client's composer slot hands a registered entry the `t` seat of the
- * namespace it declares as its `locale`, so the pill's short label and its
- * tooltip follow the ACTIVE dsh UI locale with no per-component language
- * switch: register `en` (the registry fallback) and `zh`, and every other
- * installed language resolves through its fallback chain to English.
+ * namespace it declares as its `locale`, so the pill's short label, its tooltip
+ * and the hint card's eyebrow/actions follow the ACTIVE dsh UI locale with no
+ * per-component language switch: register `en` (the registry fallback) and
+ * `zh`, and every other installed language resolves through its fallback chain
+ * to English.
  *
  * The two dictionaries are DERIVED from one copy table rather than written out
  * twice, so a key can never exist in one language and be missing in the other
@@ -26,28 +27,27 @@ export interface SuggestCopy {
 }
 
 /**
- * The single copy table: short pill labels, tooltip titles and bodies, one body
- * per disabled reason, and the transient notice a MANUAL request raises when it
- * yields no draft.
+ * The single copy table: short pill labels, tooltip titles and bodies, the
+ * hint-card eyebrow and its two action labels, one body per disabled reason,
+ * and the transient notice a MANUAL request raises when it yields no draft.
  */
 export const SUGGEST_COPY = {
   "label.idle": { en: "Suggest", zh: "建议" },
   "label.loading": { en: "Suggesting", zh: "生成中" },
-  "label.injected": { en: "Clear", zh: "清除" },
   "title.idle": { en: "Suggest the next message", zh: "建议下一条消息" },
   "body.idle": {
-    en: "Fills the composer with a likely next message from this conversation - you decide whether to send it.",
-    zh: "根据当前对话生成一条下一条消息并填入输入框，是否发送由你决定。",
+    en: "Asks the configured fast model for one likely next message and shows it in a card above - nothing is written into the composer until you choose Fill.",
+    zh: "让配置的快模型生成一条可能的下一条消息并显示在上方卡片中；在你选择“填入”前不会写入输入框。",
   },
   "title.loading": { en: "Generating a suggestion", zh: "正在生成建议" },
   "body.loading": {
     en: "Reading the conversation tail with the configured fast model. Typing cancels it.",
     zh: "正在用配置的快模型读取对话尾部；开始输入会取消。",
   },
-  "title.injected": { en: "Suggestion inserted", zh: "已填入建议" },
-  "body.injected": {
-    en: "This draft was filled automatically. Clearing it never sends it.",
-    zh: "这条草稿是自动填入的；清除不会发送它。",
+  "title.ready": { en: "Suggestion ready", zh: "建议已就绪" },
+  "body.ready": {
+    en: "Choose Fill in the card above to write it into the composer, or Dismiss to ignore it. Nothing is inserted until you choose.",
+    zh: "在上方卡片中选择“填入”写入输入框，或选择“忽略”放弃这条建议；在你选择前不会写入任何内容。",
   },
   "title.disabled": { en: "Suggestion unavailable", zh: "建议不可用" },
   "body.disabled.blank": {
@@ -71,6 +71,9 @@ export const SUGGEST_COPY = {
     en: "Try again after the next turn, or type your own message.",
     zh: "可以等下一轮再试，或直接输入你的内容。",
   },
+  "card.eyebrow": { en: "Suggestion", zh: "建议" },
+  "card.fill": { en: "Fill", zh: "填入" },
+  "card.dismiss": { en: "Dismiss", zh: "忽略" },
 } as const satisfies Record<string, SuggestCopy>;
 
 /** Every copy key, derived from {@link SUGGEST_COPY}. */
