@@ -1,65 +1,65 @@
-// ── Copilot Actions ──────────────────────────────────────────────────
+// ── Draft Config ──────────────────────────────────────────────────────
 
-/** Valid copilot rule actions. */
-export const COPILOT_ACTIONS = ["continue", "skip", "blocked", "done"] as const;
-
-/** Union of valid copilot rule actions. */
-export type CopilotAction = (typeof COPILOT_ACTIONS)[number];
-
-// ── Rule Match Criteria ───────────────────────────────────────────────
-
-export interface CopilotRuleMatch {
-  /** Regex pattern matched against the model's tail message text. */
-  pattern?: string;
-  /** Plain substring matched against the model's tail message text. */
-  contains?: string;
-}
-
-// ── Rule ──────────────────────────────────────────────────────────────
-
-export interface CopilotRule {
-  /** Unique rule identifier (required). */
-  id: string;
-  /**
-   * Match criteria — at least one of `pattern` / `contains` must be set.
-   * Rules are evaluated in order; the first match wins.
-   */
-  match: CopilotRuleMatch;
-  /** Action to take when the rule matches. */
-  action: CopilotAction;
-  /** Optional reply text injected for "continue" actions. */
-  reply?: string;
-}
-
-// ── LLM Verdict Config ────────────────────────────────────────────────
-
-export interface CopilotTranscriptConfig {
-  /** Number of recent transcript messages fed to the verdict LLM (default 20). */
-  window_size: number;
-  /** Max characters of transcript text fed to the verdict LLM (default 8000). */
+/**
+ * Composer draft-suggestion config for a role.
+ *
+ * A draft request asks the configured provider/model for a short text the
+ * composer can offer before the user starts typing. The numeric fields have
+ * frozen defaults and are clamped by `parseCopilotConfig`; `provider` and
+ * `model` are optional overrides.
+ */
+export interface CopilotDraftConfig {
+  /** Master toggle for composer draft suggestions (default false). */
+  enabled: boolean;
+  /** Optional provider id used for draft requests (non-empty when set). */
+  provider?: string;
+  /** Optional model id used for draft requests (non-empty when set). */
+  model?: string;
+  /** Max milliseconds to wait for one draft response (default 4000). */
+  timeout_ms: number;
+  /** Max characters in the suggested draft (default 120). */
   max_chars: number;
-  /** Whether tool-call entries are included in the transcript (default true). */
-  include_tools: boolean;
+  /** Number of recent transcript messages fed to the draft request (default 8). */
+  window_size: number;
+  /** Max characters of transcript text fed to the draft request (default 4000). */
+  transcript_max_chars: number;
 }
 
-export interface CopilotLlmConfig {
-  /** Role/id of the LLM agent used for turn-end verdicts (required). */
-  role: string;
-  /** Max milliseconds to wait for an LLM verdict (default 30000). */
-  max_verdict_timeout_ms: number;
-  /** Optional guidance prompt appended to the verdict request. */
-  guidance?: string;
-  /** Transcript window config for verdict requests. */
-  transcript: CopilotTranscriptConfig;
+/**
+ * Partial composer draft config contributed by one precedence source.
+ *
+ * Role `copilot`, project `.rolebox/config.json` and global `config.yaml` each
+ * contribute a fragment; {@link composeCopilotConfig} merges them field by
+ * field. Every field is optional and keeps the same name as its
+ * {@link CopilotDraftConfig} counterpart:
+ *
+ *   - an absent field falls through to the next lower-precedence source;
+ *   - `enabled` is three-state: a present `true`/`false` wins, an absent value
+ *     inherits;
+ *   - an invalid value is treated as absent (after one warning), so a lower
+ *     source can still supply it.
+ */
+export interface CopilotDraftFragment {
+  /** Master toggle; absent inherits from a lower-precedence source. */
+  enabled?: boolean;
+  /** Optional provider id used for draft requests. */
+  provider?: string;
+  /** Optional model id used for draft requests. */
+  model?: string;
+  /** Max milliseconds to wait for one draft response. */
+  timeout_ms?: number;
+  /** Max characters in the suggested draft. */
+  max_chars?: number;
+  /** Number of recent transcript messages fed to the draft request. */
+  window_size?: number;
+  /** Max characters of transcript text fed to the draft request. */
+  transcript_max_chars?: number;
 }
 
 // ── Top-Level Config ──────────────────────────────────────────────────
 
+/** Top-level copilot block configured per role. */
 export interface CopilotConfig {
-  /** Master toggle for the copilot subsystem (default false). */
-  enabled: boolean;
-  /** Ordered rule list; first matching rule wins. */
-  rules: CopilotRule[];
-  /** Optional LLM verdict config. Absent = heuristic-only decision path. */
-  llm?: CopilotLlmConfig;
+  /** Composer draft-suggestion config. */
+  draft: CopilotDraftConfig;
 }

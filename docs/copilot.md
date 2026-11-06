@@ -1,315 +1,177 @@
-# Copilot: Unified Turn-End Decision Pipeline
+# Copilot: Composer Draft Suggestions
 
 > Part of the rolebox documentation. See [README](../README.md) for overview.
 
-Copilot is an opt-in subsystem that decides, at `session.idle`, whether to inject a user message on the human's behalf to keep the workflow moving, or hand control back to the human. It is configured per-role via the `copilot:` block in `role.yaml`.
+Copilot suggests the next message the human user is likely to send. When a session goes idle with an empty composer, the dsh web client asks the host for one short draft, and — if the host returns one — writes it into the composer as a normal, editable draft. The user decides whether to edit it, send it, or clear it. Nothing is ever sent automatically.
 
-## Overview
+This replaced the former turn-end decision pipeline (heuristic `rules` and the LLM `llm` verdict). Those modes are **removed**; see [Removed turn-end modes](#removed-turn-end-modes). Built-in function auto-continuation is a separate policy and is unchanged.
 
-Every time a session goes idle, rolebox runs a single turn-end decision pipeline (`src/copilot/pipeline.ts`, invoked from the `session.idle` handler in `src/hooks/event-handler.ts`). The pipeline evaluates up to three policy sources in strict precedence order:
+## Where it runs
 
-1. **Builtin function-continuation source** (`src/copilot/sources/builtin.ts`) — always evaluated first, always active. This is the incumbent auto-continue policy: active functions with unmet completion conditions (`continue_until`, `shouldContinue` handlers) get a `[auto-continue N/M for fn]` reminder injected, subject to `decideContinuation` caps. If it injects, the pipeline stops.
-2. **User heuristic rules** (`src/copilot/rules.ts`) — opt-in. Declarative `match`/`action` rules over the last assistant text.
-3. **LLM role verdict** (`src/copilot/llm.ts`, `prompt.ts`, `transcript.ts`) — opt-in. A configured subagent role reviews a transcript of the tail window and returns a strict JSON verdict.
+Composer draft suggestions are a **dsh web** feature:
 
-Sources 2 and 3 are gated behind `copilot.enabled` (default `false`). When a session's role has no copilot config, or copilot is disabled, **only the builtin source runs — byte-identical legacy behavior** (`pipeline.ts`).
+- the **host half** (`src/copilot/draft/`, `src/copilot/config.ts`, `src/copilot/config-sources.ts`, `src/platform/adapters/dsh/copilot-suggest.ts`, `src/platform/adapters/dsh/web-copilot-route.ts`) resolves the acting role, composes the role/project/global config, reads the transcript and makes the one-shot model call;
+- the **browser half** (`src/platform/adapters/dsh/web-ui/suggest-dock.tsx`) is the 28×28 composer tool-row button that watches the session and fills the composer.
 
-### Invariants
+No other host (opencode, Pi, Codex) registers the button or the route. A dsh profile without the host `llm` service still boots; a fully configured suggestion request then answers `disabled` with reason `llm-unavailable`, and the button stops asking for that session.
 
-- **At most one injection per `session.idle`.** Each source returns as soon as it injects; the next source runs only when the previous one declined (`pipeline.ts`).
-- **First actionable decision wins.** Builtin first, then rules, then LLM.
-- **`skip` consumes the decision.** A rule with action `skip` injects nothing *and* blocks the LLM fallthrough (`pipeline.ts`).
+## How it works
+
+1. The browser watches the session. It is eligible when the agent is **not running**, the input phase is `plain`, the draft is **empty**, the session is not blank and not a subagent conversation.
+2. On a turn end (`running` true → false) it waits **300 ms** and makes **one** `POST /rolebox/copilot/suggest` request. The same idle never asks twice: a `none` answer (or a cancelled schedule) is final until the next turn. The user can always ask again by clicking the button.
+3. On the host, the suggester:
+   - resolves `roleId = activeRole(session) ?? defaultRoleId` and composes the effective `copilot.draft` config from the role, project and global sources (see [Configuration precedence](#configuration-precedence)); a role-less session still gets the project/global fallback;
+   - answers `disabled` when the enable flag, `provider`, `model` or the host `llm` service is missing;
+   - reads the last `window_size` messages, capped at `transcript_max_chars` characters (the cap keeps the most recent content), including brief tool summaries;
+   - makes **exactly one** model call, bounded by `timeout_ms` (default `4000` ms), with **reasoning disabled** (`reasoningEffort: "off"`) and provider-neutral request options; there is no retry;
+   - sanitizes the answer to at most `max_chars` characters. An empty answer, the literal `[none]` marker, a timeout, an abort or a provider error all become `none` (never an error shown to the user).
+4. The browser re-reads the **latest** state before applying the answer — the draft must still be empty, the phase still `plain`, the session still idle and the same, and the component still mounted. Anything else drops the answer.
+5. A returned draft is written with `inputActions.setDraft(text)`. The component remembers its own text, so the host echo of that write is not mistaken for the user typing. While an injected draft is present the button becomes **Clear suggestion** and clears the composer with `setDraft('')`.
+
+### Cancellation
+
+Every request carries an `AbortController`. The client aborts it when the user edits before the response, the session starts running again, the session id changes, or the component unmounts. The host also aborts its model call when the HTTP client goes away. A late answer is never applied.
+
+## Route contract
+
+`POST /rolebox/copilot/suggest` with JSON body `{ "session": "<id>" }` (body capped at 8192 bytes):
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| 200 | `{ ok: true, status: "suggested", text, model, ms }` | One draft, the route's model id, and the elapsed milliseconds. |
+| 200 | `{ ok: true, status: "none" }` | Nothing sensible to suggest. Do not retry this idle. |
+| 200 | `{ ok: true, status: "disabled", reason }` | The feature is off for this session's role/profile. The client remembers this per session id and stops asking. |
+| 400 | `{ ok: false, error }` | Malformed JSON, or a missing/empty `session`. |
+| 404 | `{ ok: false, error }` | Unknown session. |
+| 405 | `{ ok: false, error }` | Known path, non-POST method. |
+| 413 | `{ ok: false, error }` | Request body over the cap. |
+| 500 | `{ ok: false, error }` | Unexpected failure. |
+
+`disabled` reasons are stable strings: `not-enabled`, `model-not-configured`, `llm-unavailable`. A `none` answer may carry an internal reason (`transcript-unavailable`, `timeout`, `stream-error`, `empty-draft`, `aborted`) but the HTTP body is just `{ ok: true, status: "none" }`.
+
+The route is composed into the plugin's single `/rolebox` web-server registration; it owns the exact `/rolebox/copilot/suggest` path for every method (so a non-POST reaches its documented `405`) and lets every other request fall through to the role-switch route.
 
 ## Config Reference
 
-The `copilot:` block is parsed by `parseCopilotConfig` (`src/copilot/config.ts`). The type definitions live in `src/copilot/types.ts` and the field lands on `RoleConfig.copilot` (`src/types.core.ts`).
+The block is parsed by `parseCopilotDraftFragment` and composed by `composeCopilotConfig` (`src/copilot/config.ts`); `parseCopilotConfig` is the single-role compatibility wrapper. The types live in `src/copilot/types.ts` and the role field lands on `RoleConfig.copilot` (`src/types.core.ts`). A role configures it in `role.yaml`:
 
 ```yaml
 copilot:
-  enabled: false            # master toggle
-  rules: []                 # ordered list; first match wins
-  llm:                      # optional; absent = heuristic-only path
-    role: <subagent-id>     # required
-    max_verdict_timeout_ms: 30000
-    guidance: <string>      # optional; replaces the default advisory text
-    transcript:
-      window_size: 20
-      max_chars: 8000
-      include_tools: true
+  draft:
+    enabled: true
+    provider: example-provider
+    model: example-model
+    timeout_ms: 4000
+    max_chars: 120
+    window_size: 8
+    transcript_max_chars: 4000
 ```
 
-The parsed shape is declared in `src/copilot/types.ts`:
+Only the `draft` block is read. `draft: {}` is valid and is treated as absent, so a lower-precedence source (or the defaults) supplies every field.
 
-`src/copilot/types.ts` — `CopilotConfig` (the top-level copilot block):
+| Field | Type | Default | Clamp / requirement |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `false` | Master toggle. Boolean strings (`"true"` / `"false"`) are coerced; an invalid value warns and is treated as absent. |
+| `provider` | string | — | Optional override, but a request needs it together with `model`. Non-empty string; invalid values warn and are treated as absent. |
+| `model` | string | — | Optional override, but a request needs it together with `provider`. Non-empty string; invalid values warn and are treated as absent. |
+| `timeout_ms` | number | `4000` | Clamped to `200`–`10000`. Hard deadline for the one model call; the call answers as soon as the provider responds, so this is a ceiling, not added latency. |
+| `max_chars` | number | `120` | Clamped to `16`–`500`. Upper bound on the suggested draft, applied at a word boundary when possible. |
+| `window_size` | number | `8` | Clamped to `2`–`40`. Number of most recent transcript messages sent to the provider. |
+| `transcript_max_chars` | number | `4000` | Clamped to `500`–`20000`. Tail cap on the transcript text sent to the provider. |
 
-```ts
-export interface CopilotConfig {
-  /** Master toggle for the copilot subsystem (default false). */
-  enabled: boolean;
-  /** Ordered rule list; first matching rule wins. */
-  rules: CopilotRule[];
-  /** Optional LLM verdict config. Absent = heuristic-only decision path. */
-  llm?: CopilotLlmConfig;
-}
-```
+Numeric strings are coerced; non-numeric values warn and are treated as absent. A non-object `copilot` block or `draft` value warns and contributes no fields. The parser always returns a fresh object and never mutates the frozen defaults.
 
-### Field reference
+### Configuration precedence
 
-| Field | Type | Default | Semantics |
-|---|---|---|---|
-| `enabled` | boolean | `false` | Master toggle. When false, only the builtin continuation source runs. Strings are coerced (`"true"` → `true`); invalid values warn and fall back to the default. |
-| `rules` | array | `[]` | Ordered rule list. Evaluated in order; the **first matching rule wins**. Malformed entries are skipped with a warning; duplicate `id`s are dropped (first occurrence kept). |
+A role does not have to configure `copilot.draft`: the effective config is
+composed from three sources, highest precedence first.
 
-#### Rule entry
+| Precedence | Source | Shape |
+| --- | --- | --- |
+| 1 (highest) | The acting role's `role.yaml` | `copilot.draft` |
+| 2 | Project file `<workspace>/.rolebox/config.json` | top-level `copilot.draft` |
+| 3 (lowest) | Global file `<rolebox-config-home>/config.yaml` | top-level `copilot.draft` |
 
-| Field | Type | Default | Semantics |
-|---|---|---|---|
-| `id` | string | required | Unique rule identifier. Missing/blank id → rule skipped with a warning. |
-| `match` | object | required | At least one of `pattern` / `contains` must be set, otherwise the rule is skipped. When both are set, **both must match (AND)**. |
-| `match.pattern` | string | — | Regex matched against the model's last assistant text. Invalid regexes warn and the offending rule is skipped; evaluation never throws (`rules.ts`). |
-| `match.contains` | string | — | Case-insensitive substring check against the last assistant text. |
-| `action` | enum | required | One of `continue` \| `skip` \| `blocked` \| `done` (`COPILOT_ACTIONS`, `types.ts`). Unknown values → rule skipped with a warning. |
-| `reply` | string | per-action default | Custom reply text injected for `continue`/`blocked`/`done`. Never used for `skip`. |
+The global path is the same `config.yaml` the CLI uses (`getConfigPath()`):
+`$ROLEBOX_CONFIG_DIR/config.yaml`, else `$XDG_CONFIG_HOME/rolebox/config.yaml`,
+else `~/.config/rolebox/config.yaml` (`%APPDATA%/rolebox/config.yaml` on
+Windows). That file is shared with the CLI registry list: `rolebox registry
+add`, `remove` and `default` rewrite only the `registries` key, so the
+`copilot` block (and the other global keys) survive those writes.
 
-The `action` enum is the `COPILOT_ACTIONS` constant (`src/copilot/types.ts`):
-
-```ts
-/** Valid copilot rule actions. */
-export const COPILOT_ACTIONS = ["continue", "skip", "blocked", "done"] as const;
-
-/** Union of valid copilot rule actions. */
-export type CopilotAction = (typeof COPILOT_ACTIONS)[number];
-```
-
-Per-action default replies (`DEFAULT_RULE_REPLIES`, `rules.ts`):
-
-| Action | Default reply | Effect |
-|---|---|---|
-| `continue` | `Continue.` | Inject the reply and stop the pipeline. |
-| `skip` | *(never injected)* | Consume the turn: no injection, no LLM fallthrough. |
-| `blocked` | `Blocked — end turn.` | Inject the reply and stop the pipeline. |
-| `done` | `Produce final output now.` | Inject the reply and stop the pipeline. |
-
-#### `llm` block
-
-| Field | Type | Default | Semantics |
-|---|---|---|---|
-| `role` | string | required | Subagent id of the copilot decision-maker. Must be a **resolved subagent** at runtime; an unknown role warns once (per role id) and the LLM source is skipped (`llm.ts`). Missing role → the whole `llm` block is ignored with a warning. |
-| `max_verdict_timeout_ms` | number | `30000` | Hard timeout for the verdict round-trip (child-session create + prompt). On timeout, the verdict is treated as a failure → skip. Numeric strings are coerced. |
-| `guidance` | string | built-in advisory text | **Replaces the entire default GUIDANCE block verbatim** (replace-if-present semantics). See [LLM-role mode](#llm-role-mode). |
-| `transcript` | object | all defaults | Transcript window config. `transcript: {}` is valid and yields all defaults. |
-| `transcript.window_size` | number | `20` | Number of most recent messages fed to the verdict LLM. |
-| `transcript.max_chars` | number | `8000` | Hard cap on transcript length; **tail-truncated** (most recent content kept) when exceeded (`transcript.ts`). |
-| `transcript.include_tools` | boolean | `true` | When true, tool results are appended as brief one-line summaries; when false, tool parts are dropped entirely (`transcript.ts`). |
-
-Non-object input at any level (e.g. `copilot:` given a string, `rules:` given an object) falls back to defaults with a warning. The parser always returns a fresh object with fresh arrays; the frozen defaults (`DEFAULT_COPILOT_CONFIG`, `DEFAULT_COPILOT_LLM_CONFIG`, `DEFAULT_COPILOT_TRANSCRIPT_CONFIG`) are never shared or mutated (`config.ts`).
-
-## Precedence
-
-The pipeline (`pipeline.ts`) runs exactly this order for one idle:
-
-```
-a. BUILTIN  → if it injects, STOP
-b. RULES    → first matching rule:
-                 skip           → consume the turn (no injection, no LLM fallthrough)
-                 continue|blocked|done → inject reply, STOP
-c. LLM      → advance:true  → inject replyText
-              advance:false → hand control back (no injection)
-              null (any failure) → no injection
-```
-
-- When the role has no copilot config, or `enabled` is false, only the builtin source runs.
-- The rules source reuses the handler-precomputed last assistant text when present, and only pays for a lazy `messages` read when copilot is enabled (`pipeline.ts`).
-- Copilot-sourced injections are wrapped via `buildReminder` and stamped with `COPILOT_MARKER`; the builtin source keeps its own existing `[auto-continue` marker.
-
-## LLM-Role Mode
-
-### Authoring the decision-maker role
-
-`llm.role` names a rolebox subagent that acts as the copilot decision-maker. It must be a resolved subagent (`resolvedSubagents`, built by `buildSubagentLineage` in `src/dispatch/factory.ts`). The role's system prompt should instruct it to act as a conservative continuation judge: read the transcript, decide whether the agent genuinely needs a nudge to finish, and reply with the verdict JSON.
-
-### The verdict exchange
-
-The exchange happens on a **fresh child session** (`parentID` = origin sid) — the origin session's transcript is never touched: `prompt`/`promptSync` are only ever called on the child (`llm.ts`). The flow:
-
-1. Resolve `role` against the resolved subagent registry; unknown role → skip (warn-once).
-2. Create a child session, then `promptSync` the verdict prompt with an `AbortSignal` firing after `max_verdict_timeout_ms`.
-3. Parse the verdict from the **last text part** of the response.
-4. Abort the child session best-effort in all cases (`llm.ts`).
-
-There is **no retry** — a single attempt per idle (`llm.ts`).
-
-### Transcript-prompt structure
-
-`buildVerdictPrompt` (`src/copilot/prompt.ts`) assembles four sections:
-
-1. **Role-identity header** — names the session and states the task ("decide whether to inject a user message on the human's behalf... or hand control back to the human").
-2. **GUIDANCE (advisory)** — the default advisory text, or `llm.guidance` replacing it wholesale.
-3. **TRANSCRIPT** — the role-labeled transcript from `assembleTranscript`: `user: <text>` / `assistant: <text>` lines, plus `[tool <name>] completed: <detail>` / `[tool <name>] error: <detail>` summaries when `include_tools` is true (`transcript.ts`).
-4. **VERDICT CONTRACT** — the exact JSON reply shape.
-
-Verbatim from `src/copilot/prompt.ts` (`buildVerdictPrompt`, the four-section assembly):
-
-```ts
-export function buildVerdictPrompt(opts: VerdictPromptOptions): string {
-  const guidance = opts.guidance ?? DEFAULT_GUIDANCE;
-
-  const sections = [
-    `[copilot-verdict-request] You are the copilot decision-maker for rolebox session ${opts.sid}. The agent finished its turn and the session is idle. Decide whether to inject a user message on the human's behalf to keep the workflow moving, or hand control back to the human.`,
-    `## GUIDANCE (advisory)\n\n${guidance}`,
-    `## TRANSCRIPT\n\n${opts.transcript}`,
-    `## VERDICT CONTRACT\n\n${VERDICT_CONTRACT}`,
-  ];
-
-  return sections.join("\n\n");
-}
-```
-
-The tool-result classification inside the TRANSCRIPT section is `summarizeTool` (`src/copilot/transcript.ts`):
-
-```ts
-function summarizeTool(part: Part): string | null {
-  if (!isToolPart(part)) return null;
-  const state = part.state;
-
-  if (state.status === "completed") {
-    const title =
-      typeof state.title === "string" && state.title.length > 0
-        ? state.title
-        : null;
-    const outputFirstLine = firstNonEmptyLine(state.output);
-    const detail = title ?? outputFirstLine ?? "(no output)";
-    return `[tool ${part.tool}] completed: ${truncate(detail, TOOL_SUMMARY_MAX)}`;
-  }
-
-  if (state.status === "error") {
-    return `[tool ${part.tool}] error: ${truncate(String(state.error), TOOL_SUMMARY_MAX)}`;
-  }
-
-  // pending / running carry no result yet.
-  return null;
-}
-```
-
-### Default advisory GUIDANCE
-
-```text
-When the assistant is asking for human approval (HITL / approval-pending) or is about to perform a destructive operation (delete, overwrite, force-push, reset, migration), prefer hand_to_user.
-When the assistant is blocked on a trivial confirmation or asks "should I continue?", you may advance with a short, factual reply if you are confident.
-Never fabricate facts, tool results, or user intent; never answer questions that need the human's own knowledge.
-```
-
-### Verdict contract
-
-The role must reply with exactly one JSON object, nothing else:
+Project JSON:
 
 ```json
-{"advance": true|false, "replyText": "<text to inject as the user message, only if advance>"}
-```
-
-- `advance: true` → `replyText` is injected as the user message.
-- `advance: false` → hand control back to the human (no injection).
-
-Parsing tolerates fenced blocks (` ```json … ``` `) and surrounding prose by extracting the first well-formed JSON object (string- and nesting-aware scan, `llm.ts`), then applies **strict type validation**: `advance` must be a boolean and `replyText` must be a string. Anything else — unparseable JSON, wrong types, empty/non-text response, timeout, launch failure — collapses to `null`, which the pipeline treats as **skip this idle** (`llm.ts`). A failed LLM ask never blocks the pipeline.
-
-Verbatim from `src/copilot/llm.ts` (`parseVerdictResponse`, the strict type validation):
-
-```ts
-function parseVerdictResponse(
-  parts: Array<{ type: string; text?: string }>,
-): Verdict | null {
-  const lastTextPart = parts
-    .filter((p) => p.type === "text" && typeof p.text === "string")
-    .pop();
-  if (!lastTextPart || typeof lastTextPart.text !== "string") return null;
-
-  const obj = extractFirstJsonObject(lastTextPart.text);
-  if (obj === null) return null;
-
-  // Strict type validation.
-  if (typeof obj.advance !== "boolean") return null;
-  if (typeof obj.replyText !== "string") return null;
-
-  return { advance: obj.advance, replyText: obj.replyText };
+{
+  "copilot": {
+    "draft": {
+      "enabled": true,
+      "provider": "example-provider",
+      "model": "example-model"
+    }
+  }
 }
 ```
 
-### Guidance is advisory — a design decision
-
-**State explicitly: `guidance` is ADVISORY — there is no code-level enforcement.** The pipeline deliberately contains no pattern-blocking of destructive operations, no HITL gate, and no guardrail logic (`prompt.ts`, `llm.ts`). The verdict LLM acts freely on the guidance text; the role author's judgment is the control surface. This is a deliberate design decision (removing code-level destructive-op blocking and trusting the role's instructions), not an omission.
-
-Deliberately absent by design: injection budgets, session caps, copilot cooldowns, and hard guardrails — the continuation caps live only in the builtin source (`decideContinuation`, `{ globalMaxTurns: 25, perFnMax: fn.continue_max ?? 5 }`, `builtin.ts`).
-
-## Marker and Synthetic-Injection Classification
-
-Copilot-injected prompts re-enter the plugin through `chat.message` as user-role messages. The marker constant (`src/copilot/constants.ts`):
-
-```ts
-export const COPILOT_MARKER = "[copilot-auto:";
-```
-
-Injected replies are wrapped via `buildReminder` with the marker payload naming the source (`pipeline.ts`):
-
-- `[copilot-auto: rule:<rule-id>]` — a user rule injected the reply
-- `[copilot-auto: llm]` — the LLM verdict injected the reply
-
-Verbatim from `src/copilot/pipeline.ts` (`injectCopilotReply` marker wrapping):
-
-```ts
-  const reminder = buildReminder({
-    marker: `${COPILOT_MARKER} ${source}]`,
-    body: decision.reply,
-  });
-```
-
-`isSyntheticInjection` (`src/hooks/chat-message.ts`, mirrored at `src/platform/adapters/pi/chat-activation.ts`) matches on this prefix. Classification matters because synthetic re-entries must NOT:
-
-- **Reset `continuationCount` / `cooldownUntilTurn`** — resetting would defeat the builtin continuation caps and enable unbounded auto-continue spin (`chat-message.ts`).
-- **Enter `userMessagedSessions`** — they are not genuine user turns (`chat-message.ts`).
-- **Cancel active loops** — loop cancellation is triggered by real user messages only (`chat-message.ts`).
-
-## Worked Example
-
-A complete `copilot:` block (rules + llm) that parses cleanly through `parseCopilotConfig`:
+Global YAML:
 
 ```yaml
 copilot:
-  enabled: true
-  rules:
-    - id: done-marker
-      match:
-        contains: "[done]"
-      action: done
-      reply: "Wrap up and emit the final result."
-    - id: ends-with-question
-      match:
-        pattern: '\?\s*$'
-      action: blocked
-    - id: stalled
-      match:
-        pattern: "as of my last knowledge"
-        contains: "I cannot"
-      action: continue
-    - id: inconclusive
-      match:
-        contains: "inconclusive"
-      action: skip
-  llm:
-    role: copilot-verdict
-    max_verdict_timeout_ms: 15000
-    guidance: "Prefer hand_to_user when the assistant requests human approval or is about to perform a destructive operation."
-    transcript:
-      window_size: 10
-      max_chars: 4000
-      include_tools: true
+  draft:
+    enabled: true
+    provider: example-provider
+    model: example-model
 ```
 
-Semantics of this block:
+Composition rules:
 
-- `done-marker` — when the assistant text contains `[done]`, inject the custom reply and stop; no LLM ask.
-- `ends-with-question` — when the text ends with `?`, inject `Blocked — end turn.` and stop (returns control to the human).
-- `stalled` — when the text both matches the pattern AND contains `I cannot` (AND semantics), inject `Continue.` and stop.
-- `inconclusive` — consumes the turn without injection and without LLM fallthrough.
-- When no rule matches, the `copilot-verdict` role is asked on a fresh child session with a 15 s timeout, the custom `guidance` replacing the default advisory text, and a 10-message / 4000-char transcript including tool summaries.
+- **Field-level merge.** Each field is resolved independently: a higher source
+  that sets only `model` still inherits `provider`, `enabled` and the bounded
+  fields from lower sources.
+- **`enabled` is three-state.** A present `true` or `false` wins; an absent
+  `enabled` inherits from the next source. The final default is `false`, so the
+  feature stays off until some source enables it. A role `enabled: false`
+  therefore overrides an enabled project or global config.
+- **Invalid values are absent.** An invalid field value warns once and is
+  ignored, exactly as if it were not written, so a lower source can supply it.
+- **Role-less sessions still work.** When no role resolves for a session (or the
+  resolved id is not in the catalog), the role contributes no fields and the
+  project/global sources alone decide the config.
+- **Read once at boot.** Both files are read once when the plugin starts; there
+  is no file watching. Missing files contribute nothing. An unreadable or
+  malformed file warns and contributes nothing, so it never fails the boot.
+  Restart the host (or reload the plugin) after editing either file.
 
-The verdict role (`copilot-verdict`) must be declared as a subagent of the role and instructed to reply with the strict JSON contract: `{"advance": true|false, "replyText": "..."}`.
+### What makes the feature run
+
+All of these are required for a suggestion:
+
+1. the effective `copilot.draft.enabled` is `true` (from the role, project or global source);
+2. `provider` and `model` are both set by some source;
+3. the dsh host has mounted its `llm` service;
+4. the session can be read (unknown sessions answer `404`).
+
+Anything missing yields `disabled` with the corresponding reason — never an error in the composer.
+
+## Privacy
+
+The most recent `window_size` messages of the session transcript — truncated to `transcript_max_chars` characters, including brief tool-result summaries — are sent to the **configured provider/model** to build one suggestion. That provider is the one named in the effective `copilot.draft` config, not necessarily the model running the session. Rolebox does not persist the draft request or the transcript copy; the generated text lives only in the composer draft and is never sent to the agent unless the user submits it. Leave `enabled` off (the default) on roles or projects whose transcripts must not leave for another provider.
+
+## Limitations
+
+- **Real draft text, not ghost text.** The suggestion is written into the composer as ordinary editable text. There is no inline completion, no per-token streaming into the editor and no accept/decline overlay.
+- **Never auto-sent.** Filling the composer does not submit it. The user must send it.
+- **One suggestion per idle.** An automatic `none` is not retried until the next turn; only an explicit button click can ask again within the same idle.
+- **One bounded call, provider-neutral options.** Each suggestion is a single model call bounded by `timeout_ms` and a fixed output-token cap; there is no retry. The request carries only options that every supported provider route accepts — in particular no stop sequences — because a host adapter that rejects an unsupported option fails the call before the model runs. Reasoning is explicitly disabled (`reasoningEffort: "off"`): a one-line next-message prediction must not pay for chain-of-thought, and both supported routes accept `off` (llm-deepseek serializes `thinking: { type: "disabled" }`; pi-ai omits the reasoning option).
+- **Silent misses are normal.** A timeout, abort, provider error or empty answer produces no draft and no visible error.
+- **Model and provider are config, not a live picker.** Changing a role takes effect on the next request after the role config is reloaded; the project/global files are read once at boot, so restart the host (or reload the plugin) after editing them.
+- **dsh web only.** The route and button are not registered on opencode, Pi or Codex.
+- **`disabled` is sticky per session.** Once the host answers `disabled` for a session, the button stops asking for that session until the page reloads.
+
+## Removed turn-end modes
+
+The former `copilot.enabled`, `copilot.rules` and `copilot.llm` top-level keys (heuristic rules and the LLM verdict role) were removed together with the turn-end decision pipeline (`src/copilot/pipeline.ts` now runs only the built-in continuation source; `src/copilot/rules.ts`, `llm.ts` and `prompt.ts` are gone).
+
+- Legacy keys are **ignored with one warning per key** (`copilot.<key> was removed; use copilot.draft`); parsing never throws.
+- `copilot.draft` replaces them for the composer-suggestion feature.
+- **Built-in function auto-continuation is unchanged.** It remains a separate policy driven by active functions (`continue_until`, `shouldContinue` handlers) and is not configured through `copilot`.

@@ -2,6 +2,8 @@
 
 import { RoleSwitchDock } from "./role-switch-dock.tsx";
 import type { RoleSwitchDockProps } from "./role-switch-dock.tsx";
+import { SuggestDock } from "./suggest-dock.tsx";
+import type { SuggestDockProps } from "./suggest-dock.tsx";
 import { RoleboxLogsPanel } from "./rolebox-logs-panel.tsx";
 import { RoleboxMonitorPanel } from "./rolebox-monitor-panel.tsx";
 import { RoleboxRolesPanel } from "./rolebox-roles-panel.tsx";
@@ -26,8 +28,14 @@ export const DOCK_SLOT_NAME = "conversation.input.right";
 /** List-entry id within that seat (list-kind slots key entries by `id`). */
 export const DOCK_SLOT_ID = "rolebox";
 
-/** List position within the seat — rolebox is its only occupant today. */
+/** List position within the seat — the role chip sits first. */
 export const DOCK_SLOT_ORDER = 40;
+
+/** List-entry id of the composer draft-suggestion button. */
+export const SUGGEST_SLOT_ID = "rolebox-suggest";
+
+/** List position of the draft-suggestion button — immediately after the chip. */
+export const SUGGEST_SLOT_ORDER = 41;
 
 /** Locale namespace declared by the entry (dsh-client-ui-conversation). */
 export const DOCK_LOCALE = "conversation";
@@ -181,6 +189,23 @@ export function apply(ctx: DshClientContext): (() => void) | void {
     ),
   );
 
+  // The composer draft-suggestion button is the seat's SECOND entry. It owns
+  // its own request/cancel lifecycle (see suggest-dock.tsx) and shares only
+  // the session-scoped inject face with the chip.
+  contribute("draft suggestion button", () =>
+    ctx.slots.inject(DOCK_SLOT_NAME, () =>
+      ctx.slots.register(
+        {
+          name: DOCK_SLOT_NAME,
+          id: SUGGEST_SLOT_ID,
+          order: SUGGEST_SLOT_ORDER,
+          inject: (sessionId: string) => ({ sessionId }),
+        },
+        SuggestDock,
+      ),
+    ),
+  );
+
   contribute("Rolebox settings page", () =>
     ctx.slots.inject(SETTINGS_SLOT_NAME, () =>
       ctx.slots.register(
@@ -267,6 +292,7 @@ export default {
   apply,
 };
 
-// Type-only re-exports: the role chip's and the roles page's composed props for
-// consumers wiring the entry (e.g. the slot-contract mirror in tests).
-export type { RoleSwitchDockProps, RoleboxRolesPanelProps };
+// Type-only re-exports: the role chip's, the draft button's and the roles
+// page's composed props for consumers wiring the entry (e.g. the slot-contract
+// mirror in tests).
+export type { RoleSwitchDockProps, SuggestDockProps, RoleboxRolesPanelProps };

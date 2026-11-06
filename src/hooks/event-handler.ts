@@ -131,19 +131,13 @@ export async function handleEvent(
         functionRuntime.markDirty();
       }
 
-      // --- Turn-end decision (Phase 2 — ONE injection per idle) ---
-      // Unified pipeline (subtask 8): the builtin continuation policy is
-      // always the first source (extracted verbatim into
-      // src/copilot/sources/builtin.ts), followed by user heuristic rules and
-      // the LLM-role verdict when copilot is enabled for the session's role.
-      // When copilot is absent/disabled the pipeline runs ONLY the builtin
-      // source — byte-identical legacy behavior.
+      // --- Turn-end continuation (Phase 2 — ONE injection per idle) ---
+      // The pipeline runs the builtin function-continuation source
+      // (src/copilot/sources/builtin.ts) and nothing else.
       await runTurnEndPipeline(
         {
           session: deps.session,
           dir: deps.dir,
-          copilotConfigs: deps.copilotConfigs,
-          resolvedSubagents: deps.resolvedSubagents,
         },
         sid,
         {

@@ -36,6 +36,14 @@ In `packages/subagent/subagent/src/{types,index,manager}.ts`, everything rolebox
 
 `package.json` states it as `engines.dsh: ">=0.2.1-alpha.3"`, so dsh refuses an unsupported line before loading rolebox instead of failing later, at the dispatch seam. dsh's own pre-flight reads `engines.dsh` first — an own range decides alone and peer ranges are then ignored — and otherwise checks every `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` peer range, treating prereleases as participants. An unmet requirement denies the plugin until an exact-version exemption is granted (`dsh plugin allow-version`).
 
+## Breaking changes
+
+### Copilot turn-end modes removed (upcoming release)
+
+The top-level `copilot.enabled`, `copilot.rules` and `copilot.llm` keys were removed with the turn-end decision pipeline. They are **ignored with one warning per key** (`copilot.<key> was removed; use copilot.draft`); parsing never throws, so an existing role loads without edits.
+
+The replacement is `copilot.draft`, which configures the composer draft suggester — a dsh web feature (host `POST /rolebox/copilot/suggest` route plus the composer tool-row button in the dsh web client). It has no effect on other harnesses. **Built-in function auto-continuation is unchanged**: it remains a separate policy driven by active functions and their completion conditions, and is not configured through `copilot`. See [copilot.md](copilot.md) for the new block and behavior.
+
 ## Pi parity status
 
 Rolebox's Pi extension (`src/entries/pi.ts`) registers the full shared opencode tool surface through `PiLightweightServiceStack`; parity is enforced by `tests/pi-parity.test.ts`.

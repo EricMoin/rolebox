@@ -1,9 +1,9 @@
 /**
- * Transcript assembly for the LLM-role copilot mode.
+ * Transcript assembly for the composer draft suggester.
  *
  * Builds a role-labeled plain-text transcript of the tail window of a
- * session's conversation, for consumption by the copilot decision policy
- * and prompt builder. This module owns NO prompt template text — it only
+ * session's conversation, for consumption by the draft prompt builder.
+ * This module owns NO prompt template text — it only
  * formats. On read failure or timeout it returns null and the caller
  * treats that as "no transcript available".
  */

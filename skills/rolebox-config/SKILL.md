@@ -17,7 +17,7 @@ an MCP prefix; use the names and schemas actually registered in the session.
 | Author `role.yaml`, choose models, restrict tools, configure memory or private subagents | [Roles](references/roles.md) |
 | Add skills, reusable functions, activation rules or reference documents | [Assets and functions](references/assets.md) |
 | Dispatch work, declare outcome graphs, set worker budgets or form a role team | [Orchestration](references/orchestration.md) |
-| Configure hooks, error recovery, Copilot, notifications, browser/desktop access or LSP | [Runtime features](references/runtime.md) |
+| Configure hooks, error recovery, composer draft suggestions (Copilot), notifications, browser/desktop access or LSP | [Runtime features](references/runtime.md) |
 
 ## Apply a change
 

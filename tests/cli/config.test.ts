@@ -3,7 +3,7 @@ import { rmSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "nod
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { dump } from "js-yaml";
+import { dump, load } from "js-yaml";
 import { CANCEL_SYMBOL as CANCEL, isCancel } from "@clack/prompts";
 import type { RoleboxConfig, LockEntry } from "../../src/cli/types.ts";
 import type { PromptApi } from "../../src/cli/pick.ts";
@@ -120,6 +120,59 @@ describe("saveConfig", () => {
     expect(raw).toContain("name: test");
     expect(raw).toContain("url: https://test.dev");
     expect(raw).toContain("default: true");
+  });
+
+  it("preserves unknown top-level keys when rewriting registries", async () => {
+    const { loadConfig, saveConfig } = await importConfig();
+
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      configPath(),
+      dump({
+        registries: [
+          { name: "my-registry", url: "https://example.com", default: true },
+        ],
+        copilot: { draft: { enabled: true, model: "m" } },
+        computerUse: false,
+      }),
+      "utf-8",
+    );
+
+    const cfg = loadConfig();
+    saveConfig(cfg);
+
+    const raw = load(readFileSync(configPath(), "utf-8")) as {
+      registries: Array<Record<string, unknown>>;
+      copilot?: unknown;
+      computerUse?: unknown;
+    };
+
+    expect(raw.copilot).toEqual({ draft: { enabled: true, model: "m" } });
+    expect(raw.computerUse).toBe(false);
+    expect(raw.registries).toHaveLength(1);
+    expect(raw.registries[0]).toEqual({
+      name: "my-registry",
+      url: "https://example.com",
+      default: true,
+    });
+  });
+
+  it("replaces a malformed existing file with valid YAML without throwing", async () => {
+    const { saveConfig } = await importConfig();
+
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(configPath(), "registries: [unterminated\n", "utf-8");
+
+    const config: RoleboxConfig = {
+      registries: [{ name: "a", url: "https://a.dev" }],
+    };
+
+    expect(() => saveConfig(config)).not.toThrow();
+
+    const raw = load(readFileSync(configPath(), "utf-8")) as {
+      registries: Array<Record<string, unknown>>;
+    };
+    expect(raw).toEqual({ registries: [{ name: "a", url: "https://a.dev" }] });
   });
 });
 

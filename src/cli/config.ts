@@ -1,4 +1,4 @@
-import { dump } from "js-yaml";
+import { dump, load } from "js-yaml";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { getConfigDir } from "./paths.ts";
@@ -43,11 +43,40 @@ export function loadConfig(): RoleboxConfig {
 
 /**
  * Save config to ~/.config/rolebox/config.yaml.
+ *
+ * `config.yaml` is shared with other subsystems: it also holds the global
+ * feature gates and the `copilot.draft` fallback. A registry write therefore
+ * preserves every top-level key already in the file and overwrites only the
+ * known `registries` field, which stays authoritative.
  */
 export function saveConfig(config: RoleboxConfig): void {
   ensureConfigDir();
-  const yaml = dump(config);
+  const base = readConfigForPreservation();
+  const yaml = dump({ ...base, registries: config.registries });
   writeFileSync(getConfigPath(), yaml, "utf-8");
+}
+
+/**
+ * Read the existing config file as a preservation base.
+ *
+ * The read must never break a save: a missing, unreadable, unparseable or
+ * non-object file yields `{}`, so the caller falls back to writing today's
+ * registries-only document.
+ */
+function readConfigForPreservation(): Record<string, unknown> {
+  try {
+    const configPath = getConfigPath();
+    if (!existsSync(configPath)) return {};
+    const parsed: unknown = load(readFileSync(configPath, "utf-8"));
+    return isPlainObject(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Check whether a raw value is a plain object (not null, not array). */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

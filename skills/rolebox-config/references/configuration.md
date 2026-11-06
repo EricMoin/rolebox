@@ -28,12 +28,16 @@ Separate CLI state from runtime role settings:
 
 | File or directory | Purpose |
 | --- | --- |
-| `<rolebox-config-home>/config.yaml` | Role registry sources and global feature gates |
+| `<rolebox-config-home>/config.yaml` | Role registry sources, global feature gates and the global `copilot.draft` fallback |
 | `<rolebox-config-home>/rolebox.lock` | CLI-managed installed versions and integrity |
 | `<rolebox-data-home>/roles/<registry>/<role-id>@<version>` | Shared installed role source |
 | `<harness-home>/rolebox/<role-id>` | `rolebox sync` link to that source |
 | `<harness-home>/role_config.yaml` | Harness-specific model aliases |
-| `<workspace>/.rolebox/config.json` | Project default role and feature gates |
+| `<workspace>/.rolebox/config.json` | Project default role, feature gates and the project `copilot.draft` fallback |
+
+`rolebox registry add|remove|default` rewrites only the `registries` key of
+`config.yaml` and preserves every other top-level key, including the global
+feature gates and the `copilot` block.
 
 Rolebox config home: `$ROLEBOX_CONFIG_DIR`, then `$XDG_CONFIG_HOME/rolebox`, then
 `%APPDATA%/rolebox` on Windows or `~/.config/rolebox` on Unix/macOS.
@@ -85,6 +89,25 @@ The built-in `oh-my-role` registry is available without listing it. Source kind
 is inferred from the URL: GitHub repository, GitLab project URL containing `/-/`,
 or HTTP `.yaml` manifest. Do not add the retired `kind` field. Prefer
 `rolebox registry --help` and the CLI to manipulate registry state.
+
+The same global `config.yaml` holds the lowest-precedence `copilot.draft`
+fallback (role > project > global), read once at plugin boot:
+
+```yaml
+copilot:
+  draft:
+    enabled: true
+    provider: example-provider
+    model: example-model
+```
+
+Only `enabled`, `provider`, `model`, `timeout_ms`, `max_chars`, `window_size`
+and `transcript_max_chars` are read. `enabled` is three-state — a present
+`true`/`false` wins, an absent value inherits from another source, and the final
+default is `false`. Fields merge individually. An invalid value warns once and is
+treated as absent so a lower source can supply it. Merge the `copilot` key with
+existing values; the registries and other keys are independent. Edit this file
+and restart the host or reload the plugin; there is no watching.
 
 ## Harness registration
 
@@ -217,7 +240,14 @@ For OpenCode's project-level role promotion, write
 
 ```json
 {
-  "defaultRole": "reviewer"
+  "defaultRole": "reviewer",
+  "copilot": {
+    "draft": {
+      "enabled": true,
+      "provider": "example-provider",
+      "model": "example-model"
+    }
+  }
 }
 ```
 
@@ -225,7 +255,15 @@ For OpenCode's project-level role promotion, write
 display name. The role can come from `<workspace>/rolebox/reviewer/role.yaml`
 or the synced harness role tree. If the workspace has a `rolebox/` directory,
 only that tree is searched. Merge the setting with existing project values;
-desktop/browser gates in the same file are independent settings.
+desktop/browser gates and the `copilot` key in the same file are independent
+settings.
+
+The project `copilot.draft` block is the middle precedence layer for DSH
+composer draft suggestions: the acting role's `copilot.draft` wins per field,
+then this project block, then the global `config.yaml` block. Only DSH reads it;
+the same JSON file's `defaultRole` is read by OpenCode. The copilot files are read
+once at plugin boot (no watching), and an invalid value is treated as absent so a
+lower source can supply it. See [Runtime](runtime.md#composer-draft-suggestions-copilot).
 
 | Harness | Effective behavior |
 | --- | --- |

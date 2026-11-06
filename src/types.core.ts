@@ -142,7 +142,7 @@ export interface RoleConfig {
   version?: string;
   /** Notification configuration for session lifecycle events */
   notifications?: NotificationConfig;
-  /** Copilot configuration for the unified turn-end decision pipeline */
+  /** Copilot configuration for the composer draft suggester */
   copilot?: CopilotConfig;
   /** Custom hook declarations for lifecycle event hooks */
   hooks?: HooksBlock;

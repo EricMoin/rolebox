@@ -30,6 +30,7 @@ export async function handleChatMessage(
   const isSyntheticInjection =
     firstTextStr.includes("[auto-continue") ||
     firstTextStr.includes(LOOP_PROGRESS_MARKER) ||
+    // Retained for history: legacy copilot injections stay synthetic on replay.
     firstTextStr.includes(COPILOT_MARKER) ||
     isDispatchNotification(firstTextStr);
 

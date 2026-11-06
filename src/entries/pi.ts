@@ -1350,8 +1350,8 @@ export default async function(pi: any): Promise<void> {
       dispatchManager,
       loopManager: loopCoordinator,
       notificationManager: getPiNotificationManager(),
-      // Copilot LLM-role verdict source: the subagent lineage built above
-      // (line 540) — the configured llm.role must be a key of this map.
+      // Resolved subagent registry retained for host adapters that
+      // assemble it; the turn-end pipeline no longer consumes it.
       resolvedSubagents,
       dir: process.cwd(),
     });

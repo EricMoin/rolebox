@@ -37,8 +37,6 @@ import { CustomHookRegistry } from "../../../hooks/custom/registry.ts";
 import { HookState } from "../../../hooks/state.ts";
 import { handleEvent } from "../../../hooks/event-handler.ts";
 import type { HookDeps } from "../../../hooks/deps.ts";
-import { parseCopilotConfig } from "../../../copilot/config.ts";
-import type { CopilotConfig } from "../../../copilot/types.ts";
 import { functionRuntime } from "../../../function/runtime-state.ts";
 import { sessionSignalLedger } from "../../../signal/session-signal-ledger.ts";
 import { createSubLogger } from "../../../logger.ts";
@@ -73,10 +71,8 @@ export interface PiHookPipelineOptions {
   /** S3-wired Pi NotificationManager, if notifications are enabled. */
   notificationManager?: NotificationManager;
   /**
-   * Resolved subagent registry for the copilot LLM-role verdict source
-   * (src/copilot/llm.ts). Threaded from pi-extension's buildSubagentLineage.
-   * Optional — absent → the LLM verdict source is skipped (builtin + rules
-   * still run).
+   * Resolved subagent registry retained for host adapters that assemble it;
+   * the turn-end pipeline no longer consumes it.
    */
   resolvedSubagents?: Map<string, { parentFullId: string }>;
   /** State persistence directory (process.cwd() on Pi). */
@@ -163,12 +159,6 @@ export async function createPiHookPipeline(
   // ── roleMap ────────────────────────────────────────────────────────────
   const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
 
-  // ── Unified turn-end pipeline deps (copilot config per role) ──────────
-  const copilotConfigs = new Map<string, CopilotConfig>();
-  for (const resolved of resolvedRoles) {
-    copilotConfigs.set(resolved.id, parseCopilotConfig(resolved.config.copilot));
-  }
-
   // ── HookDeps (builtInHooks intentionally omitted on Pi) ────────────────
   const deps: HookDeps = {
     session,
@@ -179,7 +169,6 @@ export async function createPiHookPipeline(
     loopManager,
     customHooks,
     notificationManager,
-    copilotConfigs,
     resolvedSubagents,
   };
   log.debug("Pi HookDeps assembled", { roles: resolvedRoles.length });

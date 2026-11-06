@@ -89,6 +89,7 @@ function isSyntheticInjection(text: string): boolean {
   return (
     text.includes("[auto-continue") ||
     text.includes(LOOP_PROGRESS_MARKER) ||
+    // Retained for history: legacy copilot injections stay synthetic on replay.
     text.includes(COPILOT_MARKER) ||
     isDispatchNotification(text)
   );

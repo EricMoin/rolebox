@@ -46,7 +46,7 @@ use one prompt source to avoid ambiguity.
 | `memory` | Summary injection and DSH recall settings |
 | `subagents` | Inline child definitions; directories also work |
 | `dispatch` | Background and synchronous prompt timeouts |
-| `hooks`, `copilot` | Lifecycle and continuation behavior |
+| `hooks`, `copilot` | Lifecycle hooks and composer draft suggestions (`copilot.draft`; the removed turn-end `enabled`/`rules`/`llm` keys are ignored with a warning) |
 | `graph` | Legacy selector only; see [Orchestration](orchestration.md) for effective graph configuration |
 
 `open`, `exports` and `open_roles` are accepted legacy fields with no discovery

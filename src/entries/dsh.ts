@@ -132,6 +132,15 @@ import {
 } from "../platform/adapters/dsh/web-role-switch-route.ts";
 import type { DshWebServerRouteRegistrar } from "../platform/adapters/dsh/web-role-switch-route.ts";
 import { DshRoleboxMonitorWebRoute } from "../platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import { DshCopilotSuggestWebRoute } from "../platform/adapters/dsh/web-copilot-route.ts";
+import { createCopilotSuggester } from "../platform/adapters/dsh/copilot-suggest.ts";
+import {
+  globalCopilotConfigPath,
+  projectCopilotConfigPath,
+  readCopilotFragmentFromJsonFile,
+  readCopilotFragmentFromYamlFile,
+} from "../copilot/config-sources.ts";
+import type { DraftLlm } from "../copilot/draft/suggest.ts";
 import {
   DshRoleboxLogsWebRoute,
   ROLEBOX_LOGS_ROUTE_PREFIX,
@@ -1053,6 +1062,35 @@ function probeWebServer(
 }
 
 /**
+ * Structurally probe the cordis ctx for the dsh llm service's one-shot
+ * streaming seam (`ctx.get("llm")`, `@deepseek-ai/dsh-llm`).
+ *
+ * The draft suggester needs `stream(options)` — the SAME seam the memory
+ * query scout consumes — not the adapter registry (`listProviders()`), so this
+ * probe accepts the service only when `stream` is a function. Like every
+ * optional-service probe it is deliberately NOT part of the `inject` roster:
+ * a profile without the llm service degrades to `disabled/llm-unavailable` for
+ * draft suggestions and the plugin keeps booting. A missing `get`, a throw on
+ * the unknown name, or a non-conforming value all resolve to "absent".
+ */
+function probeLlm(ctx: DshPluginContext): DraftLlm | undefined {
+  let service: unknown;
+  try {
+    service = typeof ctx.get === "function" ? ctx.get("llm") : undefined;
+  } catch {
+    return undefined;
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { stream?: unknown }).stream === "function"
+  ) {
+    return service as DraftLlm;
+  }
+  return undefined;
+}
+
+/**
  * Structurally probe the cordis ctx for the dsh system-prompt registry
  * service (`@deepseek-ai/dsh-system-prompt`).
  *
@@ -1450,6 +1488,21 @@ export async function apply(
     driverAvailable: browseUseGate.driver.available,
     driverPath: browseUseGate.driver.resolvedPath,
     reason: browseUseGate.reason,
+  });
+
+  // Copilot draft fallbacks are read ONCE here — there is no file watching.
+  // Both readers never throw: a missing, unreadable or malformed file simply
+  // contributes no fragment, so a broken project/global config can never fail
+  // the boot. Precedence is role > project > global, resolved per suggestion.
+  const projectCopilotFragment = readCopilotFragmentFromJsonFile(
+    projectCopilotConfigPath(process.cwd()),
+  );
+  const globalCopilotFragment = readCopilotFragmentFromYamlFile(
+    globalCopilotConfigPath(),
+  );
+  log.info("Copilot draft fallbacks resolved", {
+    projectConfig: projectCopilotFragment !== undefined,
+    globalConfig: globalCopilotFragment !== undefined,
   });
 
   // 2. Discover + resolve roles; sync agents into ctx.subagents.
@@ -2561,13 +2614,41 @@ export async function apply(
         ctx.sessions,
         { reload: () => roleboxReloader.reload() },
       );
+      // Composer draft suggester. The optional llm service is probed here so a
+      // profile without it degrades to `disabled/llm-unavailable` on the route
+      // instead of failing the boot; the suggester itself owns the role/config
+      // resolution and the single bounded model call.
+      const suggestLlm = probeLlm(ctx);
+      if (!suggestLlm) {
+        log.debug(
+          "No host llm service on ctx — copilot draft suggestions disabled",
+        );
+      }
+      const suggestRoute = new DshCopilotSuggestWebRoute(
+        createCopilotSuggester({
+          roles: resolvedRoles,
+          activeRole: (sessionId) => activeRole.get(sessionId),
+          defaultRoleId: config.activeRole,
+          sessionClient: sessionAdapter,
+          llm: suggestLlm,
+          projectFragment: projectCopilotFragment,
+          globalFragment: globalCopilotFragment,
+        }),
+      );
       const monitorRoute = new DshRoleboxMonitorWebRoute(
         roleSwitcher,
         ctx.sessions,
         loopCoordinator,
         process.cwd(),
         {
-          delegate: (req, res) => roleSwitchRoute.handle(req, res),
+          // ONE `/rolebox` prefix registration for every host surface. The
+          // suggester owns its exact path for every method (so a non-POST
+          // reaches its 405); every other request falls through to the
+          // role-switch handler.
+          delegate: (req, res) => {
+            if (suggestRoute.owns(req)) return suggestRoute.handle(req, res);
+            return roleSwitchRoute.handle(req, res);
+          },
         },
       );
       // From here on, every producer's signal reaches the SSE channel. Set
@@ -2579,7 +2660,7 @@ export async function apply(
       monitorRouteRegistered = true;
       log.info("Rolebox routes registered on host web server", {
         prefix: ROLE_SWITCH_ROUTE_PREFIX,
-        surfaces: "role-switch + monitor",
+        surfaces: "role-switch + monitor + copilot draft",
       });
     } catch (err) {
       log.warn("Rolebox route registration failed — degrading", {

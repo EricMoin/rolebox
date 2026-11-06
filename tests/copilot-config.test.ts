@@ -1,350 +1,519 @@
-
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import yaml from "js-yaml";
 import {
-  parseCopilotConfig,
   DEFAULT_COPILOT_CONFIG,
-  DEFAULT_COPILOT_LLM_CONFIG,
-  DEFAULT_COPILOT_TRANSCRIPT_CONFIG,
-} from "../src/copilot/config.js";
-import { COPILOT_ACTIONS } from "../src/copilot/types.js";
-import { discoverRoles } from "../src/loader/role-loader.js";
+  DEFAULT_COPILOT_DRAFT_CONFIG,
+  composeCopilotConfig,
+  parseCopilotConfig,
+  parseCopilotDraftFragment,
+} from "../src/copilot/config.ts";
+import { getRootLogger } from "../src/logger.ts";
+import { discoverRoles } from "../src/loader/role-loader.ts";
 
-// ── Action vocabulary ────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────
 
-describe("COPILOT_ACTIONS", () => {
-  it("defines exactly the four supported actions", () => {
-    expect([...COPILOT_ACTIONS]).toEqual(["continue", "skip", "blocked", "done"]);
+const DRAFT_DEFAULTS = {
+  enabled: false,
+  timeout_ms: 4000,
+  max_chars: 120,
+  window_size: 8,
+  transcript_max_chars: 4000,
+} as const;
+
+/**
+ * Capture warnings emitted on the `copilot-config` channel. The transport is
+ * attached to the root logger the module-level sub-logger inherits from.
+ */
+function captureWarnings(): string[] {
+  const warnings: string[] = [];
+  getRootLogger().attachTransport((entry) => {
+    if (entry.channel !== "copilot-config" || entry.level !== "warn") return;
+    const message = entry["0"];
+    if (typeof message === "string") warnings.push(message);
   });
-});
+  return warnings;
+}
 
-// ── Defaults when block absent / empty ───────────────────────────────
+// ── Defaults when the block is absent / empty ────────────────────────
 
 describe("parseCopilotConfig — defaults", () => {
-  it("returns defaults for undefined input", () => {
-    const config = parseCopilotConfig(undefined);
-    expect(config.enabled).toBe(false);
-    expect(config.rules).toEqual([]);
-    expect(config.llm).toBeUndefined();
+  it("returns draft defaults for undefined input", () => {
+    expect(parseCopilotConfig(undefined)).toEqual({ draft: DRAFT_DEFAULTS });
   });
 
-  it("returns defaults for null input", () => {
-    const config = parseCopilotConfig(null);
-    expect(config.enabled).toBe(false);
-    expect(config.rules).toEqual([]);
-    expect(config.llm).toBeUndefined();
+  it("stays silent when the block is absent", () => {
+    const warnings = captureWarnings();
+
+    expect(parseCopilotConfig(undefined)).toEqual({ draft: DRAFT_DEFAULTS });
+    expect(warnings).toEqual([]);
   });
 
-  it("returns defaults for non-object input (string)", () => {
-    const config = parseCopilotConfig("nope");
-    expect(config.enabled).toBe(false);
-    expect(config.rules).toEqual([]);
+  it("returns draft defaults for null input", () => {
+    expect(parseCopilotConfig(null)).toEqual({ draft: DRAFT_DEFAULTS });
   });
 
-  it("returns defaults for non-object input (array)", () => {
-    const config = parseCopilotConfig([1, 2]);
-    expect(config.enabled).toBe(false);
-    expect(config.rules).toEqual([]);
+  it("returns draft defaults for non-object input (string)", () => {
+    expect(parseCopilotConfig("nope")).toEqual({ draft: DRAFT_DEFAULTS });
   });
 
-  it("returns defaults for an empty object", () => {
-    const config = parseCopilotConfig({});
-    expect(config.enabled).toBe(false);
-    expect(config.rules).toEqual([]);
-    expect(config.llm).toBeUndefined();
+  it("returns draft defaults for non-object input (array)", () => {
+    expect(parseCopilotConfig([1, 2])).toEqual({ draft: DRAFT_DEFAULTS });
   });
 
-  it("does not share the frozen default rules array", () => {
-    const config = parseCopilotConfig({});
-    expect(config.rules).not.toBe(DEFAULT_COPILOT_CONFIG.rules);
-    config.rules.push({ id: "x", match: { contains: "a" }, action: "continue" });
-    // The frozen default must be untouched
-    expect(DEFAULT_COPILOT_CONFIG.rules).toEqual([]);
+  it("returns draft defaults for an empty object", () => {
+    expect(parseCopilotConfig({})).toEqual({ draft: DRAFT_DEFAULTS });
+  });
+
+  it("returns draft defaults for an empty draft block", () => {
+    expect(parseCopilotConfig({ draft: {} })).toEqual({ draft: DRAFT_DEFAULTS });
+  });
+
+  it("never shares the frozen default objects", () => {
+    const a = parseCopilotConfig({});
+    const b = parseCopilotConfig({});
+
+    expect(a).not.toBe(b);
+    expect(a.draft).not.toBe(b.draft);
+    expect(a.draft).not.toBe(DEFAULT_COPILOT_DRAFT_CONFIG);
+
+    a.draft.enabled = true;
+    expect(DEFAULT_COPILOT_DRAFT_CONFIG.enabled).toBe(false);
+    expect(b.draft.enabled).toBe(false);
   });
 });
 
-// ── Field coercion ───────────────────────────────────────────────────
+// ── Field parsing / coercion ─────────────────────────────────────────
 
-describe("parseCopilotConfig — field coercion", () => {
-  it('coerces string "true" → boolean true for enabled', () => {
-    const config = parseCopilotConfig({ enabled: "true" });
-    expect(config.enabled).toBe(true);
+describe("parseCopilotConfig — draft fields", () => {
+  it('coerces string "true" / "false" for enabled', () => {
+    expect(parseCopilotConfig({ draft: { enabled: "true" } }).draft.enabled).toBe(true);
+    expect(parseCopilotConfig({ draft: { enabled: "false" } }).draft.enabled).toBe(false);
   });
 
-  it('coerces string "false" → boolean false for enabled', () => {
-    const config = parseCopilotConfig({ enabled: "false" });
-    expect(config.enabled).toBe(false);
+  it("keeps boolean enabled as-is", () => {
+    expect(parseCopilotConfig({ draft: { enabled: true } }).draft.enabled).toBe(true);
+    expect(parseCopilotConfig({ draft: { enabled: false } }).draft.enabled).toBe(false);
   });
 
-  it("keeps a boolean enabled as-is", () => {
-    expect(parseCopilotConfig({ enabled: true }).enabled).toBe(true);
-    expect(parseCopilotConfig({ enabled: false }).enabled).toBe(false);
-  });
-
-  it("falls back to default when enabled is an invalid type", () => {
-    const config = parseCopilotConfig({ enabled: 42 });
-    expect(config.enabled).toBe(false);
-  });
-
-  it("coerces numeric strings for llm.max_verdict_timeout_ms", () => {
-    const config = parseCopilotConfig({ llm: { role: "verdict", max_verdict_timeout_ms: "45000" } });
-    expect(config.llm!.max_verdict_timeout_ms).toBe(45000);
-  });
-
-  it("coerces numeric strings for transcript fields", () => {
+  it("accepts numeric strings for the bounded fields", () => {
     const config = parseCopilotConfig({
-      llm: {
-        role: "verdict",
-        transcript: { window_size: "10", max_chars: "4000", include_tools: "false" },
+      draft: {
+        timeout_ms: "2000",
+        max_chars: "80",
+        window_size: "12",
+        transcript_max_chars: "6000",
       },
     });
-    expect(config.llm!.transcript.window_size).toBe(10);
-    expect(config.llm!.transcript.max_chars).toBe(4000);
-    expect(config.llm!.transcript.include_tools).toBe(false);
+
+    expect(config.draft.timeout_ms).toBe(2000);
+    expect(config.draft.max_chars).toBe(80);
+    expect(config.draft.window_size).toBe(12);
+    expect(config.draft.transcript_max_chars).toBe(6000);
+  });
+
+  it("keeps optional non-empty provider and model", () => {
+    const config = parseCopilotConfig({
+      draft: { provider: "example-provider", model: "example-model" },
+    });
+
+    expect(config.draft.provider).toBe("example-provider");
+    expect(config.draft.model).toBe("example-model");
+  });
+
+  it("omits provider and model when they are absent", () => {
+    const config = parseCopilotConfig({ draft: {} });
+    expect(config.draft.provider).toBeUndefined();
+    expect(config.draft.model).toBeUndefined();
   });
 });
 
-// ── Valid rules ──────────────────────────────────────────────────────
+// ── Clamps ──────────────────────────────────────────────────────────
 
-describe("parseCopilotConfig — valid rules", () => {
-  it("parses a rule with a regex pattern match", () => {
+describe("parseCopilotConfig — clamps", () => {
+  it("clamps every bounded field up to its minimum", () => {
     const config = parseCopilotConfig({
-      rules: [{ id: "r1", match: { pattern: "^\\[done\\]" }, action: "done", reply: "wrap up" }],
-    });
-    expect(config.rules).toHaveLength(1);
-    expect(config.rules[0]).toEqual({
-      id: "r1",
-      match: { pattern: "^\\[done\\]" },
-      action: "done",
-      reply: "wrap up",
-    });
-  });
-
-  it("parses a rule with a contains match", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r2", match: { contains: "TODO" }, action: "continue" }],
-    });
-    expect(config.rules[0].match.contains).toBe("TODO");
-    expect(config.rules[0].reply).toBeUndefined();
-  });
-
-  it("parses a rule with both pattern and contains", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r3", match: { pattern: "error", contains: "panic" }, action: "blocked" }],
-    });
-    expect(config.rules[0].match).toEqual({ pattern: "error", contains: "panic" });
-  });
-
-  it("parses all four action values", () => {
-    const config = parseCopilotConfig({
-      rules: [
-        { id: "a", match: { contains: "1" }, action: "continue" },
-        { id: "b", match: { contains: "2" }, action: "skip" },
-        { id: "c", match: { contains: "3" }, action: "blocked" },
-        { id: "d", match: { contains: "4" }, action: "done" },
-      ],
-    });
-    expect(config.rules.map((r) => r.action)).toEqual(["continue", "skip", "blocked", "done"]);
-  });
-});
-
-// ── Malformed-rule warn-and-skip ─────────────────────────────────────
-
-describe("parseCopilotConfig — malformed rules are skipped", () => {
-  it("skips a rule with a missing id", () => {
-    const config = parseCopilotConfig({
-      rules: [{ match: { contains: "x" }, action: "continue" }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips a rule with a blank id", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "  ", match: { contains: "x" }, action: "continue" }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips a rule with no match criteria (missing match block)", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r1", action: "continue" }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips a rule with an empty match block", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r1", match: {}, action: "continue" }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips a rule with blank pattern/contains strings", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r1", match: { pattern: "", contains: "" }, action: "continue" }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips a non-object rule entry", () => {
-    const config = parseCopilotConfig({ rules: ["junk", 42, null] });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("keeps valid rules and skips malformed ones in the same array", () => {
-    const config = parseCopilotConfig({
-      rules: [
-        { id: "good", match: { contains: "keep" }, action: "continue" },
-        { id: "", match: { contains: "bad" }, action: "continue" },
-        { id: "no-match", action: "continue" },
-        { id: "good2", match: { contains: "keep2" }, action: "done" },
-      ],
-    });
-    expect(config.rules.map((r) => r.id)).toEqual(["good", "good2"]);
-  });
-
-  it("drops duplicate rule ids (keeps the first occurrence)", () => {
-    const config = parseCopilotConfig({
-      rules: [
-        { id: "dup", match: { contains: "first" }, action: "continue" },
-        { id: "dup", match: { contains: "second" }, action: "done" },
-      ],
-    });
-    expect(config.rules).toHaveLength(1);
-    expect(config.rules[0].match.contains).toBe("first");
-  });
-
-  it("falls back to defaults when rules is not an array", () => {
-    const config = parseCopilotConfig({ rules: { id: "not-an-array" } });
-    expect(config.rules).toEqual([]);
-  });
-});
-
-// ── Unknown action rejection ─────────────────────────────────────────
-
-describe("parseCopilotConfig — unknown action rejection", () => {
-  it("skips a rule with an unknown action string", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r1", match: { contains: "x" }, action: "fly" }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips a rule with a numeric action", () => {
-    const config = parseCopilotConfig({
-      rules: [{ id: "r1", match: { contains: "x" }, action: 3 }],
-    });
-    expect(config.rules).toEqual([]);
-  });
-
-  it("skips only the bad rule and keeps the good one", () => {
-    const config = parseCopilotConfig({
-      rules: [
-        { id: "good", match: { contains: "ok" }, action: "skip" },
-        { id: "bad", match: { contains: "no" }, action: "teleport" },
-      ],
-    });
-    expect(config.rules.map((r) => r.id)).toEqual(["good"]);
-  });
-});
-
-// ── LLM defaults ─────────────────────────────────────────────────────
-
-describe("parseCopilotConfig — llm defaults", () => {
-  it("applies llm defaults when only role is provided", () => {
-    const config = parseCopilotConfig({ llm: { role: "verdict" } });
-    expect(config.llm).toBeDefined();
-    expect(config.llm!.role).toBe("verdict");
-    expect(config.llm!.max_verdict_timeout_ms).toBe(30000);
-    expect(config.llm!.transcript).toEqual({
-      window_size: 20,
-      max_chars: 8000,
-      include_tools: true,
-    });
-    expect(config.llm!.guidance).toBeUndefined();
-  });
-
-  it("applies llm defaults for an empty transcript block", () => {
-    const config = parseCopilotConfig({ llm: { role: "verdict", transcript: {} } });
-    expect(config.llm!.transcript).toEqual({
-      window_size: 20,
-      max_chars: 8000,
-      include_tools: true,
-    });
-  });
-
-  it("honors explicit llm overrides", () => {
-    const config = parseCopilotConfig({
-      llm: {
-        role: "verdict",
-        max_verdict_timeout_ms: 5000,
-        guidance: "be terse",
-        transcript: { window_size: 5, max_chars: 1000, include_tools: false },
+      draft: {
+        timeout_ms: 1,
+        max_chars: 1,
+        window_size: 1,
+        transcript_max_chars: 1,
       },
     });
-    expect(config.llm).toEqual({
-      role: "verdict",
-      max_verdict_timeout_ms: 5000,
-      guidance: "be terse",
-      transcript: { window_size: 5, max_chars: 1000, include_tools: false },
+
+    expect(config.draft.timeout_ms).toBe(200);
+    expect(config.draft.max_chars).toBe(16);
+    expect(config.draft.window_size).toBe(2);
+    expect(config.draft.transcript_max_chars).toBe(500);
+  });
+
+  it("clamps every bounded field down to its maximum", () => {
+    const config = parseCopilotConfig({
+      draft: {
+        timeout_ms: 999_999,
+        max_chars: 999_999,
+        window_size: 999_999,
+        transcript_max_chars: 999_999,
+      },
+    });
+
+    expect(config.draft.timeout_ms).toBe(10_000);
+    expect(config.draft.max_chars).toBe(500);
+    expect(config.draft.window_size).toBe(40);
+    expect(config.draft.transcript_max_chars).toBe(20_000);
+  });
+
+  it("honors in-range values", () => {
+    const config = parseCopilotConfig({
+      draft: {
+        timeout_ms: 2500,
+        max_chars: 200,
+        window_size: 10,
+        transcript_max_chars: 8000,
+      },
+    });
+
+    expect(config.draft).toEqual({
+      ...DRAFT_DEFAULTS,
+      timeout_ms: 2500,
+      max_chars: 200,
+      window_size: 10,
+      transcript_max_chars: 8000,
     });
   });
 
-  it("ignores the llm block when role is missing", () => {
-    const config = parseCopilotConfig({ llm: { max_verdict_timeout_ms: 1000 } });
-    expect(config.llm).toBeUndefined();
-  });
-
-  it("ignores the llm block when role is not a string", () => {
-    const config = parseCopilotConfig({ llm: { role: 42 } });
-    expect(config.llm).toBeUndefined();
-  });
-
-  it("ignores a non-object llm block", () => {
-    const config = parseCopilotConfig({ llm: "verdict" });
-    expect(config.llm).toBeUndefined();
-  });
-
-  it("ignores a non-object transcript block", () => {
-    const config = parseCopilotConfig({ llm: { role: "verdict", transcript: "big" } });
-    expect(config.llm!.transcript).toEqual({
-      window_size: 20,
-      max_chars: 8000,
-      include_tools: true,
+  it("clamps numeric strings too", () => {
+    const config = parseCopilotConfig({
+      draft: { timeout_ms: "50", max_chars: "9000" },
     });
-  });
 
-  it("does not share the frozen transcript default object", () => {
-    const config = parseCopilotConfig({ llm: { role: "verdict" } });
-    expect(config.llm!.transcript).not.toBe(DEFAULT_COPILOT_TRANSCRIPT_CONFIG);
-    config.llm!.transcript.window_size = 1;
-    expect(DEFAULT_COPILOT_TRANSCRIPT_CONFIG.window_size).toBe(20);
+    expect(config.draft.timeout_ms).toBe(200);
+    expect(config.draft.max_chars).toBe(500);
   });
 });
 
-// ── Frozen defaults ──────────────────────────────────────────────────
+// ── Legacy keys ─────────────────────────────────────────────────────
+
+describe("parseCopilotConfig — legacy keys warn once and are ignored", () => {
+  it("warns exactly once for each removed key", () => {
+    const warnings = captureWarnings();
+
+    const config = parseCopilotConfig({
+      enabled: true,
+      rules: [{ id: "r1", match: { contains: "x" }, action: "continue" }],
+      llm: { role: "verdict" },
+      draft: { enabled: true },
+    });
+
+    expect(warnings).toEqual([
+      "copilot.enabled was removed; use copilot.draft",
+      "copilot.rules was removed; use copilot.draft",
+      "copilot.llm was removed; use copilot.draft",
+    ]);
+    expect(config).toEqual({ draft: { ...DRAFT_DEFAULTS, enabled: true } });
+  });
+
+  it("does not throw for malformed legacy values", () => {
+    const warnings = captureWarnings();
+
+    expect(() =>
+      parseCopilotConfig({ enabled: 42, rules: "junk", llm: { role: 7 } }),
+    ).not.toThrow();
+
+    expect(warnings).toHaveLength(3);
+  });
+
+  it("does not warn when no legacy key is present", () => {
+    const warnings = captureWarnings();
+    parseCopilotConfig({ draft: { enabled: true } });
+    expect(warnings).toEqual([]);
+  });
+});
+
+// ── Malformed input ─────────────────────────────────────────────────
+
+describe("parseCopilotConfig — malformed input falls back safely", () => {
+  it("warns and uses defaults when the block is null", () => {
+    const warnings = captureWarnings();
+
+    expect(parseCopilotConfig(null)).toEqual({ draft: DRAFT_DEFAULTS });
+    expect(warnings).toEqual([
+      "Copilot config is not an object (got null); using defaults",
+    ]);
+  });
+
+  it("names the kind of a null or array block in the warning", () => {
+    const warnings = captureWarnings();
+
+    parseCopilotConfig(null);
+    parseCopilotConfig([1, 2]);
+
+    expect(warnings).toEqual([
+      "Copilot config is not an object (got null); using defaults",
+      "Copilot config is not an object (got an array); using defaults",
+    ]);
+    for (const warning of warnings) expect(warning).toContain("is not an object");
+  });
+
+  it("warns for every non-object block except absence", () => {
+    const warnings = captureWarnings();
+
+    for (const raw of [null, [1, 2], "nope", 42, true]) {
+      expect(parseCopilotConfig(raw)).toEqual({ draft: DRAFT_DEFAULTS });
+    }
+
+    expect(warnings).toEqual([
+      "Copilot config is not an object (got null); using defaults",
+      "Copilot config is not an object (got an array); using defaults",
+      "Copilot config is not an object (got string); using defaults",
+      "Copilot config is not an object (got number); using defaults",
+      "Copilot config is not an object (got boolean); using defaults",
+    ]);
+  });
+
+  it("warns and uses defaults when draft is not an object", () => {
+    const warnings = captureWarnings();
+
+    expect(parseCopilotConfig({ draft: "big" })).toEqual({ draft: DRAFT_DEFAULTS });
+    expect(warnings).toEqual(['Invalid "draft" value; expected object, got string']);
+  });
+
+  it("warns and keeps the default for an invalid boolean", () => {
+    const warnings = captureWarnings();
+
+    expect(parseCopilotConfig({ draft: { enabled: 42 } }).draft.enabled).toBe(false);
+    expect(warnings).toEqual(['Invalid "enabled" value; expected boolean, got number']);
+  });
+
+  it("warns and keeps the default for a non-numeric value", () => {
+    const warnings = captureWarnings();
+
+    const config = parseCopilotConfig({
+      draft: { timeout_ms: "fast" },
+    });
+
+    expect(config.draft.timeout_ms).toBe(4000);
+    expect(warnings).toEqual(['Invalid "timeout_ms" value; expected number, got string']);
+  });
+
+  it("warns and omits non-string provider / empty model", () => {
+    const warnings = captureWarnings();
+
+    const config = parseCopilotConfig({ draft: { provider: 42, model: "" } });
+
+    expect(config.draft.provider).toBeUndefined();
+    expect(config.draft.model).toBeUndefined();
+    expect(warnings).toEqual([
+      'Invalid "provider" value; expected non-empty string, got number',
+      'Invalid "model" value; expected non-empty string, got string',
+    ]);
+  });
+});
+
+// ── Fragment parsing ────────────────────────────────────────────────
+
+describe("parseCopilotDraftFragment — partial block", () => {
+  it("keeps only the present, valid fields", () => {
+    expect(
+      parseCopilotDraftFragment({
+        draft: { enabled: true, provider: "example-provider", timeout_ms: 2000 },
+      }),
+    ).toEqual({ enabled: true, provider: "example-provider", timeout_ms: 2000 });
+  });
+
+  it("returns an empty fragment for absent / empty blocks", () => {
+    expect(parseCopilotDraftFragment({})).toEqual({});
+    expect(parseCopilotDraftFragment({ draft: {} })).toEqual({});
+    expect(parseCopilotDraftFragment(undefined)).toEqual({});
+  });
+
+  it("stays silent for an absent block but warns for other non-objects", () => {
+    const absentWarnings = captureWarnings();
+
+    expect(parseCopilotDraftFragment(undefined)).toEqual({});
+    expect(absentWarnings).toEqual([]);
+
+    const malformedWarnings = captureWarnings();
+
+    for (const raw of [null, [1, 2], "nope", 42, true]) {
+      expect(parseCopilotDraftFragment(raw)).toEqual({});
+    }
+
+    expect(malformedWarnings).toEqual([
+      "Copilot config is not an object (got null); using defaults",
+      "Copilot config is not an object (got an array); using defaults",
+      "Copilot config is not an object (got string); using defaults",
+      "Copilot config is not an object (got number); using defaults",
+      "Copilot config is not an object (got boolean); using defaults",
+    ]);
+  });
+
+  it("clamps bounded fields and omits an invalid draft value", () => {
+    const warnings = captureWarnings();
+
+    expect(
+      parseCopilotDraftFragment({
+        draft: { timeout_ms: 1, max_chars: 9000, window_size: 12 },
+      }),
+    ).toEqual({ timeout_ms: 200, max_chars: 500, window_size: 12 });
+
+    expect(parseCopilotDraftFragment({ draft: "big" })).toEqual({});
+    expect(warnings).toEqual([
+      'Invalid "draft" value; expected object, got string',
+    ]);
+  });
+
+  it("treats invalid fields as absent after one warning each", () => {
+    const warnings = captureWarnings();
+
+    expect(
+      parseCopilotDraftFragment({
+        draft: {
+          enabled: 42,
+          provider: 7,
+          model: "",
+          max_chars: "fast",
+        },
+      }),
+    ).toEqual({});
+
+    expect(warnings).toEqual([
+      'Invalid "enabled" value; expected boolean, got number',
+      'Invalid "provider" value; expected non-empty string, got number',
+      'Invalid "model" value; expected non-empty string, got string',
+      'Invalid "max_chars" value; expected number, got string',
+    ]);
+  });
+
+  it("warns once per legacy key on the block and ignores it", () => {
+    const warnings = captureWarnings();
+
+    expect(
+      parseCopilotDraftFragment({
+        enabled: true,
+        rules: [],
+        llm: {},
+        draft: { enabled: true },
+      }),
+    ).toEqual({ enabled: true });
+    expect(warnings).toEqual([
+      "copilot.enabled was removed; use copilot.draft",
+      "copilot.rules was removed; use copilot.draft",
+      "copilot.llm was removed; use copilot.draft",
+    ]);
+  });
+});
+
+// ── Composition / precedence ───────────────────────────────────────
+
+describe("composeCopilotConfig — field-level precedence", () => {
+  it("lets an earlier fragment win per field", () => {
+    const composed = composeCopilotConfig([
+      { enabled: true, timeout_ms: 2000 },
+      { enabled: false, timeout_ms: 3000, model: "example-model" },
+      { max_chars: 80 },
+    ]);
+
+    expect(composed.draft).toEqual({
+      ...DRAFT_DEFAULTS,
+      enabled: true,
+      timeout_ms: 2000,
+      max_chars: 80,
+      model: "example-model",
+    });
+  });
+
+  it("falls through missing fields to lower-precedence fragments", () => {
+    const composed = composeCopilotConfig([
+      { enabled: true },
+      { provider: "project-provider" },
+      { provider: "global-provider", model: "global-model" },
+    ]);
+
+    expect(composed.draft.provider).toBe("project-provider");
+    expect(composed.draft.model).toBe("global-model");
+  });
+
+  it("treats enabled as three-state: present wins, absent inherits, default false", () => {
+    expect(composeCopilotConfig([{ enabled: false }, { enabled: true }]).draft.enabled).toBe(false);
+    expect(composeCopilotConfig([{ enabled: true }, { enabled: false }]).draft.enabled).toBe(true);
+    expect(composeCopilotConfig([{}, { enabled: true }]).draft.enabled).toBe(true);
+    expect(composeCopilotConfig([undefined, undefined]).draft.enabled).toBe(false);
+  });
+
+  it("lets an invalid higher-precedence value be supplied by a lower source", () => {
+    const warnings = captureWarnings();
+    const role = parseCopilotDraftFragment({
+      draft: { enabled: "maybe", timeout_ms: "fast" },
+    });
+    expect(role).toEqual({});
+
+    const composed = composeCopilotConfig([
+      role,
+      { enabled: true, timeout_ms: 2500, provider: "project-provider", model: "project-model" },
+    ]);
+
+    expect(composed.draft.enabled).toBe(true);
+    expect(composed.draft.timeout_ms).toBe(2500);
+    expect(warnings).toEqual([
+      'Invalid "enabled" value; expected boolean, got string',
+      'Invalid "timeout_ms" value; expected number, got string',
+    ]);
+  });
+
+  it("ignores undefined fragments and returns fresh objects", () => {
+    const a = composeCopilotConfig([undefined, undefined]);
+    const b = composeCopilotConfig([undefined, undefined]);
+
+    expect(a).toEqual({ draft: DRAFT_DEFAULTS });
+    expect(a).not.toBe(b);
+    expect(a.draft).not.toBe(b.draft);
+    expect(a.draft).not.toBe(DEFAULT_COPILOT_DRAFT_CONFIG);
+
+    a.draft.enabled = true;
+    expect(DEFAULT_COPILOT_DRAFT_CONFIG.enabled).toBe(false);
+    expect(b.draft.enabled).toBe(false);
+  });
+
+  it("keeps parseCopilotConfig equivalent to the single-fragment composition", () => {
+    const raws: unknown[] = [
+      undefined,
+      null,
+      "nope",
+      {},
+      { draft: {} },
+      { draft: { enabled: true, provider: "example-provider", model: "example-model" } },
+      { draft: { timeout_ms: 50, max_chars: "9000" } },
+      { draft: "big" },
+      { enabled: true, rules: "junk", draft: { enabled: false } },
+    ];
+
+    for (const raw of raws) {
+      expect(parseCopilotConfig(raw)).toEqual(
+        composeCopilotConfig([parseCopilotDraftFragment(raw)]),
+      );
+    }
+  });
+});
+
+// ── Frozen defaults ─────────────────────────────────────────────────
 
 describe("defaults are frozen", () => {
   it("DEFAULT_COPILOT_CONFIG is frozen", () => {
     expect(Object.isFrozen(DEFAULT_COPILOT_CONFIG)).toBe(true);
   });
 
-  it("DEFAULT_COPILOT_LLM_CONFIG is frozen", () => {
-    expect(Object.isFrozen(DEFAULT_COPILOT_LLM_CONFIG)).toBe(true);
-  });
-
-  it("DEFAULT_COPILOT_TRANSCRIPT_CONFIG is frozen", () => {
-    expect(Object.isFrozen(DEFAULT_COPILOT_TRANSCRIPT_CONFIG)).toBe(true);
+  it("DEFAULT_COPILOT_DRAFT_CONFIG is frozen", () => {
+    expect(Object.isFrozen(DEFAULT_COPILOT_DRAFT_CONFIG)).toBe(true);
   });
 });
 
-// ── Role loader integration ──────────────────────────────────────────
+// ── Role loader integration ─────────────────────────────────────────
 
-describe("role loader — copilot block", () => {
+describe("role loader — copilot.draft block", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -355,53 +524,43 @@ describe("role loader — copilot block", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("loads a role.yaml containing a copilot block without throwing", async () => {
-    const roleDir = join(tmpDir, "copilot-role");
+  it("loads a role.yaml containing a draft block and parses it", async () => {
+    const roleDir = join(tmpDir, "draft-role");
     mkdirSync(roleDir, { recursive: true });
     await writeFile(
       join(roleDir, "role.yaml"),
       [
-        "name: Copilot Role",
-        "description: A role with copilot config",
-        "prompt: You are a copilot role.",
+        "name: Draft Role",
+        "description: A role with a copilot draft block",
+        "prompt: You are a draft role.",
         "copilot:",
-        "  enabled: true",
-        "  rules:",
-        "    - id: stop-on-done",
-        "      match:",
-        "        contains: '[done]'",
-        "      action: done",
-        "    - id: ask-on-question",
-        "      match:",
-        "        pattern: '\\?\\s*$'",
-        "      action: blocked",
-        "  llm:",
-        "    role: verdict-agent",
-        "    max_verdict_timeout_ms: 15000",
-        "    transcript:",
-        "      window_size: 10",
+        "  draft:",
+        "    enabled: true",
+        "    provider: example-provider",
+        "    model: example-model",
+        "    timeout_ms: 2000",
+        "    max_chars: 200",
+        "    window_size: 10",
+        "    transcript_max_chars: 8000",
         "",
       ].join("\n"),
       "utf-8",
     );
 
     const roles = await discoverRoles(tmpDir);
-
     expect(roles.size).toBe(1);
-    const config = roles.get("copilot-role")!;
+
+    const config = roles.get("draft-role")!;
     expect(config.copilot).toBeDefined();
-    // Raw block is carried through; full validation happens on consumption
-    // via parseCopilotConfig (per-role parsing, pi-extension.ts:245-249 pattern).
     expect(parseCopilotConfig(config.copilot)).toEqual({
-      enabled: true,
-      rules: [
-        { id: "stop-on-done", match: { contains: "[done]" }, action: "done" },
-        { id: "ask-on-question", match: { pattern: "\\?\\s*$" }, action: "blocked" },
-      ],
-      llm: {
-        role: "verdict-agent",
-        max_verdict_timeout_ms: 15000,
-        transcript: { window_size: 10, max_chars: 8000, include_tools: true },
+      draft: {
+        enabled: true,
+        provider: "example-provider",
+        model: "example-model",
+        timeout_ms: 2000,
+        max_chars: 200,
+        window_size: 10,
+        transcript_max_chars: 8000,
       },
     });
   });
@@ -421,67 +580,25 @@ describe("role loader — copilot block", () => {
   });
 });
 
-// ── Worked example from docs/copilot.md ───────────────────────────────
+// ── YAML worked example ─────────────────────────────────────────────
 
-describe("docs/copilot.md worked example", () => {
-  it("parses the documented example YAML cleanly into the full expected shape", () => {
-    // Mirrors the `copilot:` block in docs/copilot.md ("Worked Example").
-    // Parsed through js-yaml (the role-loader's YAML path) and then
-    // parseCopilotConfig. Any warn-and-skip would change the shape below.
+describe("copilot.draft YAML example", () => {
+  it("parses a documented-style YAML block with defaults and clamps", () => {
     const block = `copilot:
-  enabled: true
-  rules:
-    - id: done-marker
-      match:
-        contains: "[done]"
-      action: done
-      reply: "Wrap up and emit the final result."
-    - id: ends-with-question
-      match:
-        pattern: '\\?\\s*$'
-      action: blocked
-    - id: stalled
-      match:
-        pattern: "as of my last knowledge"
-        contains: "I cannot"
-      action: continue
-    - id: inconclusive
-      match:
-        contains: "inconclusive"
-      action: skip
-  llm:
-    role: copilot-verdict
-    max_verdict_timeout_ms: 15000
-    guidance: "Prefer hand_to_user when the assistant requests human approval or is about to perform a destructive operation."
-    transcript:
-      window_size: 10
-      max_chars: 4000
-      include_tools: true`;
+  draft:
+    enabled: true
+    timeout_ms: 50
+    max_chars: 80
+    window_size: 12`;
     const raw = (yaml.load(block) as { copilot: unknown }).copilot;
 
     expect(parseCopilotConfig(raw)).toEqual({
-      enabled: true,
-      rules: [
-        {
-          id: "done-marker",
-          match: { contains: "[done]" },
-          action: "done",
-          reply: "Wrap up and emit the final result.",
-        },
-        { id: "ends-with-question", match: { pattern: "\\?\\s*$" }, action: "blocked" },
-        {
-          id: "stalled",
-          match: { pattern: "as of my last knowledge", contains: "I cannot" },
-          action: "continue",
-        },
-        { id: "inconclusive", match: { contains: "inconclusive" }, action: "skip" },
-      ],
-      llm: {
-        role: "copilot-verdict",
-        max_verdict_timeout_ms: 15000,
-        guidance:
-          "Prefer hand_to_user when the assistant requests human approval or is about to perform a destructive operation.",
-        transcript: { window_size: 10, max_chars: 4000, include_tools: true },
+      draft: {
+        enabled: true,
+        timeout_ms: 200,
+        max_chars: 80,
+        window_size: 12,
+        transcript_max_chars: 4000,
       },
     });
   });

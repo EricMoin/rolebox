@@ -185,51 +185,89 @@ roles, the service uses the first supplied recovery configuration; configure a
 consistent policy rather than relying on role discovery order. Disabling
 `hooks.builtin.recovery` prevents creating the recovery engine.
 
-## Copilot continuation
+## Composer draft suggestions (Copilot)
 
-Copilot is opt-in per root role:
+`copilot.draft` suggests the next human message into the composer. It is a dsh
+web feature: the host exposes `POST /rolebox/copilot/suggest` and the dsh web
+client adds the composer tool-row button. Other harnesses do not register either
+half.
 
-```yaml
-copilot:
-  enabled: true
-  rules:
-    - id: wait-for-user
-      match:
-        contains: waiting for user input
-      action: skip
-    - id: continue-work
-      match:
-        contains: work remains
-      action: continue
-      reply: Continue the authorized task and verify the result.
-```
+Configure it in any of three places; the effective config merges field by field
+with the highest source first:
 
-The pipeline evaluates built-in active-function continuation first, ordered
-Copilot rules second, and an optional LLM verdict last. First matching rule
-wins; `pattern` is a regex and `contains` is case-insensitive. If both are
-present they must both match. `skip` consumes the decision with no injection or
-LLM fallback; `continue`, `blocked` and `done` inject their reply/default reply.
-Disabling Copilot leaves built-in function continuation in place.
+| Precedence | Source | Key |
+| --- | --- | --- |
+| 1 (highest) | Acting role's `role.yaml` | `copilot.draft` |
+| 2 | `<workspace>/.rolebox/config.json` | `copilot.draft` |
+| 3 (lowest) | `<rolebox-config-home>/config.yaml` | `copilot.draft` |
 
-An optional `copilot.llm` block names a resolved private subagent:
+A role does not need to configure the feature: a role-less session (or a role
+with no `copilot` block) simply contributes no fields, and the project/global
+files can supply everything. All three sources use the same block:
 
 ```yaml
 copilot:
-  enabled: true
-  llm:
-    role: reviewer--continuation-judge
-    max_verdict_timeout_ms: 30000
-    transcript:
-      window_size: 20
-      max_chars: 8000
-      include_tools: true
+  draft:
+    enabled: true
+    provider: example-provider
+    model: example-model
+    timeout_ms: 4000
+    max_chars: 120
+    window_size: 8
+    transcript_max_chars: 4000
 ```
 
-Create that judge subagent before enabling this block. `guidance`, if supplied,
-replaces the default advisory guidance entirely. The judge uses a fresh child
-session; unknown role, timeout or failed verdict skips the LLM decision without
-retry. Copilot requires host idle/message hooks and is not installed into native
-Codex conversations by the MCP server.
+The same shape is the `copilot` value in `.rolebox/config.json`:
+
+```json
+{
+  "copilot": {
+    "draft": {
+      "enabled": true,
+      "provider": "example-provider",
+      "model": "example-model"
+    }
+  }
+}
+```
+
+| Field | Default | Bounds / requirement |
+| --- | --- | --- |
+| `enabled` | `false` | Master toggle; three-state: a present `true`/`false` wins, absent inherits, final default off. Boolean strings are coerced. |
+| `provider` | — | Required with `model` when enabled; non-empty string. |
+| `model` | — | Required with `provider` when enabled; non-empty string. |
+| `timeout_ms` | `4000` | Clamped to 200–10000; one model call, no retry. A ceiling, not added latency: the call answers as soon as the provider responds, and a timeout degrades to a silent `none`. |
+| `max_chars` | `120` | Clamped to 16–500; draft length, word-boundary preferred. |
+| `window_size` | `8` | Clamped to 2–40; most recent transcript messages. |
+| `transcript_max_chars` | `4000` | Clamped to 500–20000; tail cap on transcript text. |
+
+Merge rules: every field resolves independently. An invalid value warns once and
+is treated as absent, so a lower-precedence source can still supply it. A role
+`enabled: false` overrides an enabled project/global config. Both files are read
+once at plugin boot with no watching; an unreadable or malformed file warns and
+contributes nothing (it never fails the boot). Restart the host or reload the
+plugin after editing a file.
+
+A request also needs the host's `llm` service. Anything missing answers
+`disabled` (`not-enabled`, `model-not-configured`, `llm-unavailable`), and the
+browser stops asking for that session. The single model call disables reasoning
+(`reasoningEffort: "off"`): a one-line next-message prediction must not pay for
+chain-of-thought, which spends seconds before the first token and leaves only a
+silent `none`. After a turn ends with an empty draft,
+the browser waits 300 ms and posts once; typing before the answer aborts the
+request and a late answer is dropped. An automatic `none` is not retried until
+the next turn, while the button can ask again. A returned draft is written into
+the composer as normal editable text: it is never ghost text and never sent
+automatically.
+
+Privacy: the last `window_size` messages, truncated to
+`transcript_max_chars`, with brief tool summaries, are sent to the configured
+`provider`/`model` — which may differ from the model running the session.
+
+The old top-level `copilot.enabled`, `copilot.rules` and `copilot.llm` turn-end
+decision modes were removed. They are ignored with one warning per key; use
+`copilot.draft` instead. Built-in function auto-continuation is unchanged and
+independent of `copilot`.
 
 ## Codex session and worker runtime
 

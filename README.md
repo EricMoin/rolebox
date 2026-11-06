@@ -165,7 +165,7 @@ The Logs view, the second conversation tab, polls the workspace's `.rolebox/logs
 
 **Loop mode** runs the same task across N rounds, each dispatched to its own fresh session. `|loop:3|` seeds every round with the previous round's summary (`inherit`, the default); `|loop:3,fresh|` starts each round from a clean slate. The parser (`src/loop/params.ts`) also accepts `on`/`true` for inherit and `no-inherit`/`off`/`false` for fresh, and clamps N to a hard cap of 50. Useful for refinement passes, batch fixes and self-correcting workflows.
 
-**Also in the box**, reachable from the same session: persistent memory (`rolebox memory`), skills and references, `LINE#HASH`-anchored `hashline_*` editing, MCP servers, custom hooks, turn-end copilot functions, and rolebox's own [computer-use family](docs/computer-use.md).
+**Also in the box**, reachable from the same session: persistent memory (`rolebox memory`), skills and references, `LINE#HASH`-anchored `hashline_*` editing, MCP servers, custom hooks, composer draft suggestions, and rolebox's own [computer-use family](docs/computer-use.md).
 
 ---
 
@@ -354,7 +354,7 @@ Unrecognized values pass through unchanged with a warning. Full resolution chain
 | | | |
 |---|---|---|
 | [Graph outcome protocol](docs/graph-outcome-protocol.md) | [Graph v3 operations](docs/graph-v3-operations.md) | [Graph engine architecture](docs/graph-engine-architecture.md) |
-| [Memory usage](docs/memory.md) | [Session tools](docs/session-tools-strategy.md) | [Copilot (turn-end)](docs/copilot.md) |
+| [Memory usage](docs/memory.md) | [Session tools](docs/session-tools-strategy.md) | [Copilot (composer draft)](docs/copilot.md) |
 | [Functions](docs/functions.md) | [Hooks](docs/hooks.md) | [Extensions](docs/extensions.md) |
 
 **Build a role**

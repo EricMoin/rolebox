@@ -42,6 +42,7 @@ vi.doMock("react/jsx-dev-runtime", jsxRuntimeDouble);
 
 const client = await import("../../src/platform/adapters/dsh/web-ui/client.ts");
 const dock = await import("../../src/platform/adapters/dsh/web-ui/role-switch-dock.tsx");
+const suggest = await import("../../src/platform/adapters/dsh/web-ui/suggest-dock.tsx");
 const monitor = await import("../../src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx");
 const logs = await import("../../src/platform/adapters/dsh/web-ui/rolebox-logs-panel.tsx");
 const roles = await import("../../src/platform/adapters/dsh/web-ui/rolebox-roles-panel.tsx");
@@ -159,6 +160,40 @@ describe("dsh web-UI client plugin entry", () => {
     expect(typeof disposer).toBe("function");
   });
 
+  it("registers the draft suggestion button beside the role chip", () => {
+    const { slots, injected, registered } = createFakeSlots();
+    const locale = createFakeLocale();
+    client.apply({ slots, locale: locale.locale });
+
+    // TWO list entries in the same session-scoped composer seat: the role chip
+    // and the draft-suggestion button, ordered chip-first.
+    const seat = injected.filter((entry) => entry.key === client.DOCK_SLOT_NAME);
+    expect(seat).toHaveLength(2);
+    for (const entry of seat) entry.callback();
+    expect(registered).toHaveLength(2);
+
+    const chip = registered.find((call) => call.options.id === client.DOCK_SLOT_ID)!;
+    expect(chip.options.order).toBe(client.DOCK_SLOT_ORDER);
+    expect(chip.component).toBe(dock.RoleSwitchDock);
+
+    expect(client.SUGGEST_SLOT_ID).toBe("rolebox-suggest");
+    expect(client.SUGGEST_SLOT_ORDER).toBe(41);
+    const suggestion = registered.find((call) => call.options.id === client.SUGGEST_SLOT_ID)!;
+    expect(suggestion.options.name).toBe("conversation.input.right");
+    expect(suggestion.options.order).toBe(41);
+    expect(suggestion.component).toBe(suggest.SuggestDock);
+
+    // Both entries receive the framework-resolved session id through the same
+    // inject factory; the button derives running/draft from the standard seats.
+    const face = suggestion.options.inject as (sessionId: string) => Record<string, unknown>;
+    expect(face("sess-9")).toEqual({ sessionId: "sess-9" });
+  });
+
+  it("declares the same-origin copilot suggestion contract on the draft button", () => {
+    expect(suggest.SUGGEST_ENDPOINT).toBe("/rolebox/copilot/suggest");
+    expect(suggest.SUGGEST_DELAY_MS).toBe(300);
+  });
+
   it("registers settings without the obsolete Sidebar shortcut", () => {
     const ctx = createFakeContext();
     client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale });
@@ -198,7 +233,7 @@ describe("dsh web-UI client plugin entry", () => {
   it("tears down every declaration wait and the dictionaries", () => {
     const ctx = createFakeContext();
     const dispose = client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale }) as () => void;
-    const waits = 4 + descriptors.ROLEBOX_TOOL_VIEW_NAMES.length;
+    const waits = 5 + descriptors.ROLEBOX_TOOL_VIEW_NAMES.length;
     expect(ctx.slots.injected).toHaveLength(waits);
     dispose();
     expect(ctx.slots.injectedDisposers).toEqual(Array(waits).fill(1));

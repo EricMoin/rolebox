@@ -165,6 +165,46 @@ describe("registry add", () => {
     expect(parsed.registries.some((r: any) => r.name === "my-repo")).toBe(true);
   });
 
+  it("preserves the global copilot block when adding a registry", async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      configPath(),
+      dump({
+        registries: [
+          {
+            name: "oh-my-role",
+            url: "https://github.com/EricMoin/oh-my-role",
+            default: true,
+          },
+        ],
+        copilot: {
+          draft: {
+            enabled: true,
+            provider: "example-provider",
+            model: "example-model",
+          },
+        },
+      }),
+      "utf-8",
+    );
+
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    const c = capture(async () =>
+      registryAddFn("https://github.com/my-org/my-repo"),
+    );
+    await c.run();
+
+    const parsed = load(readFileSync(configPath(), "utf-8")) as any;
+    expect(parsed.registries.some((r: any) => r.name === "my-repo")).toBe(true);
+    expect(parsed.copilot).toEqual({
+      draft: {
+        enabled: true,
+        provider: "example-provider",
+        model: "example-model",
+      },
+    });
+  });
+
   it("rejects an invalid GitHub URL", async () => {
     const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await expect(registryAddFn("not-a-url")).rejects.toThrow(/Invalid GitHub URL/);
