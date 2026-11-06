@@ -193,6 +193,7 @@ vi.doMock("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragmen
 
 const suggest = await import("../../src/platform/adapters/dsh/web-ui/suggest-dock.tsx");
 const css = await import("../../src/platform/adapters/dsh/web-ui/suggest-dock.css.ts");
+const locales = await import("../../src/platform/adapters/dsh/web-ui/suggest-locales.ts");
 
 // ── Host snapshot + props ──────────────────────────────────────────────────
 
@@ -212,28 +213,32 @@ let host: { session: HostSession; input: HostInput };
 /** Every `setDraft` call, in order (the fill/clear contract). */
 const drafts: string[] = [];
 
+/** A locale-seat fake; the component falls back to English when absent. */
+type TSeat = (key: string, params?: Record<string, unknown>) => string;
+
 /**
  * Compose the props the renderer hands a session-scope slot entry. The two
  * selector seats close over the mutable `host` snapshot; `setDraft` writes it
  * and re-renders, exactly like the composer's own input store.
  */
-function propsFor(sessionId = "sess-1"): unknown {
+function propsFor(sessionId = "sess-1", t?: TSeat): unknown {
   return {
     sessionId,
     useSession: (selector: (state: HostSession) => unknown) => selector(host.session),
     useInput: (selector: (state: HostInput) => unknown) => selector(host.input),
+    ...(t === undefined ? {} : { t }),
     inputActions: {
       setDraft(text: string) {
         drafts.push(text);
         host.input.draft = text;
-        rerender(propsFor(sessionId));
+        rerender(propsFor(sessionId, t));
       },
     },
   };
 }
 
-function mountDock(sessionId = "sess-1"): void {
-  mount(suggest.SuggestDock as unknown as (props: unknown) => unknown, propsFor(sessionId));
+function mountDock(sessionId = "sess-1", t?: TSeat): void {
+  mount(suggest.SuggestDock as unknown as (props: unknown) => unknown, propsFor(sessionId, t));
 }
 
 // ── fetch double ───────────────────────────────────────────────────────────
@@ -300,6 +305,19 @@ function button(): VNode {
   return byClass(css.suggestClass.button)[0]!;
 }
 
+/** The single tooltip block rendered beside the button. */
+function tooltip(): VNode {
+  return allNodes().find((node) => node.props.role === "tooltip")!;
+}
+
+/** Visible text of a vnode subtree, in tree order. */
+function textOf(node: unknown): string {
+  if (typeof node === "string") return node;
+  if (typeof node === "number") return String(node);
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  return childNodes(node as VNode).map((child) => textOf(child)).join("");
+}
+
 /** Flush the microtask chain (fetch → json → setState). */
 async function settle(): Promise<void> {
   for (let i = 0; i < 40; i++) await Promise.resolve();
@@ -348,10 +366,37 @@ describe("SuggestDock", () => {
     expect(drafts).toEqual([SUGGESTION]);
     expect(host.input.draft).toBe(SUGGESTION);
     // The filled draft is OURS: the control is the clear affordance.
-    expect(button().props["aria-label"]).toBe("Clear suggestion");
-    expect(button().props.title).toBe("Clear suggestion");
+    expect(button().props["aria-label"]).toBe("Suggestion inserted");
+    expect(button().props.title).toBeUndefined();
+    expect(textOf(button())).toBe("Clear");
     expect(button().props.disabled).toBe(false);
+    const tip = tooltip();
+    expect(tip.props.role).toBe("tooltip");
+    expect(typeof tip.props.id).toBe("string");
+    expect(button().props["aria-describedby"]).toBe(tip.props.id);
+    expect(textOf(tip)).toContain("Suggestion inserted");
+    expect(textOf(tip)).toContain("This draft was filled automatically.");
+    expect(textOf(tip)).toContain("Clearing it never sends it.");
     expect(suggest.SUGGEST_DELAY_MS).toBe(300);
+  });
+
+  it("renders the idle pill label and a tooltip explaining fill/decide semantics", () => {
+    mountDock();
+
+    expect(textOf(button())).toBe("Suggest");
+    expect(button().props.title).toBeUndefined();
+    expect(button().props["aria-label"]).toBe("Suggest the next message");
+    expect(button().props.disabled).toBe(false);
+
+    const tip = tooltip();
+    expect(tip).toBeDefined();
+    expect(tip.props.role).toBe("tooltip");
+    expect(typeof tip.props.id).toBe("string");
+    expect(button().props["aria-describedby"]).toBe(tip.props.id);
+    expect(textOf(tip)).toContain("Suggest the next message");
+    expect(textOf(tip)).toContain(
+      "Fills the composer with a likely next message from this conversation - you decide whether to send it.",
+    );
   });
 
   it("does not request or fill while the user already has draft text", async () => {
@@ -363,7 +408,11 @@ describe("SuggestDock", () => {
     expect(drafts).toHaveLength(0);
     expect(host.input.draft).toBe("I already typed this");
     // The user owns the draft: the button cannot overwrite it.
-    expect(button().props["aria-label"]).toBe("Suggest next message");
+    expect(button().props["aria-label"]).toBe("Suggestion unavailable");
+    expect(textOf(button())).toBe("Suggest");
+    expect(textOf(tooltip())).toContain(
+      "The composer already has your text - it is never overwritten.",
+    );
     expect(button().props.disabled).toBe(true);
     click(button());
     await advance(suggest.SUGGEST_DELAY_MS);
@@ -375,6 +424,10 @@ describe("SuggestDock", () => {
     mountDock();
     await advance(suggest.SUGGEST_DELAY_MS);
     expect(calls).toHaveLength(1);
+    // In flight: the pill and tooltip say so.
+    expect(textOf(button())).toBe("Suggesting");
+    expect(button().props["aria-label"]).toBe("Generating a suggestion");
+    expect(textOf(tooltip())).toContain("Typing cancels it.");
     const signal = calls[0]!.signal!;
     expect(signal.aborted).toBe(false);
 
@@ -444,7 +497,8 @@ describe("SuggestDock", () => {
     click(button());
     expect(drafts).toEqual([SUGGESTION, ""]);
     expect(host.input.draft).toBe("");
-    expect(button().props["aria-label"]).toBe("Suggest next message");
+    expect(button().props["aria-label"]).toBe("Suggest the next message");
+    expect(textOf(button())).toBe("Suggest");
     expect(button().props.disabled).toBe(false);
 
     // Clearing is not a new idle: no automatic request follows.
@@ -486,12 +540,67 @@ describe("SuggestDock", () => {
     expect(host.input.draft).toBe("");
   });
 
-  it("self-mounts namespaced CSS and ships a 28x28 control", () => {
+  it("explains each disabled reason in the tooltip", async () => {
+    // 1. blank session (no transcript yet)
+    host.session.blank = true;
+    mountDock();
+    expect(button().props.disabled).toBe(true);
+    expect(button().props["aria-label"]).toBe("Suggestion unavailable");
+    expect(textOf(tooltip())).toContain("This session has no conversation yet.");
+
+    // 2. subagent conversation
+    host.session = { running: false, blank: false, subagent: { address: { mode: "continuable" } } };
+    mountDock();
+    expect(textOf(tooltip())).toContain("Subagent conversations do not offer suggestions.");
+
+    // 3. feature disabled by config: the host answered `disabled`.
+    host.session = { running: false, blank: false, subagent: null };
+    mode = "disabled";
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(textOf(tooltip())).toContain(
+      "Copilot draft suggestions are disabled for this role or host.",
+    );
+
+    // 4. user-typed draft (never overwritten)
+    mode = "suggested";
+    host.input.draft = "my own words";
+    mountDock();
+    expect(textOf(tooltip())).toContain(
+      "The composer already has your text - it is never overwritten.",
+    );
+  });
+
+  it("renders the Chinese pill labels and tooltip copy through the locale seat", async () => {
+    const t: TSeat = (key) => locales.zh[key] ?? key;
+    mountDock("sess-1", t);
+
+    expect(textOf(button())).toBe("建议");
+    expect(button().props["aria-label"]).toBe("建议下一条消息");
+    expect(textOf(tooltip())).toContain(
+      "根据当前对话生成一条下一条消息并填入输入框，是否发送由你决定。",
+    );
+
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(textOf(button())).toBe("清除");
+    expect(button().props["aria-label"]).toBe("已填入建议");
+    expect(textOf(tooltip())).toContain("这条草稿是自动填入的；清除不会发送它。");
+  });
+
+  it("self-mounts namespaced CSS and ships a 28px-high pill", () => {
     expect(css.suggestCss).toContain(".rolebox-suggest-button");
-    expect(css.suggestCss).toContain("width: 28px");
     expect(css.suggestCss).toContain("height: 28px");
+    expect(css.suggestCss).toContain("padding: 0 8px");
+    expect(css.suggestCss).toContain("gap: 6px");
+    expect(css.suggestCss).toContain("font-size: 12px");
+    expect(css.suggestCss).toContain("bottom: calc(100% + 8px)");
+    expect(css.suggestCss).toContain("max-width: 260px");
+    expect(css.suggestCss).toContain("pointer-events: none");
+    expect(css.suggestCss).toContain(".rolebox-suggest:hover .rolebox-suggest-tip");
+    expect(css.suggestCss).toContain(".rolebox-suggest:focus-within .rolebox-suggest-tip");
     expect(css.suggestCss).toContain("data-state=\"injected\"");
     expect(css.suggestCss).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css.suggestClass.button).toBe("rolebox-suggest-button");
+    expect(css.suggestClass.tip).toBe("rolebox-suggest-tip");
   });
 });

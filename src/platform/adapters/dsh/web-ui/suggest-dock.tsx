@@ -3,7 +3,9 @@
  * row (browser half).
  *
  * The component contributes to `'conversation.input.right'`, the session-scoped
- * list seat immediately left of the model selector. It is a 28x28 icon button:
+ * list seat immediately left of the model selector. It is a 28px-high pill —
+ * sparkle glyph plus a short localized action label — with a state-aware
+ * tooltip on hover and keyboard focus:
  *
  *   - idle (the session is not running, the draft is empty, the session is not
  *     blank and not a subagent) — one click asks the host for a draft;
@@ -44,21 +46,29 @@
  * The slot contract is consumed structurally: the component receives
  * `sessionId` through the entry's inject factory and the renderer's
  * `SessionStandardProps` (`useSession`, `useInput`, `inputActions`). It imports
- * only `react` and its own CSS module — no node builtins, no host packages,
- * no non-relative imports. The only external I/O is the same-origin relative
- * `fetch` above.
+ * only `react`, its own CSS module and its own copy table — no node builtins,
+ * no host packages, no non-relative imports. The only external I/O is the
+ * same-origin relative `fetch` above.
  *
  * @module
  */
 
 import { useState, useEffect, useRef } from "react";
 import { suggestClass } from "./suggest-dock.css.ts";
+import { en as suggestEn, type SuggestKey } from "./suggest-locales.ts";
 
 /** `POST /rolebox/copilot/suggest` — same-origin relative path on the dsh web server. */
 export const SUGGEST_ENDPOINT = "/rolebox/copilot/suggest";
 
 /** Delay between the session going idle and the automatic request (ms). */
 export const SUGGEST_DELAY_MS = 300;
+
+/**
+ * Monotonic tooltip-id source. A module-level counter rather than `useId`:
+ * the structural react stub in this directory exposes only
+ * `useState`/`useEffect`/`useRef`.
+ */
+let tooltipSequence = 0;
 
 /**
  * The subset of the renderer's session snapshot this component reads.
@@ -98,7 +108,7 @@ export interface SuggestDockProps {
   useInput: <T>(selector: (state: SuggestInputState) => T) => T;
   /** Stable composer actions; only `setDraft` is used. */
   inputActions: { setDraft(text: string): void };
-  /** Optional locale seat; accepted for composition, unused (English aria text). */
+  /** Optional locale seat of the declared namespace; absent falls back to English copy. */
   t?: (key: string, params?: Record<string, unknown>) => string;
 }
 
@@ -145,6 +155,7 @@ export function SuggestDock({
   useSession,
   useInput,
   inputActions,
+  t,
 }: SuggestDockProps) {
   // Session facts. Called unconditionally at the top: these are the renderer's
   // standard session/input hook seats, so their order must stay stable.
@@ -183,6 +194,12 @@ export function SuggestDock({
     subagent,
   });
   latestRef.current = { sessionId, draft, phase, running, blank, subagent };
+
+  /** Unique, stable tooltip id for this mount's `aria-describedby`. */
+  const tooltipIdRef = useRef<string | null>(null);
+  const tooltipId =
+    tooltipIdRef.current ?? `rolebox-suggest-tip-${++tooltipSequence}`;
+  if (tooltipIdRef.current === null) tooltipIdRef.current = tooltipId;
 
   // Unmount guard: abort whatever is in flight and refuse every later write.
   useEffect(() => {
@@ -348,25 +365,46 @@ export function SuggestDock({
   const injected = draft !== "" && injectedText !== null && draft === injectedText;
   const userDraft = draft !== "" && !injected;
   // Blank (no transcript) and subagent conversations have nothing to suggest.
-  // The control stays mounted at its stable 28px width — the composer row must
-  // not reflow — but it is inert.
+  // The control stays mounted — the composer row must not reflow — but it is
+  // inert; the tooltip still explains why.
   const unavailable = blank || subagent !== null || disabled;
 
   let state: SuggestButtonState;
-  let label: string;
+  let labelKey: SuggestKey;
+  let titleKey: SuggestKey;
+  let bodyKey: SuggestKey;
   if (injected) {
     state = "injected";
-    label = "Clear suggestion";
+    labelKey = "label.injected";
+    titleKey = "title.injected";
+    bodyKey = "body.injected";
   } else if (inflight) {
     state = "loading";
-    label = "Suggesting next message";
+    labelKey = "label.loading";
+    titleKey = "title.loading";
+    bodyKey = "body.loading";
   } else if (unavailable || userDraft) {
     state = "disabled";
-    label = "Suggest next message";
+    labelKey = "label.idle";
+    titleKey = "title.disabled";
+    // One body per reason, in the precedence the component applies it.
+    if (blank) bodyKey = "body.disabled.blank";
+    else if (subagent !== null) bodyKey = "body.disabled.subagent";
+    else if (disabled) bodyKey = "body.disabled.config";
+    else bodyKey = "body.disabled.draft";
   } else {
     state = "idle";
-    label = "Suggest next message";
+    labelKey = "label.idle";
+    titleKey = "title.idle";
+    bodyKey = "body.idle";
   }
+
+  // The `t` seat is optional: the unit-test harness (and a host without the
+  // locale namespace) falls back to the shipped English copy.
+  const copy = (key: SuggestKey): string => t?.(key) ?? suggestEn[key] ?? key;
+  const label = copy(labelKey);
+  const title = copy(titleKey);
+  const body = copy(bodyKey);
 
   const onActivate = (): void => {
     if (injected) {
@@ -384,15 +422,22 @@ export function SuggestDock({
         type="button"
         className={suggestClass.button}
         data-state={state}
-        aria-label={label}
-        title={label}
+        aria-label={title}
+        aria-describedby={tooltipId}
         disabled={state === "loading" || state === "disabled"}
         onClick={onActivate}
       >
         <span className={suggestClass.glyph} aria-hidden="true">
           <SuggestGlyph />
         </span>
+        <span className={suggestClass.label} aria-hidden="true">
+          {label}
+        </span>
       </button>
+      <div className={suggestClass.tip} role="tooltip" id={tooltipId}>
+        <span className={suggestClass.tipTitle}>{title}</span>
+        <span className={suggestClass.tipBody}>{body}</span>
+      </div>
     </div>
   );
 }

@@ -11,6 +11,7 @@ import type { RoleboxRolesPanelProps } from "./rolebox-roles-panel.tsx";
 import { RoleboxToolRow } from "./tool-view-row.tsx";
 import { ROLEBOX_TOOL_VIEW_NAMES } from "./tool-view-descriptors.ts";
 import { TOOL_VIEW_NS, en as toolViewEn, zh as toolViewZh } from "./tool-view-locales.ts";
+import { SUGGEST_NS, en as suggestEn, zh as suggestZh } from "./suggest-locales.ts";
 
 // ── Plugin metadata ────────────────────────────────────────────────────────
 
@@ -192,6 +193,14 @@ export function apply(ctx: DshClientContext): (() => void) | void {
   // The composer draft-suggestion button is the seat's SECOND entry. It owns
   // its own request/cancel lifecycle (see suggest-dock.tsx) and shares only
   // the session-scoped inject face with the chip.
+  //
+  // Its dictionaries are registered FIRST: the entry declares this namespace,
+  // and the pill's label and tooltip must resolve from the first paint (a late
+  // dictionary would render raw keys or fall back to English on a zh host).
+  contribute("suggestion dictionaries", () =>
+    ctx.locale.register(SUGGEST_NS, { en: suggestEn, zh: suggestZh }),
+  );
+
   contribute("draft suggestion button", () =>
     ctx.slots.inject(DOCK_SLOT_NAME, () =>
       ctx.slots.register(
@@ -199,6 +208,7 @@ export function apply(ctx: DshClientContext): (() => void) | void {
           name: DOCK_SLOT_NAME,
           id: SUGGEST_SLOT_ID,
           order: SUGGEST_SLOT_ORDER,
+          locale: SUGGEST_NS,
           inject: (sessionId: string) => ({ sessionId }),
         },
         SuggestDock,

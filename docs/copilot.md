@@ -11,7 +11,7 @@ This replaced the former turn-end decision pipeline (heuristic `rules` and the L
 Composer draft suggestions are a **dsh web** feature:
 
 - the **host half** (`src/copilot/draft/`, `src/copilot/config.ts`, `src/copilot/config-sources.ts`, `src/platform/adapters/dsh/copilot-suggest.ts`, `src/platform/adapters/dsh/web-copilot-route.ts`) resolves the acting role, composes the role/project/global config, reads the transcript and makes the one-shot model call;
-- the **browser half** (`src/platform/adapters/dsh/web-ui/suggest-dock.tsx`) is the 28×28 composer tool-row button that watches the session and fills the composer.
+- the **browser half** (`src/platform/adapters/dsh/web-ui/suggest-dock.tsx`) is the composer tool-row pill — a sparkle glyph plus a short label — that watches the session and fills the composer.
 
 No other host (opencode, Pi, Codex) registers the button or the route. A dsh profile without the host `llm` service still boots; a fully configured suggestion request then answers `disabled` with reason `llm-unavailable`, and the button stops asking for that session.
 
@@ -26,7 +26,9 @@ No other host (opencode, Pi, Codex) registers the button or the route. A dsh pro
    - makes **exactly one** model call, bounded by `timeout_ms` (default `4000` ms), with provider-neutral request options and **reasoning disabled** (`reasoningEffort: "off"`) when the selected route advertises that effort; there is no retry;
    - sanitizes the answer to at most `max_chars` characters. An empty answer, the literal `[none]` marker, a timeout, an abort or a provider error all become `none` (never an error shown to the user).
 4. The browser re-reads the **latest** state before applying the answer — the draft must still be empty, the phase still `plain`, the session still idle and the same, and the component still mounted. Anything else drops the answer.
-5. A returned draft is written with `inputActions.setDraft(text)`. The component remembers its own text, so the host echo of that write is not mistaken for the user typing. While an injected draft is present the button becomes **Clear suggestion** and clears the composer with `setDraft('')`.
+5. A returned draft is written with `inputActions.setDraft(text)`. The component remembers its own text, so the host echo of that write is not mistaken for the user typing. While an injected draft is present the pill's label becomes **Clear** (`清除`) and a click clears the composer with `setDraft('')`; clearing never sends the draft.
+
+The pill's short label names the current action — **Suggest** / **Suggesting** / **Clear** (`建议` / `生成中` / `清除`) — and a tooltip on hover or keyboard focus explains the state without a native `title` attribute. Its title and one-sentence body are localized (`en`/`zh`) and follow the dsh UI locale. When the control is unavailable, the tooltip title is **Suggestion unavailable** (`建议不可用`) and the body states the specific reason: the session has no conversation yet, the session is a subagent conversation, copilot draft suggestions are disabled for the role or host, or the composer already holds the user's own text (which is never overwritten). The control stays mounted in every state, so the composer row does not reflow; only the label text changes.
 
 ### Cancellation
 

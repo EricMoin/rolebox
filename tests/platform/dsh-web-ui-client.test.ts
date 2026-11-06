@@ -49,6 +49,7 @@ const roles = await import("../../src/platform/adapters/dsh/web-ui/rolebox-roles
 const toolRow = await import("../../src/platform/adapters/dsh/web-ui/tool-view-row.tsx");
 const descriptors = await import("../../src/platform/adapters/dsh/web-ui/tool-view-descriptors.ts");
 const toolLocales = await import("../../src/platform/adapters/dsh/web-ui/tool-view-locales.ts");
+const suggestLocales = await import("../../src/platform/adapters/dsh/web-ui/suggest-locales.ts");
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -181,6 +182,9 @@ describe("dsh web-UI client plugin entry", () => {
     const suggestion = registered.find((call) => call.options.id === client.SUGGEST_SLOT_ID)!;
     expect(suggestion.options.name).toBe("conversation.input.right");
     expect(suggestion.options.order).toBe(41);
+    // The pill declares its own copy namespace for the `t` seat.
+    expect(suggestion.options.locale).toBe(suggestLocales.SUGGEST_NS);
+    expect(suggestLocales.SUGGEST_NS).toBe("rolebox.suggest");
     expect(suggestion.component).toBe(suggest.SuggestDock);
 
     // Both entries receive the framework-resolved session id through the same
@@ -237,7 +241,8 @@ describe("dsh web-UI client plugin entry", () => {
     expect(ctx.slots.injected).toHaveLength(waits);
     dispose();
     expect(ctx.slots.injectedDisposers).toEqual(Array(waits).fill(1));
-    expect(ctx.locale.disposed()).toBe(1);
+    // TWO locale registrations: the tool-view rows and the suggestion pill.
+    expect(ctx.locale.disposed()).toBe(2);
   });
 
   it("registers one localized tool-call row per rolebox tool name", () => {
@@ -249,8 +254,11 @@ describe("dsh web-UI client plugin entry", () => {
 
     // The dictionaries land in the namespace the rows declare as `locale`,
     // BEFORE the first row renders (a late dictionary would paint raw keys).
-    expect(ctx.locale.registered).toHaveLength(1);
-    const dictionaries = ctx.locale.registered[0]!;
+    expect(ctx.locale.registered).toHaveLength(2);
+    const dictionaries = ctx.locale.registered.find(
+      (registration) => registration.namespace === toolLocales.TOOL_VIEW_NS,
+    )!;
+    expect(dictionaries).toBeDefined();
     expect(dictionaries.namespace).toBe(toolLocales.TOOL_VIEW_NS);
     expect(Object.keys(dictionaries.dictionaries)).toEqual(["en", "zh"]);
     expect(dictionaries.dictionaries.en!["title.run"]).toBe("{verb} {noun}");
@@ -284,6 +292,32 @@ describe("dsh web-UI client plugin entry", () => {
     expect(names).not.toContain("web_search");
     expect(names).not.toContain("web_fetch");
     expect(names).not.toContain("session_search");
+  });
+
+  it("registers complete en/zh suggestion dictionaries for every copy key", () => {
+    const ctx = createFakeContext();
+    client.apply({ slots: ctx.slots.slots, locale: ctx.locale.locale });
+
+    const registration = ctx.locale.registered.find(
+      (entry) => entry.namespace === suggestLocales.SUGGEST_NS,
+    );
+    expect(registration).toBeDefined();
+    expect(Object.keys(registration!.dictionaries)).toEqual(["en", "zh"]);
+    expect(suggestLocales.SUGGEST_KEYS.length).toBeGreaterThan(0);
+    for (const key of suggestLocales.SUGGEST_KEYS) {
+      expect(registration!.dictionaries.en![key]).toEqual(expect.any(String));
+      expect(registration!.dictionaries.zh![key]).toEqual(expect.any(String));
+      expect(registration!.dictionaries.en![key]!.length).toBeGreaterThan(0);
+      expect(registration!.dictionaries.zh![key]!.length).toBeGreaterThan(0);
+    }
+    // The key list is derived from the single copy table, so both languages
+    // expose exactly the same keys.
+    expect(Object.keys(registration!.dictionaries.en!)).toEqual([
+      ...suggestLocales.SUGGEST_KEYS,
+    ]);
+    expect(Object.keys(registration!.dictionaries.zh!)).toEqual([
+      ...suggestLocales.SUGGEST_KEYS,
+    ]);
   });
 
   it("composes the running row title and argument line through the locale seat", () => {

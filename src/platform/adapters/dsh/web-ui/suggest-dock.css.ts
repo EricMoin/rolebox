@@ -18,6 +18,7 @@
 export const suggestCss = `
 .rolebox-suggest {
   box-sizing: border-box;
+  position: relative;
   display: inline-flex;
   align-items: center;
   flex: none;
@@ -26,10 +27,13 @@ export const suggestCss = `
 
   --rolebox-surface-hover: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
   --rolebox-surface-accent: var(--dsw-alias-state-business-tertiary, rgb(228, 237, 253));
+  --rolebox-ink: var(--dsw-alias-label-primary, rgb(15, 17, 21));
   --rolebox-ink-muted: var(--dsw-alias-label-secondary, rgb(97, 102, 107));
   --rolebox-ink-glyph: var(--dsw-alias-label-tertiary, rgb(129, 133, 140));
   --rolebox-accent: var(--dsw-alias-state-business-primary, rgb(65, 118, 230));
   --rolebox-focus-ring: var(--dsw-alias-state-business-primary, rgb(65, 118, 230));
+  --rolebox-popover-surface: var(--dsw-specific-menu, rgb(255, 255, 255));
+  --rolebox-border-hairline: var(--dsw-alias-border-l2, rgba(15, 17, 21, 0.12));
   --rolebox-radius-control: 8px;
   --rolebox-dur-fast: 130ms;
   --rolebox-ease: cubic-bezier(0.4, 0, 0.2, 1);
@@ -37,14 +41,19 @@ export const suggestCss = `
 
 .rolebox-suggest-button {
   box-sizing: border-box;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   flex: none;
-  width: 28px;
   height: 28px;
   margin: 0;
-  padding: 0;
+  padding: 0 8px;
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
   background: transparent;
   border: none;
   border-radius: var(--rolebox-radius-control, 8px);
@@ -82,6 +91,62 @@ export const suggestCss = `
   place-items: center;
 }
 
+.rolebox-suggest-label {
+  display: inline-block;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The state-aware explanation: above the pill, right-aligned, and inert to the
+   pointer so it can never swallow the click it describes. The wrapper stays
+   interactive even when the button is disabled, so a wrapper :hover is what
+   makes a disabled control explain itself; :focus-within covers the keyboard
+   path while the button is enabled/focusable. */
+.rolebox-suggest-tip {
+  box-sizing: border-box;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  display: block;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  color: var(--rolebox-ink, rgb(15, 17, 21));
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  background: var(--rolebox-popover-surface, rgb(255, 255, 255));
+  border: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
+  border-radius: var(--rolebox-radius-control, 8px);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity var(--rolebox-dur-fast, 130ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1)),
+    transform var(--rolebox-dur-fast, 130ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.rolebox-suggest:hover .rolebox-suggest-tip,
+.rolebox-suggest:focus-within .rolebox-suggest-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.rolebox-suggest-tip-title {
+  display: block;
+  font-weight: 600;
+}
+
+.rolebox-suggest-tip-body {
+  display: block;
+  margin-top: 2px;
+  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
+}
+
 @keyframes rolebox-suggest-pulse {
   0%,
   100% {
@@ -98,6 +163,7 @@ export const suggestCss = `
 
 @media (prefers-reduced-motion: reduce) {
   .rolebox-suggest-button,
+  .rolebox-suggest-tip,
   .rolebox-suggest-button[data-state="loading"] .rolebox-suggest-glyph {
     transition: none;
     animation: none;
@@ -110,6 +176,10 @@ export const suggestClass = {
   root: "rolebox-suggest",
   button: "rolebox-suggest-button",
   glyph: "rolebox-suggest-glyph",
+  label: "rolebox-suggest-label",
+  tip: "rolebox-suggest-tip",
+  tipTitle: "rolebox-suggest-tip-title",
+  tipBody: "rolebox-suggest-tip-body",
 } as const;
 
 if (
