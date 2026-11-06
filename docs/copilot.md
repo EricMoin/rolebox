@@ -18,7 +18,7 @@ No other host (opencode, Pi, Codex) registers the button or the route. A dsh pro
 ## How it works
 
 1. The browser watches the session. It is eligible when the agent is **not running**, the input phase is `plain`, the draft is **empty**, the session is not blank and not a subagent conversation.
-2. On a turn end (`running` true → false) it waits **300 ms** and makes **one** `POST /rolebox/copilot/suggest` request. The same idle never asks twice: a `none` answer (or a cancelled schedule) is final until the next turn. The user can always ask again by clicking the button.
+2. On a turn end (`running` true → false) it waits **300 ms** and makes **one** `POST /rolebox/copilot/suggest` request with `intent: "auto"`. The same idle never asks twice: a `none` answer (or a cancelled schedule) is final until the next turn. The user can always ask again by clicking the button, which sends `intent: "manual"`.
 3. On the host, the suggester:
    - resolves `roleId = activeRole(session) ?? defaultRoleId` and composes the effective `copilot.draft` config from the role, project and global sources (see [Configuration precedence](#configuration-precedence)); a role-less session still gets the project/global fallback;
    - answers `disabled` when the enable flag, `provider`, `model` or the host `llm` service is missing;
@@ -30,20 +30,31 @@ No other host (opencode, Pi, Codex) registers the button or the route. A dsh pro
 
 The pill's short label names the current action — **Suggest** / **Suggesting** / **Clear** (`建议` / `生成中` / `清除`) — and a tooltip on hover or keyboard focus explains the state without a native `title` attribute. Its title and one-sentence body are localized (`en`/`zh`) and follow the dsh UI locale. When the control is unavailable, the tooltip title is **Suggestion unavailable** (`建议不可用`) and the body states the specific reason: the session has no conversation yet, the session is a subagent conversation, copilot draft suggestions are disabled for the role or host, or the composer already holds the user's own text (which is never overwritten). The control stays mounted in every state, so the composer row does not reflow; only the label text changes.
 
+### Request intent: `auto` vs `manual`
+
+The JSON body's optional `intent` field says **why** the browser asked. It changes only the prompt's `[none]` miss rule; the model call, its bounds and its single-attempt contract are identical for both.
+
+| `intent` | Sent by | `[none]` rule |
+| --- | --- | --- |
+| `auto` (default when the field is absent) | the automatic 300 ms idle timer | Conservative: the model may answer nothing when the agent is still working, the task is finished, or only the user can know. |
+| `manual` | a click on the suggestion button | Explicit: the model must always propose its single most plausible next message. `[none]` is reserved for a transcript with no assistant message to respond to. |
+
+A manual ask that still yields no draft is not silent, because a dead-looking button is a defect: for about **4 seconds** the tooltip area shows a transient notice — **No suggestion right now** (`暂时没有合适的建议`) with the body *Try again after the next turn, or type your own message.* (`可以等下一轮再试，或直接输入你的内容。`). A manual ask that answers `disabled` shows the disabled title and reason the same way. Automatic requests never raise a notice. The notice takes no focus and never blocks the button (the tooltip stays pointer-inert); typing, a new turn, a session switch or unmount clears it immediately, and its timer expires on its own after the window.
+
 ### Cancellation
 
 Every request carries an `AbortController`. The client aborts it when the user edits before the response, the session starts running again, the session id changes, or the component unmounts. The host also aborts its model call when the HTTP client goes away. A late answer is never applied.
 
 ## Route contract
 
-`POST /rolebox/copilot/suggest` with JSON body `{ "session": "<id>" }` (body capped at 8192 bytes):
+`POST /rolebox/copilot/suggest` with JSON body `{ "session": "<id>", "intent": "auto" | "manual" }` (body capped at 8192 bytes). `intent` is optional and defaults to `"auto"`; when present it must be exactly `"auto"` or `"manual"`.
 
 | Status | Body | Meaning |
 | --- | --- | --- |
 | 200 | `{ ok: true, status: "suggested", text, model, ms }` | One draft, the route's model id, and the elapsed milliseconds. |
-| 200 | `{ ok: true, status: "none" }` | Nothing sensible to suggest. Do not retry this idle. |
+| 200 | `{ ok: true, status: "none" }` | Nothing sensible to suggest. Do not retry this idle automatically; a manual ask shows a transient notice instead. |
 | 200 | `{ ok: true, status: "disabled", reason }` | The feature is off for this session's role/profile. The client remembers this per session id and stops asking. |
-| 400 | `{ ok: false, error }` | Malformed JSON, or a missing/empty `session`. |
+| 400 | `{ ok: false, error }` | Malformed JSON, a missing/empty `session`, or an `intent` that is neither `auto` nor `manual`. |
 | 404 | `{ ok: false, error }` | Unknown session. |
 | 405 | `{ ok: false, error }` | Known path, non-POST method. |
 | 413 | `{ ok: false, error }` | Request body over the cap. |
@@ -165,7 +176,7 @@ The most recent `window_size` messages of the session transcript — truncated t
 - **Never auto-sent.** Filling the composer does not submit it. The user must send it.
 - **One suggestion per idle.** An automatic `none` is not retried until the next turn; only an explicit button click can ask again within the same idle.
 - **One bounded call, provider-neutral options.** Each suggestion is a single model call bounded by `timeout_ms` and a fixed output-token cap; there is no retry. The request carries only options that every supported provider route accepts — in particular no stop sequences — because a host adapter that rejects an unsupported option fails the call before the model runs. Reasoning is explicitly disabled (`reasoningEffort: "off"`) when the selected route advertises an `off` effort: a one-line next-message prediction must not pay for chain-of-thought. The suggester reads the route's capability metadata first (a read-only lookup, not a model call) and omits the field for a route with no reasoning metadata, because the host rejects an unsupported effort (`UNSUPPORTED_REASONING_EFFORT`) before the adapter runs; such a route keeps the provider's own reasoning default instead of failing.
-- **Silent misses are normal.** A timeout, abort, provider error or empty answer produces no draft and no visible error.
+- **Silent misses are normal.** A timeout, abort, provider error or empty answer produces no draft and no visible error. An automatic miss is completely silent; a manual miss raises only its short transient notice.
 - **Model and provider are config, not a live picker.** Changing a role takes effect on the next request after the role config is reloaded; the project/global files are read once at boot, so restart the host (or reload the plugin) after editing them.
 - **dsh web only.** The route and button are not registered on opencode, Pi or Codex.
 - **`disabled` is sticky per session.** Once the host answers `disabled` for a session, the button stops asking for that session until the page reloads.

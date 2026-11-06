@@ -22,6 +22,13 @@
  * is reported as `unknown-session` (the route maps it to 404) rather than as a
  * missing transcript. Transcript read failures stay `none`.
  *
+ * An optional `intent` separates the browser's automatic idle request
+ * (`"auto"`, the default) from a human clicking the button (`"manual"`). It is
+ * forwarded to {@link suggestDraft} and only selects the prompt's `[none]`
+ * rule: `auto` may answer nothing when the task is finished, `manual` must
+ * propose its most plausible candidate. The model call, its bounds and its
+ * single-attempt contract are identical for both.
+ *
  * @module
  */
 
@@ -32,6 +39,7 @@ import {
 import type { CopilotDraftFragment } from "../../../copilot/types.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import { assembleTranscript } from "../../../copilot/transcript.ts";
+import type { DraftIntent } from "../../../copilot/draft/prompt.ts";
 import type { DraftLlm, SuggestDraftResult } from "../../../copilot/draft/suggest.ts";
 import { suggestDraft } from "../../../copilot/draft/suggest.ts";
 
@@ -73,10 +81,17 @@ export type CopilotSuggestOutcome =
   | { status: "disabled"; reason: string }
   | { status: "unknown-session" };
 
-/** A suggestion function bound to one host's dependencies. */
+/**
+ * A suggestion function bound to one host's dependencies.
+ *
+ * `intent` distinguishes the browser's automatic idle request (`"auto"`,
+ * the default) from a human clicking the button (`"manual"`). It only selects
+ * the prompt's `[none]` rule; the model call itself is unchanged.
+ */
 export type CopilotSuggester = (
   sessionId: string,
   signal: AbortSignal,
+  intent?: DraftIntent,
 ) => Promise<CopilotSuggestOutcome>;
 
 /**
@@ -92,7 +107,8 @@ export type CopilotSuggester = (
  *
  * @param deps - Role catalog, active-role lookup, project/global fragments,
  *               session client and llm seam.
- * @returns The `(sessionId, signal) => outcome` function the route invokes.
+ * @returns The `(sessionId, signal, intent?) => outcome` function the route
+ *          invokes.
  */
 export function createCopilotSuggester(
   deps: CopilotSuggesterDeps,
@@ -112,7 +128,7 @@ export function createCopilotSuggester(
     return fragment;
   };
 
-  return async (sessionId, signal) => {
+  return async (sessionId, signal, intent = "auto") => {
     if (signal.aborted) return { status: "none", reason: "aborted" };
 
     // Existence first: an unknown session is a distinct outcome (HTTP 404),
@@ -164,6 +180,7 @@ export function createCopilotSuggester(
       llm: deps.llm,
       provider,
       model,
+      intent,
       signal,
     });
     const ms = Date.now() - startedAt;

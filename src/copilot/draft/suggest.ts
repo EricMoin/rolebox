@@ -37,6 +37,7 @@
  */
 
 import type { CopilotDraftConfig } from "../types.ts";
+import type { DraftIntent } from "./prompt.ts";
 import { buildDraftPrompt, parseDraftResponse } from "./prompt.ts";
 
 // ── Structural host llm seam ────────────────────────────────────────────────
@@ -149,6 +150,11 @@ export interface SuggestDraftInput {
   provider: string;
   /** Model id selected from the role config. */
   model: string;
+  /**
+   * Why this draft was requested (`"auto"` timer vs `"manual"` button click).
+   * Defaults to `"auto"`; it only selects the prompt's `[none]` rule.
+   */
+  intent?: DraftIntent;
   /** Caller cancellation (turn/HTTP client). */
   signal: AbortSignal;
 }
@@ -231,6 +237,9 @@ export async function suggestDraft(
   const prompt = buildDraftPrompt({
     transcript: input.transcript,
     maxChars: input.config.max_chars,
+    // Only the `[none]` rule varies by intent; `undefined` keeps it
+    // conservative (`"auto"`) for a caller that never sends one.
+    intent: input.intent,
   });
 
   const controller = new AbortController();

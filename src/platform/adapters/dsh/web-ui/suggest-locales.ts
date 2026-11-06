@@ -26,8 +26,9 @@ export interface SuggestCopy {
 }
 
 /**
- * The single copy table: short pill labels, tooltip titles and bodies, and one
- * body per disabled reason.
+ * The single copy table: short pill labels, tooltip titles and bodies, one body
+ * per disabled reason, and the transient notice a MANUAL request raises when it
+ * yields no draft.
  */
 export const SUGGEST_COPY = {
   "label.idle": { en: "Suggest", zh: "建议" },
@@ -64,6 +65,11 @@ export const SUGGEST_COPY = {
   "body.disabled.draft": {
     en: "The composer already has your text - it is never overwritten.",
     zh: "输入框里已有你的内容，不会被覆盖。",
+  },
+  "notice.none": { en: "No suggestion right now", zh: "暂时没有合适的建议" },
+  "notice.none.body": {
+    en: "Try again after the next turn, or type your own message.",
+    zh: "可以等下一轮再试，或直接输入你的内容。",
   },
 } as const satisfies Record<string, SuggestCopy>;
 

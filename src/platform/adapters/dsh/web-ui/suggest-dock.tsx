@@ -8,12 +8,14 @@
  * tooltip on hover and keyboard focus:
  *
  *   - idle (the session is not running, the draft is empty, the session is not
- *     blank and not a subagent) — one click asks the host for a draft;
+ *     blank and not a subagent) — one click asks the host for a draft with
+ *     `intent: "manual"` (an explicit request, so the host always proposes);
  *   - the automatic path — after a turn ends (`running` true -> false) with a
  *     plain input phase and an empty draft, the component waits
- *     {@link SUGGEST_DELAY_MS} and then asks ONCE. A `none` answer is final for
- *     that idle: the component does not re-ask until the next turn. The user
- *     can always ask again with the button;
+ *     {@link SUGGEST_DELAY_MS} and then asks ONCE with `intent: "auto"` (the
+ *     conservative rule: a `none` answer is legitimate). A `none` answer is
+ *     final for that idle: the component does not re-ask until the next turn.
+ *     The user can always ask again with the button;
  *   - loading — the single request is in flight and the button is disabled;
  *   - injected — a suggested draft was written into the composer with
  *     `inputActions.setDraft(text)`. The button turns into the clear
@@ -23,7 +25,7 @@
  *     disabled and never overwrites it.
  *
  * The host contract is `POST /rolebox/copilot/suggest` with
- * `{ session: string }`:
+ * `{ session: string, intent?: "auto" | "manual" }`:
  *
  *   - `200 { ok: true, status: "suggested", text, model, ms }` — fill the
  *     composer;
@@ -31,6 +33,12 @@
  *   - `200 { ok: true, status: "disabled", reason }` — the feature is off for
  *     this role/profile. That answer is remembered per session id and stops
  *     every further request for it.
+ *
+ * A MANUAL ask that ends in `none` or `disabled` must not look like a dead
+ * button: the component raises a transient notice for {@link SUGGEST_NOTICE_MS}
+ * in the tooltip area (`data-notice` on the root forces that tooltip visible).
+ * Automatic requests never raise a notice, and any later state change — typing,
+ * a new turn, a session change or unmount — clears it.
  *
  * Concurrency and cancellation:
  *
@@ -46,14 +54,15 @@
  * The slot contract is consumed structurally: the component receives
  * `sessionId` through the entry's inject factory and the renderer's
  * `SessionStandardProps` (`useSession`, `useInput`, `inputActions`). It imports
- * only `react`, its own CSS module and its own copy table — no node builtins,
- * no host packages, no non-relative imports. The only external I/O is the
- * same-origin relative `fetch` above.
+ * only `react`, its own CSS module, its own copy table and a TYPE-ONLY intent
+ * union — no node builtins, no host packages, no non-relative imports. The only
+ * external I/O is the same-origin relative `fetch` above.
  *
  * @module
  */
 
 import { useState, useEffect, useRef } from "react";
+import type { DraftIntent } from "../../../../copilot/draft/prompt.ts";
 import { suggestClass } from "./suggest-dock.css.ts";
 import { en as suggestEn, type SuggestKey } from "./suggest-locales.ts";
 
@@ -62,6 +71,9 @@ export const SUGGEST_ENDPOINT = "/rolebox/copilot/suggest";
 
 /** Delay between the session going idle and the automatic request (ms). */
 export const SUGGEST_DELAY_MS = 300;
+
+/** How long a manual request's transient notice stays visible (ms). */
+export const SUGGEST_NOTICE_MS = 4_000;
 
 /**
  * Monotonic tooltip-id source. A module-level counter rather than `useId`:
@@ -114,6 +126,13 @@ export interface SuggestDockProps {
 
 /** Button states (also rendered as `data-state` for styling and tests). */
 export type SuggestButtonState = "idle" | "loading" | "injected" | "disabled";
+
+/**
+ * A transient notice raised by a MANUAL request that produced no draft:
+ * `"none"` (the model had nothing to propose) or `"disabled"` (the feature is
+ * off for this session). Automatic requests never raise one.
+ */
+export type SuggestNotice = "none" | "disabled";
 
 /** Structural record guard (no node builtins). */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -171,6 +190,8 @@ export function SuggestDock({
   const [injectedText, setInjectedText] = useState<string | null>(null);
   /** True after the host answered `disabled` for the current session id. */
   const [disabled, setDisabled] = useState(false);
+  /** A manual request's transient explanation; `null` when none is showing. */
+  const [notice, setNotice] = useState<SuggestNotice | null>(null);
 
   /** Latest injected text, readable from async continuations before render. */
   const injectedRef = useRef<string | null>(null);
@@ -184,6 +205,8 @@ export function SuggestDock({
   const activeControllerRef = useRef<AbortController | null>(null);
   /** True while the request behind `activeControllerRef` is unresolved. */
   const inflightRef = useRef(false);
+  /** The pending auto-clear timer of the transient manual notice. */
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Snapshot of the latest render values, read by the async continuation. */
   const latestRef = useRef({
     sessionId,
@@ -195,6 +218,32 @@ export function SuggestDock({
   });
   latestRef.current = { sessionId, draft, phase, running, blank, subagent };
 
+  /** Drop the transient notice (and its pending auto-clear timer). */
+  function clearNotice(): void {
+    if (noticeTimerRef.current !== null) {
+      clearTimeout(noticeTimerRef.current);
+      noticeTimerRef.current = null;
+    }
+    setNotice(null);
+  }
+
+  /**
+   * Raise one transient notice for a MANUAL request's non-draft outcome.
+   * Never called for an automatic request, and never steals focus: the notice
+   * only forces the (pointer-inert) tooltip visible.
+   */
+  function showNotice(kind: SuggestNotice): void {
+    if (!mountedRef.current) return;
+    if (noticeTimerRef.current !== null) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    setNotice(kind);
+    noticeTimerRef.current = setTimeout(() => {
+      noticeTimerRef.current = null;
+      if (mountedRef.current) setNotice(null);
+    }, SUGGEST_NOTICE_MS);
+  }
+
   /** Unique, stable tooltip id for this mount's `aria-describedby`. */
   const tooltipIdRef = useRef<string | null>(null);
   const tooltipId =
@@ -205,6 +254,10 @@ export function SuggestDock({
   useEffect(() => {
     return () => {
       mountedRef.current = false;
+      if (noticeTimerRef.current !== null) {
+        clearTimeout(noticeTimerRef.current);
+        noticeTimerRef.current = null;
+      }
       const controller = activeControllerRef.current;
       if (controller !== null) {
         activeControllerRef.current = null;
@@ -214,12 +267,13 @@ export function SuggestDock({
   }, []);
 
   // Session-scoped reset. A new session must never inherit the previous
-  // session's injected/loading/disabled posture.
+  // session's injected/loading/disabled posture or a stale notice.
   useEffect(() => {
     autoRequestedRef.current = false;
     injectedRef.current = null;
     setInjectedText(null);
     setDisabled(disabledRef.current.has(sessionId));
+    clearNotice();
     const controller = activeControllerRef.current;
     if (controller !== null) {
       activeControllerRef.current = null;
@@ -228,6 +282,15 @@ export function SuggestDock({
     inflightRef.current = false;
     setInflight(false);
   }, [sessionId]);
+
+  // The transient manual notice belongs to the state it explains. Any later
+  // state change the user can observe — typing, a new turn, a session switch,
+  // the session going blank/subagent, or the phase leaving `plain` — clears it.
+  // `disabled` is deliberately absent: a manual request's OWN `disabled` answer
+  // arrives with that flag and must keep its notice.
+  useEffect(() => {
+    clearNotice();
+  }, [sessionId, running, draft, phase, blank, subagent]);
 
   // The idle watcher. It owns BOTH the one-per-idle automatic request and the
   // cancellation of whatever request an earlier render started:
@@ -255,7 +318,7 @@ export function SuggestDock({
       autoRequestedRef.current = true;
       timer = setTimeout(() => {
         timer = undefined;
-        startRequest();
+        startRequest("auto");
       }, SUGGEST_DELAY_MS);
     }
 
@@ -272,21 +335,25 @@ export function SuggestDock({
   /**
    * Begin one request. The latest render values are checked again first: the
    * timer may fire after a re-render that invalidated the schedule.
+   *
+   * @param intent - `"auto"` for the idle timer, `"manual"` for a click.
    */
-  function startRequest(): void {
+  function startRequest(intent: DraftIntent): void {
     if (!mountedRef.current) return;
     const latest = latestRef.current;
     if (latest.running || latest.blank || latest.subagent !== null) return;
     if (latest.phase !== "plain" || latest.draft !== "") return;
     if (disabledRef.current.has(latest.sessionId)) return;
 
+    // A new request replaces whatever the previous manual outcome explained.
+    clearNotice();
     const previous = activeControllerRef.current;
     if (previous !== null) previous.abort();
     const controller = new AbortController();
     activeControllerRef.current = controller;
     inflightRef.current = true;
     setInflight(true);
-    void runRequest(controller, latest.sessionId);
+    void runRequest(controller, latest.sessionId, intent);
   }
 
   /**
@@ -294,10 +361,12 @@ export function SuggestDock({
    *
    * @param controller - This request's abort controller.
    * @param requestSessionId - The session the request was issued for.
+   * @param intent - Why it was sent (`"auto"` timer / `"manual"` click).
    */
   async function runRequest(
     controller: AbortController,
     requestSessionId: string,
+    intent: DraftIntent,
   ): Promise<void> {
     const isCurrent = (): boolean =>
       mountedRef.current &&
@@ -309,7 +378,7 @@ export function SuggestDock({
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session: requestSessionId }),
+        body: JSON.stringify({ session: requestSessionId, intent }),
         signal: controller.signal,
       });
       if (!isCurrent() || !res.ok) return;
@@ -319,7 +388,18 @@ export function SuggestDock({
 
       if (data.status === "disabled") {
         disabledRef.current.add(requestSessionId);
-        if (latestRef.current.sessionId === requestSessionId) setDisabled(true);
+        if (latestRef.current.sessionId === requestSessionId) {
+          // A manual ask that finds the feature off must not look like a dead
+          // click: the notice explains it. An automatic `disabled` stays silent.
+          if (intent === "manual") showNotice("disabled");
+          setDisabled(true);
+        }
+        return;
+      }
+      if (data.status === "none") {
+        // Manual `none` is the reported dead-button case: say so once, for a
+        // few seconds. The automatic path keeps its documented silence.
+        if (intent === "manual") showNotice("none");
         return;
       }
       if (data.status !== "suggested" || typeof data.text !== "string") return;
@@ -406,6 +486,21 @@ export function SuggestDock({
   const title = copy(titleKey);
   const body = copy(bodyKey);
 
+  // A manual outcome's transient notice replaces the state copy in the tooltip
+  // area for its short window. The `disabled` notice reuses the shipped
+  // disabled title + config reason, because a `disabled` answer only ever comes
+  // from the role/host config (the manual click is impossible in the blank,
+  // subagent or user-draft disabled states).
+  let tipTitle = title;
+  let tipBody = body;
+  if (notice === "none") {
+    tipTitle = copy("notice.none");
+    tipBody = copy("notice.none.body");
+  } else if (notice === "disabled") {
+    tipTitle = copy("title.disabled");
+    tipBody = copy("body.disabled.config");
+  }
+
   const onActivate = (): void => {
     if (injected) {
       injectedRef.current = null;
@@ -413,11 +508,18 @@ export function SuggestDock({
       inputActions.setDraft("");
       return;
     }
-    if (state === "idle") startRequest();
+    // A click is an explicit request: ask for the manual rule, never the
+    // conservative automatic one.
+    if (state === "idle") startRequest("manual");
   };
 
   return (
-    <div className={suggestClass.root} data-rolebox-suggest data-state={state}>
+    <div
+      className={suggestClass.root}
+      data-rolebox-suggest
+      data-state={state}
+      data-notice={notice ?? undefined}
+    >
       <button
         type="button"
         className={suggestClass.button}
@@ -435,8 +537,8 @@ export function SuggestDock({
         </span>
       </button>
       <div className={suggestClass.tip} role="tooltip" id={tooltipId}>
-        <span className={suggestClass.tipTitle}>{title}</span>
-        <span className={suggestClass.tipBody}>{body}</span>
+        <span className={suggestClass.tipTitle}>{tipTitle}</span>
+        <span className={suggestClass.tipBody}>{tipBody}</span>
       </div>
     </div>
   );

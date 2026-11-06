@@ -361,7 +361,10 @@ describe("SuggestDock", () => {
     expect(suggest.SUGGEST_ENDPOINT).toBe("/rolebox/copilot/suggest");
     expect(calls[0]!.method).toBe("POST");
     expect(calls[0]!.credentials).toBe("same-origin");
-    expect(JSON.parse(calls[0]!.body!)).toEqual({ session: "sess-1" });
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      session: "sess-1",
+      intent: "auto",
+    });
 
     expect(drafts).toEqual([SUGGESTION]);
     expect(host.input.draft).toBe(SUGGESTION);
@@ -598,9 +601,166 @@ describe("SuggestDock", () => {
     expect(css.suggestCss).toContain("pointer-events: none");
     expect(css.suggestCss).toContain(".rolebox-suggest:hover .rolebox-suggest-tip");
     expect(css.suggestCss).toContain(".rolebox-suggest:focus-within .rolebox-suggest-tip");
+    // A manual notice forces the (pointer-inert) tooltip visible.
+    expect(css.suggestCss).toContain(
+      ".rolebox-suggest[data-notice] .rolebox-suggest-tip",
+    );
     expect(css.suggestCss).toContain("data-state=\"injected\"");
     expect(css.suggestCss).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css.suggestClass.button).toBe("rolebox-suggest-button");
     expect(css.suggestClass.tip).toBe("rolebox-suggest-tip");
+  });
+});
+
+// ── Intent and the manual notice ──────────────────────────────────────────
+
+describe("SuggestDock — intent and manual notice", () => {
+  /** The mounted root (its `data-notice` attribute drives the CSS rule). */
+  function root(): VNode {
+    return byClass(css.suggestClass.root)[0]!;
+  }
+
+  it("sends intent auto from the idle timer", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      session: "sess-1",
+      intent: "auto",
+    });
+  });
+
+  it("sends intent manual from a click", async () => {
+    mountDock();
+    // The click is an explicit request even before the idle timer fires.
+    click(button());
+    await settle();
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      session: "sess-1",
+      intent: "manual",
+    });
+    expect(host.input.draft).toBe(SUGGESTION);
+  });
+
+  it("keeps an automatic none silent", async () => {
+    mode = "none";
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      session: "sess-1",
+      intent: "auto",
+    });
+    expect(root().props["data-notice"]).toBeUndefined();
+    expect(textOf(tooltip())).not.toContain("No suggestion right now");
+  });
+
+  it("shows a notice for a manual none and clears it after the window", async () => {
+    expect(suggest.SUGGEST_NOTICE_MS).toBe(4_000);
+    mode = "none";
+    mountDock();
+    // Spend the idle's one automatic request first, so the only pending request
+    // timer left afterwards is the notice's own.
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(root().props["data-notice"]).toBeUndefined();
+
+    click(button());
+    await settle();
+
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      session: "sess-1",
+      intent: "manual",
+    });
+    expect(root().props["data-notice"]).toBe("none");
+    expect(textOf(tooltip())).toContain("No suggestion right now");
+    expect(textOf(tooltip())).toContain(
+      "Try again after the next turn, or type your own message.",
+    );
+
+    await advance(suggest.SUGGEST_NOTICE_MS + 50);
+
+    expect(root().props["data-notice"]).toBeUndefined();
+    expect(textOf(tooltip())).toContain("Suggest the next message");
+    expect(textOf(tooltip())).not.toContain("No suggestion right now");
+  });
+
+  it("shows the disabled title and reason for a manual disabled", async () => {
+    mode = "disabled";
+    mountDock();
+    click(button());
+    await settle();
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      session: "sess-1",
+      intent: "manual",
+    });
+    expect(root().props["data-notice"]).toBe("disabled");
+    expect(button().props["aria-label"]).toBe("Suggestion unavailable");
+    expect(textOf(tooltip())).toContain("Suggestion unavailable");
+    expect(textOf(tooltip())).toContain(
+      "Copilot draft suggestions are disabled for this role or host.",
+    );
+
+    await advance(suggest.SUGGEST_NOTICE_MS + 50);
+    expect(root().props["data-notice"]).toBeUndefined();
+  });
+
+  it("clears a manual notice when the user types", async () => {
+    mode = "none";
+    mountDock();
+    click(button());
+    await settle();
+    expect(root().props["data-notice"]).toBe("none");
+
+    host.input.draft = "let me type instead";
+    rerender(propsFor());
+
+    expect(root().props["data-notice"]).toBeUndefined();
+    expect(textOf(tooltip())).not.toContain("No suggestion right now");
+  });
+
+  it("clears a manual notice when a new turn starts", async () => {
+    mode = "none";
+    mountDock();
+    click(button());
+    await settle();
+    expect(root().props["data-notice"]).toBe("none");
+
+    host.session.running = true;
+    rerender(propsFor());
+
+    expect(root().props["data-notice"]).toBeUndefined();
+  });
+
+  it("clears a manual notice when the session changes", async () => {
+    mode = "none";
+    mountDock();
+    click(button());
+    await settle();
+    expect(root().props["data-notice"]).toBe("none");
+
+    rerender(propsFor("sess-2"));
+
+    expect(root().props["data-notice"]).toBeUndefined();
+  });
+
+  it("clears the notice timer on unmount", async () => {
+    mode = "none";
+    mountDock();
+    click(button());
+    await settle();
+    expect(root().props["data-notice"]).toBe("none");
+
+    unmount();
+    // Both the idle timer and the notice timer are cleared on unmount.
+    expect(vi.getTimerCount()).toBe(0);
+    await advance(suggest.SUGGEST_NOTICE_MS + 50);
+    expect(tree).toBeNull();
   });
 });

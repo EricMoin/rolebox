@@ -17,15 +17,23 @@
  *
  * REST contract:
  *
- *   - `POST /rolebox/copilot/suggest` — body `{ session: string }`.
+ *   - `POST /rolebox/copilot/suggest` — body
+ *     `{ session: string, intent?: "auto" | "manual" }`.
  *       `200 { ok: true, status: "suggested", text, model, ms }`
  *       `200 { ok: true, status: "none" }`
  *       `200 { ok: true, status: "disabled", reason }`
- *       `400 { ok: false, error }` — malformed JSON / missing or empty session
+ *       `400 { ok: false, error }` — malformed JSON / missing or empty session /
+ *         an `intent` that is neither `"auto"` nor `"manual"`
  *       `404 { ok: false, error }` — unknown session (from the suggester)
  *       `405 { ok: false, error }` — known path, non-POST method
  *       `413 { ok: false, error }` — body over 8192 bytes
  *       `500 { ok: false, error }` — unexpected failure
+ *
+ * The optional `intent` says WHY the browser asked: an absent field means
+ * `"auto"` (the session went idle and the composer was empty), while
+ * `"manual"` means the human clicked the suggestion button. It only selects
+ * the prompt's `[none]` rule — `auto` stays conservative, `manual` must propose
+ * its best candidate — and never changes the response shape.
  *
  * Operational notes:
  *   - The request body is capped at 8192 bytes and drained when oversized, so
@@ -44,6 +52,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createSubLogger, formatError } from "../../../logger.ts";
+import type { DraftIntent } from "../../../copilot/draft/prompt.ts";
 import type { CopilotSuggester } from "./copilot-suggest.ts";
 
 /** Exact path owned by this route under the composed `/rolebox` prefix. */
@@ -147,6 +156,23 @@ export class DshCopilotSuggestWebRoute {
         return sendJson(res, 400, errorBody("Missing or invalid 'session' field"));
       }
 
+      // `intent` is optional: absent means the automatic idle request. A
+      // present value must be exactly one of the two known intents, so a typo
+      // can never silently degrade a manual click to the conservative rule.
+      const rawIntent = parsed.intent;
+      if (
+        rawIntent !== undefined &&
+        rawIntent !== "auto" &&
+        rawIntent !== "manual"
+      ) {
+        return sendJson(
+          res,
+          400,
+          errorBody("Invalid 'intent' field; expected 'auto' or 'manual'"),
+        );
+      }
+      const intent: DraftIntent = rawIntent === "manual" ? "manual" : "auto";
+
       const controller = new AbortController();
       const onRequestClose = (): void => {
         // `req` close ALSO fires after a normal, fully received request; only
@@ -160,7 +186,11 @@ export class DshCopilotSuggestWebRoute {
       if (typeof res.on === "function") res.on("close", onResponseClose);
 
       try {
-        const result = await this.suggest(parsed.session, controller.signal);
+        const result = await this.suggest(
+          parsed.session,
+          controller.signal,
+          intent,
+        );
         if (res.writableEnded) return;
 
         if (result.status === "unknown-session") {

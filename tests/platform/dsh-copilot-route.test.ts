@@ -347,6 +347,79 @@ describe("DshCopilotSuggestWebRoute — success", () => {
   });
 });
 
+// ── Request intent ──────────────────────────────────────────────────────────
+
+describe("DshCopilotSuggestWebRoute — intent", () => {
+  /** A route that records the third suggester argument (the intent). */
+  function intentRecorder(): {
+    route: DshCopilotSuggestWebRoute;
+    seen: Array<string | undefined>;
+  } {
+    const seen: Array<string | undefined> = [];
+    const route = new DshCopilotSuggestWebRoute(
+      async (sessionId, signal, intent) => {
+        expect(sessionId).toBe("s1");
+        expect(signal).toBeInstanceOf(AbortSignal);
+        seen.push(intent);
+        return { status: "none", reason: "empty-draft" };
+      },
+    );
+    return { route, seen };
+  }
+
+  it("defaults an absent intent to auto", async () => {
+    const { route, seen } = intentRecorder();
+    const res = await invoke(
+      route,
+      "POST",
+      COPILOT_SUGGEST_ROUTE_PATH,
+      JSON.stringify({ session: "s1" }),
+    );
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(["auto"]);
+  });
+
+  it("passes an explicit manual intent through", async () => {
+    const { route, seen } = intentRecorder();
+    const res = await invoke(
+      route,
+      "POST",
+      COPILOT_SUGGEST_ROUTE_PATH,
+      JSON.stringify({ session: "s1", intent: "manual" }),
+    );
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(["manual"]);
+  });
+
+  it("passes an explicit auto intent through", async () => {
+    const { route, seen } = intentRecorder();
+    await invoke(
+      route,
+      "POST",
+      COPILOT_SUGGEST_ROUTE_PATH,
+      JSON.stringify({ session: "s1", intent: "auto" }),
+    );
+    expect(seen).toEqual(["auto"]);
+  });
+
+  it("answers 400 for an intent that is neither auto nor manual", async () => {
+    const { route, seen } = intentRecorder();
+    for (const body of [
+      JSON.stringify({ session: "s1", intent: "bogus" }),
+      JSON.stringify({ session: "s1", intent: 42 }),
+      JSON.stringify({ session: "s1", intent: null }),
+      JSON.stringify({ session: "s1", intent: true }),
+    ]) {
+      const res = await invoke(route, "POST", COPILOT_SUGGEST_ROUTE_PATH, body);
+      expect(res.status).toBe(400);
+      expect(json<{ ok: false; error: string }>(res).ok).toBe(false);
+      expect(typeof json<{ ok: false; error: string }>(res).error).toBe("string");
+    }
+    // An invalid intent must be rejected before the suggester runs at all.
+    expect(seen).toEqual([]);
+  });
+});
+
 // ── Error contract ──────────────────────────────────────────────────────────
 
 describe("DshCopilotSuggestWebRoute — errors", () => {

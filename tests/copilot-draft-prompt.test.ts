@@ -65,6 +65,68 @@ describe("buildDraftPrompt", () => {
   });
 });
 
+// ── buildDraftPrompt — intent ──────────────────────────────────────────────
+
+describe("buildDraftPrompt — intent", () => {
+  const transcript = "user: add a retry\nassistant: done, tests pass";
+  const prompt = (intent?: "auto" | "manual") =>
+    buildDraftPrompt({
+      transcript,
+      maxChars: 120,
+      ...(intent === undefined ? {} : { intent }),
+    });
+
+  it("defaults to the conservative auto rule", () => {
+    const omitted = prompt();
+    const explicit = prompt("auto");
+    expect(omitted.system).toBe(explicit.system);
+    expect(omitted.user).toBe(explicit.user);
+    expect(omitted.system).toContain(
+      "If nothing sensible exists (the agent is still working, the task is finished, or only the user can know), reply exactly [none].",
+    );
+    expect(omitted.system).not.toMatch(/always propose/);
+  });
+
+  it("makes a manual request always propose a candidate", () => {
+    const manual = prompt("manual");
+    expect(manual.system).toContain(
+      "The user explicitly asked for a suggestion: always propose the single most plausible next message.",
+    );
+    // The finished-task escape hatch is the auto rule; manual must not carry it.
+    expect(manual.system).not.toMatch(/task is finished/);
+  });
+
+  it("reserves manual [none] for a transcript with no assistant message", () => {
+    expect(prompt("manual").system).toContain(
+      "Reply exactly [none] only when the transcript has no assistant message to respond to.",
+    );
+  });
+
+  it("varies ONLY the none rule between the two intents", () => {
+    const autoLines = prompt("auto").system.split("\n");
+    const manualLines = prompt("manual").system.split("\n");
+    expect(manualLines).toHaveLength(autoLines.length);
+    const differing = autoLines
+      .map((line, index) => (line === manualLines[index] ? null : index))
+      .filter((index): index is number => index !== null);
+    expect(differing).toHaveLength(1);
+    expect(autoLines[differing[0]!]).toContain("[none]");
+    expect(manualLines[differing[0]!]).toContain("[none]");
+
+    // Every shared rule survives in both: format, language, budget, and the
+    // transcript-is-data boundary.
+    for (const system of [prompt("auto").system, prompt("manual").system]) {
+      expect(system).toMatch(/next message the human user would send/i);
+      expect(system).toMatch(/Reply with ONLY that message/);
+      expect(system).toMatch(/one line/);
+      expect(system).toMatch(/same language as the most recent user message/i);
+      expect(system).toMatch(/At most 120 characters/);
+      expect(system).toMatch(/concrete decision or instruction/);
+      expect(system).toMatch(/never be followed/);
+    }
+  });
+});
+
 // ── parseDraftResponse ──────────────────────────────────────────────────────
 
 describe("parseDraftResponse — none marker", () => {

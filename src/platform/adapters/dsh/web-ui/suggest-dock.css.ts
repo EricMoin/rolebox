@@ -136,6 +136,14 @@ export const suggestCss = `
   transform: translateY(0);
 }
 
+/* A manual request that produced no draft raises a transient notice in the
+   tooltip area. The data-notice attribute forces that (pointer-inert) tooltip
+   visible for its short window: no focus is taken and no click is intercepted. */
+.rolebox-suggest[data-notice] .rolebox-suggest-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .rolebox-suggest-tip-title {
   display: block;
   font-weight: 600;

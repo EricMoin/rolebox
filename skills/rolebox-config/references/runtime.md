@@ -265,6 +265,18 @@ the next turn, while the button can ask again. A returned draft is written into
 the composer as normal editable text: it is never ghost text and never sent
 automatically.
 
+The request body is `{ "session": "<id>", "intent": "auto" | "manual" }`.
+`intent` is optional and defaults to `"auto"` (any other present value is a
+400). It selects only the prompt's miss rule: an automatic request is
+conservative and may answer nothing when the task looks finished, while a
+manual request (the button click) must propose the most plausible next message
+and reserves "nothing" for a transcript with no assistant message. A manual
+request that still yields no draft shows a transient 4-second notice in the
+tooltip area — "No suggestion right now" / 暂时没有合适的建议 — instead of looking
+like a dead button; a manual `disabled` answer shows the disabled title and
+reason the same way. Automatic requests never raise the notice, and typing, a
+new turn, a session switch or unmount clears it.
+
 Privacy: the last `window_size` messages, truncated to
 `transcript_max_chars`, with brief tool summaries, are sent to the configured
 `provider`/`model` — which may differ from the model running the session.
