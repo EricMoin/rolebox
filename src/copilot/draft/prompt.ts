@@ -59,13 +59,28 @@ export interface DraftPrompt {
 export const DRAFT_NONE_MARKER = "[none]";
 
 /**
+ * Languages the prompt names explicitly when the transcript hints at one.
+ * Only the transcript's most recent `user:` line decides between them.
+ */
+type DraftLanguage = "Chinese" | "English";
+
+/** The language a draft must avoid when the hint names the other one. */
+const OTHER_LANGUAGE: Record<DraftLanguage, DraftLanguage> = {
+  Chinese: "English",
+  English: "Chinese",
+};
+
+/**
  * Build the system/user pair for one draft-suggestion request.
  *
  * The system text states every rule the suggester depends on:
  *   - predict the next message the HUMAN user would send;
  *   - reply with ONLY that message — one line, no quotes, no markdown, no
  *     preamble;
- *   - use the same language as the most recent user message;
+ *   - write in the language of the most recent USER message — a hard
+ *     requirement, strengthened by a deterministic hint derived from the last
+ *     `user:` transcript line, and by stating that `user:` / `assistant:` are
+ *     English LABELS, not the conversation language;
  *   - at most `maxChars` characters;
  *   - prefer a concrete decision or instruction;
  *   - the `[none]` rule, which is the ONLY rule that varies by `intent`:
@@ -82,17 +97,28 @@ export function buildDraftPrompt(input: DraftPromptInput): DraftPrompt {
     ? Math.max(0, Math.floor(input.maxChars))
     : 0;
   const intent = input.intent ?? "auto";
+  const language = detectUserLanguage(input.transcript);
 
   const noneRule =
     intent === "manual"
       ? `The user explicitly asked for a suggestion: always propose the single most plausible next message. Reply exactly ${DRAFT_NONE_MARKER} only when the transcript has no assistant message to respond to.`
       : `If nothing sensible exists (the agent is still working, the task is finished, or only the user can know), reply exactly ${DRAFT_NONE_MARKER}.`;
 
+  const languageRules = [
+    "Use the same language as the most recent user message. Write the draft in the language of the most recent USER message. This is a hard requirement: never switch languages.",
+    ...(language === null
+      ? []
+      : [
+          `The most recent user message is in ${language}. Write the draft in ${language}, not ${OTHER_LANGUAGE[language]}.`,
+        ]),
+    "The `user:` and `assistant:` prefixes are English LABELS, not the conversation language.",
+  ];
+
   const system = [
     "You predict the next message the human user would send to an AI assistant.",
+    ...languageRules,
     "",
     "Reply with ONLY that message: one line, no quotes, no markdown, no preamble.",
-    "Use the same language as the most recent user message.",
     `At most ${maxChars} characters.`,
     "Prefer a concrete decision or instruction.",
     noneRule,
@@ -147,6 +173,37 @@ export function parseDraftResponse(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** CJK Unified Ideographs (+ Extension A): the Han signal for the hint. */
+const HAN = /[\u3400-\u9fff]/;
+
+/** Basic Latin letters: the fallback signal when the line has no Han. */
+const LATIN = /[A-Za-z]/;
+
+/**
+ * Deterministic language hint for the most recent user message.
+ *
+ * The transcript is the plain-text form produced by `transcript.ts`
+ * (`user: <text>` / `assistant: <text>` lines, plus `user [tool …]` summary
+ * lines that never carry the `user:` label). Only the LAST `user:` line
+ * counts: its text is Chinese when it contains Han characters, otherwise
+ * English when it contains Latin letters, otherwise the hint is `null`.
+ *
+ * The label itself is ASCII, so scanning the text after `user:` avoids
+ * reading the English label as language evidence.
+ */
+function detectUserLanguage(transcript: string): DraftLanguage | null {
+  const lines = transcript.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!.trimStart();
+    if (!line.toLowerCase().startsWith("user:")) continue;
+    const text = line.slice("user:".length);
+    if (HAN.test(text)) return "Chinese";
+    if (LATIN.test(text)) return "English";
+    return null;
+  }
+  return null;
+}
 
 /**
  * Strip one pair of wrapping fences/quotes. Triple backticks are checked first

@@ -127,6 +127,95 @@ describe("buildDraftPrompt — intent", () => {
   });
 });
 
+// ── buildDraftPrompt — language hint ──────────────────────────────────────
+
+describe("buildDraftPrompt — language hint", () => {
+  const system = (transcript: string, intent?: "auto" | "manual") =>
+    buildDraftPrompt({
+      transcript,
+      maxChars: 120,
+      ...(intent === undefined ? {} : { intent }),
+    }).system;
+
+  it("names Chinese when the last user message contains Han characters", () => {
+    const text = system("user: 帮我加一个重试\nassistant: 好的，加在哪里？");
+    expect(text).toContain(
+      "The most recent user message is in Chinese. Write the draft in Chinese, not English.",
+    );
+    expect(text).not.toMatch(/The most recent user message is in English\./);
+  });
+
+  it("names English for a Latin-only user message", () => {
+    const text = system("user: add a retry\nassistant: which call?");
+    expect(text).toContain(
+      "The most recent user message is in English. Write the draft in English, not Chinese.",
+    );
+    expect(text).not.toMatch(/The most recent user message is in Chinese\./);
+  });
+
+  it("uses the LAST user line, ignoring earlier ones", () => {
+    const text = system(
+      "user: add a retry\nassistant: done\nuser: 请在测试里也覆盖失败分支",
+    );
+    expect(text).toContain("The most recent user message is in Chinese.");
+    expect(text).not.toMatch(/The most recent user message is in English\./);
+  });
+
+  it("prefers Chinese when one user line mixes both scripts", () => {
+    const text = system("user: 请 fix the retry bug");
+    expect(text).toContain("The most recent user message is in Chinese.");
+  });
+
+  it("adds no concrete language sentence without a user: line", () => {
+    for (const transcript of [
+      "",
+      "assistant: which call?",
+      "user [tool read] completed: src/x.ts",
+      "user: 42",
+    ]) {
+      const text = system(transcript);
+      expect(text).not.toMatch(
+        /The most recent user message is in (Chinese|English)\./,
+      );
+      expect(text).toContain(
+        "This is a hard requirement: never switch languages.",
+      );
+    }
+  });
+
+  it("states that the transcript prefixes are labels, not language", () => {
+    const text = system("user: add a retry\nassistant: which call?");
+    expect(text).toContain(
+      "The `user:` and `assistant:` prefixes are English LABELS, not the conversation language.",
+    );
+  });
+
+  it("puts the hard language rule before the format and budget rules", () => {
+    const text = system("user: 帮我加一个重试\nassistant: 好的");
+    const lines = text.split("\n");
+    const ruleIndex = lines.findIndex((line) =>
+      line.startsWith("Use the same language as the most recent user message."),
+    );
+    expect(ruleIndex).toBeGreaterThanOrEqual(0);
+    expect(ruleIndex).toBeLessThan(3);
+    expect(lines[ruleIndex]).toContain(
+      "Write the draft in the language of the most recent USER message. This is a hard requirement: never switch languages.",
+    );
+    expect(ruleIndex).toBeLessThan(
+      lines.findIndex((line) => line.startsWith("Reply with ONLY")),
+    );
+  });
+
+  it("keeps the hint out of the auto/manual difference", () => {
+    const transcript = "user: 帮我加一个重试\nassistant: 好的";
+    const auto = system(transcript, "auto").split("\n");
+    const manual = system(transcript, "manual").split("\n");
+    const languageLines = (lines: string[]) =>
+      lines.filter((line) => line.includes("most recent user message"));
+    expect(languageLines(auto)).toEqual(languageLines(manual));
+  });
+});
+
 // ── parseDraftResponse ──────────────────────────────────────────────────────
 
 describe("parseDraftResponse — none marker", () => {
