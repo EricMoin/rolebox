@@ -20,10 +20,16 @@
  *   - the request carries only provider-neutral options (no stop sequences), so
  *     a host adapter that rejects unsupported `GenerateOptions` cannot fail the
  *     call before the model runs;
- *   - reasoning is disabled (`reasoningEffort: "off"`) because a one-line
- *     next-message prediction must not pay for chain-of-thought: thinking
- *     spends seconds before the first text delta and the caller's deadline
- *     then degrades the suggestion to a silent `none`.
+ *   - reasoning is disabled (`reasoningEffort: "off"`) ONLY when the selected
+ *     route advertises an `off` effort, because a one-line next-message
+ *     prediction must not pay for chain-of-thought: thinking spends seconds
+ *     before the first text delta and the caller's deadline then degrades the
+ *     suggestion to a silent `none`. A route with no reasoning metadata must
+ *     not receive the field at all — the host rejects an unsupported
+ *     `reasoningEffort` outright (`UNSUPPORTED_REASONING_EFFORT`);
+ *   - the capability read is a host-local metadata lookup, never a model call:
+ *     it does not add a `stream` attempt, and an absent, throwing or
+ *     "no `off` effort" read simply omits the field.
  *
  * The parsed/draft text rules live in `./prompt.ts` and stay pure.
  *
@@ -73,21 +79,62 @@ export interface DraftLlmRequest {
   temperature: number;
   maxTokens: number;
   /**
-   * Disable reasoning for the one-shot draft.
+   * Disable reasoning for the one-shot draft, when the route supports it.
    *
    * A short draft must not spend seconds thinking, and a reasoning route that
    * answers late is indistinguishable from a timeout: the caller only sees
-   * `none`. Both host adapters accept `off` — llm-deepseek serializes
-   * `thinking: { type: "disabled" }` and pi-ai resolves `off` to omitting the
-   * reasoning option — so this stays a provider-neutral request field.
+   * `none`. The field is therefore sent only when the selected route
+   * advertises an `off` effort (see {@link DraftLlm.resolveModelInfo}); it is
+   * omitted for a route with no reasoning metadata, because the host rejects
+   * an unsupported effort (`UNSUPPORTED_REASONING_EFFORT`) before the adapter
+   * runs. On such routes the request stays exactly as it was before the field
+   * existed — provider-neutral in the "absent means default" sense.
    */
   reasoningEffort?: "off";
   signal: AbortSignal;
 }
 
-/** Structural `LlmRuntime.stream()` seam (duck typed, never imported). */
+/**
+ * One selectable reasoning effort, structurally (`LlmReasoningEffortInfo`).
+ * Only the stable id is read.
+ */
+export interface DraftReasoningEffortInfo {
+  id: string;
+}
+
+/** Resolved model capability subset the suggester reads, structurally. */
+export interface DraftModelInfo {
+  /** Adapter-owned selectable reasoning efforts; absent means none. */
+  reasoning?: {
+    /** Supported efforts, least to greatest; only `id` is read. */
+    efforts: ReadonlyArray<DraftReasoningEffortInfo>;
+  };
+}
+
+/**
+ * Structural `LlmRuntime.stream()` seam (duck typed, never imported).
+ *
+ * {@link resolveModelInfo} mirrors the host's public, read-only
+ * `LlmRuntime.resolveModelInfo(provider, model, signal)` capability lookup.
+ * It is OPTIONAL because the suggester must keep working against a minimal
+ * host (or test fake) that only implements `stream`; an absent seam simply
+ * omits the reasoning field.
+ */
 export interface DraftLlm {
   stream(options: DraftLlmRequest): AsyncIterable<DraftLlmChunk>;
+  /**
+   * Read one exact route's capabilities without making a model call.
+   *
+   * @param provider - Provider id from the draft config.
+   * @param model - Model id from the draft config.
+   * @param signal - Caller/deadline signal; the host may honor it.
+   * @returns The route's model info (only `reasoning.efforts[].id` is read).
+   */
+  resolveModelInfo?(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<DraftModelInfo>;
 }
 
 /** Input to {@link suggestDraft}. */
@@ -128,6 +175,49 @@ const DRAFT_TEMPERATURE = 0.2;
 const DRAFT_MAX_TOKENS = 256;
 
 /**
+ * Resolve whether this route may select the `off` reasoning effort.
+ *
+ * The host validates `reasoningEffort` against the model's advertised
+ * capabilities and throws `UNSUPPORTED_REASONING_EFFORT` when the field is
+ * present but the model exposes no reasoning metadata (the pi-ai adapter
+ * returns none for a non-reasoning model such as a plain chat route). Since a
+ * failed validation is reported as a terminal stream error and the suggester
+ * maps that to a silent `none`, the field must be sent conditionally:
+ *
+ *   - advertised `off` effort  -> `"off"`;
+ *   - no reasoning metadata    -> omit;
+ *   - read absent or throws    -> omit (treat capability as unknown, not fatal);
+ *   - caller/deadline aborted  -> omit (the caller reports the abort itself).
+ *
+ * The lookup is a host-local capability read, NOT a model call: it never adds
+ * a `stream` attempt and must never be retried.
+ *
+ * @param llm - The host llm seam (the capability read may be absent).
+ * @param provider - Provider id from the draft config.
+ * @param model - Model id from the draft config.
+ * @param signal - The linked caller/deadline signal.
+ * @returns `"off"` only when the route advertises that effort.
+ */
+async function offReasoningEffort(
+  llm: DraftLlm,
+  provider: string,
+  model: string,
+  signal: AbortSignal,
+): Promise<"off" | undefined> {
+  if (typeof llm.resolveModelInfo !== "function") return undefined;
+  try {
+    const info = await llm.resolveModelInfo(provider, model, signal);
+    const efforts = info?.reasoning?.efforts;
+    if (!Array.isArray(efforts)) return undefined;
+    return efforts.some((effort) => effort?.id === "off") ? "off" : undefined;
+  } catch {
+    // Unknown capability is the safe default: omit the field and let the
+    // provider use its own reasoning default rather than fail the request.
+    return undefined;
+  }
+}
+
+/**
  * Ask the host for one short composer draft.
  *
  * @param input - Config, transcript, llm seam, route and caller signal.
@@ -151,6 +241,18 @@ export async function suggestDraft(
   let timedOut = false;
 
   try {
+    // Resolve the route's capability first: the host rejects a reasoning effort
+    // the model does not advertise, so an unconditional field would turn every
+    // draft on a non-reasoning route into a silent `none`. This read is not a
+    // model call and is not retried.
+    const reasoningEffort = await offReasoningEffort(
+      input.llm,
+      input.provider,
+      input.model,
+      controller.signal,
+    );
+    if (input.signal.aborted) return { kind: "none", reason: "aborted" };
+
     let stream: AsyncIterable<DraftLlmChunk>;
     try {
       // Exactly ONE call: a synchronous throw is a miss, never a retry.
@@ -168,8 +270,10 @@ export async function suggestDraft(
         maxTokens: DRAFT_MAX_TOKENS,
         // Latency: a draft is one line of predicted next message, not a
         // reasoning task. Thinking would run for seconds before any
-        // `text-delta` and the deadline below would report `none`.
-        reasoningEffort: "off",
+        // `text-delta` and the deadline below would report `none`. Only an
+        // advertised effort is selected here; the spread keeps the property
+        // absent for a route without reasoning metadata.
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
         signal: controller.signal,
       });
     } catch {

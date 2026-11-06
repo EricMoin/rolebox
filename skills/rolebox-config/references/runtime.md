@@ -251,9 +251,14 @@ plugin after editing a file.
 A request also needs the host's `llm` service. Anything missing answers
 `disabled` (`not-enabled`, `model-not-configured`, `llm-unavailable`), and the
 browser stops asking for that session. The single model call disables reasoning
-(`reasoningEffort: "off"`): a one-line next-message prediction must not pay for
-chain-of-thought, which spends seconds before the first token and leaves only a
-silent `none`. After a turn ends with an empty draft,
+(`reasoningEffort: "off"`) when the selected route advertises an `off` effort: a
+one-line next-message prediction must not pay for chain-of-thought, which spends
+seconds before the first token and leaves only a silent `none`. The suggester
+reads the route's capability metadata first (a read-only lookup, not a model
+call) and omits the field for a route with no reasoning metadata, because the
+host rejects an unsupported effort (`UNSUPPORTED_REASONING_EFFORT`) before the
+adapter runs; that route then uses the provider's own reasoning default instead
+of failing. After a turn ends with an empty draft,
 the browser waits 300 ms and posts once; typing before the answer aborts the
 request and a late answer is dropped. An automatic `none` is not retried until
 the next turn, while the button can ask again. A returned draft is written into
@@ -290,6 +295,14 @@ by forks and is not a worker identity. Legacy connection identity remains usable
 for standalone tools but cannot execute graph tools. Native role attribution reads
 the thread's `agentRole`; attributed roles narrow rolebox tool calls. Global
 browser/desktop gates still control registration, and OS permissions still apply.
+
+Codex's `graph_wait` holds the current tool call until its selected run completes,
+stops or needs attention. Use it after `graph_declare` instead of polling status.
+It returns a committed snapshot and accepted output; only `status: "complete"`
+permits dependent work. Timeout defaults to 540000 ms; renew a timed-out wait with
+its returned graph/run IDs. Cancelling a wait or closing the MCP connection releases
+the wait without issuing graph control. It cannot wake an ended UI turn. See
+[Codex orchestration](orchestration.md#codex-execution) for fields and limits.
 
 The MCP `ask()` callback remains unavailable for standalone tools. Managed graph
 workers reject fresh interactive approval/input requests and use native task tools

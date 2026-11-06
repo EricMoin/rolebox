@@ -10,6 +10,7 @@ import type {
   DraftLlm,
   DraftLlmChunk,
   DraftLlmRequest,
+  DraftModelInfo,
 } from "../src/copilot/draft/suggest.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -26,28 +27,79 @@ function makeConfig(
   };
 }
 
+/** A route that advertises the latency-saving `off` reasoning effort. */
+const REASONING_OFF: DraftModelInfo = {
+  reasoning: {
+    efforts: [
+      { id: "off" },
+      { id: "low" },
+      { id: "high" },
+    ],
+  },
+};
+
+/** A reasoning route that offers efforts but not `off`. */
+const REASONING_WITHOUT_OFF: DraftModelInfo = {
+  reasoning: { efforts: [{ id: "low" }, { id: "high" }] },
+};
+
+/** A non-reasoning route: no reasoning metadata at all. */
+const NO_REASONING: DraftModelInfo = {};
+
 interface FakeLlm {
   llm: DraftLlm;
   calls: () => number;
   requests: DraftLlmRequest[];
+  capabilityReads: () => number;
 }
 
-/** Wrap a chunk factory in a counting DraftLlm. */
+interface FakeLlmOptions {
+  /** Advertised capability; a function may reject (or throw) instead. */
+  modelInfo?: DraftModelInfo | (() => Promise<DraftModelInfo>);
+  /**
+   * Mirror the host's `resolveCallWithInfo` validation: any present
+   * `reasoningEffort` on a route without advertised reasoning metadata is
+   * rejected before the adapter runs (`UNSUPPORTED_REASONING_EFFORT`).
+   */
+  rejectUnsupportedEffort?: boolean;
+  /** Omit the optional capability seam, as a minimal host/fake would. */
+  withoutCapability?: boolean;
+}
+
+/** Wrap a chunk factory in a counting DraftLlm with a capability seam. */
 function fakeLlm(
   factory: (request: DraftLlmRequest) => AsyncIterable<DraftLlmChunk>,
+  options: FakeLlmOptions = {},
 ): FakeLlm {
   let calls = 0;
+  let capabilityReads = 0;
   const requests: DraftLlmRequest[] = [];
-  return {
-    llm: {
-      stream(request: DraftLlmRequest) {
-        calls += 1;
-        requests.push(request);
-        return factory(request);
-      },
+  const declared = options.modelInfo ?? REASONING_OFF;
+  const llm: DraftLlm = {
+    stream(request: DraftLlmRequest) {
+      calls += 1;
+      if (
+        options.rejectUnsupportedEffort === true &&
+        request.reasoningEffort !== undefined
+      ) {
+        // The host throws while resolving the call, before the adapter sees it.
+        throw new Error("UNSUPPORTED_REASONING_EFFORT");
+      }
+      requests.push(request);
+      return factory(request);
     },
+  };
+  if (options.withoutCapability !== true) {
+    llm.resolveModelInfo = async () => {
+      capabilityReads += 1;
+      return typeof declared === "function" ? await declared() : declared;
+    };
+  }
+  return {
+    llm,
     calls: () => calls,
     requests,
+    capabilityReads: () => capabilityReads,
   };
 }
 
@@ -136,8 +188,8 @@ describe("suggestDraft — aggregation", () => {
     // recorded request must not carry the property at all.
     expect(request).not.toHaveProperty("stop");
     // Latency: a one-line next-message prediction must not pay for
-    // chain-of-thought. Both host adapters accept `off`, which removes the
-    // reasoning spend that otherwise pushes the answer past the deadline.
+    // chain-of-thought. The fake route below advertises `off`, which removes
+    // the reasoning spend that otherwise pushes the answer past the deadline.
     expect(request.reasoningEffort).toBe("off");
     expect(request.signal).toBeInstanceOf(AbortSignal);
     expect(request.system).toMatch(/next message the human user would send/i);
@@ -146,6 +198,106 @@ describe("suggestDraft — aggregation", () => {
     expect(request.messages[0].content).toEqual([
       { type: "text", text: "Transcript:\nuser: add retry\nassistant: where?" },
     ]);
+  });
+});
+
+// ── Reasoning capability ────────────────────────────────────────────────────
+
+describe("suggestDraft — reasoning capability", () => {
+  it("sends reasoningEffort off only when the route advertises it", async () => {
+    const fake = fakeLlm(
+      fixedStream([{ type: "text-delta", text: "ok" }]),
+      { modelInfo: REASONING_OFF },
+    );
+    expect(await suggestDraft(baseInput({ llm: fake.llm }))).toEqual({
+      kind: "suggested",
+      text: "ok",
+    });
+    // The capability read is a metadata lookup, not a model call.
+    expect(fake.capabilityReads()).toBe(1);
+    expect(fake.calls()).toBe(1);
+    expect(fake.requests[0].reasoningEffort).toBe("off");
+  });
+
+  it("omits reasoningEffort when the route offers efforts but not off", async () => {
+    const fake = fakeLlm(
+      fixedStream([{ type: "text-delta", text: "ok" }]),
+      { modelInfo: REASONING_WITHOUT_OFF, rejectUnsupportedEffort: true },
+    );
+    expect(await suggestDraft(baseInput({ llm: fake.llm }))).toEqual({
+      kind: "suggested",
+      text: "ok",
+    });
+    expect(fake.capabilityReads()).toBe(1);
+    expect(fake.calls()).toBe(1);
+    expect(fake.requests[0]).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("omits reasoningEffort on a non-reasoning route even when the host would reject it", async () => {
+    // Regression: dsh-llm's resolveCallWithInfo throws
+    // UNSUPPORTED_REASONING_EFFORT for ANY reasoningEffort on a model without
+    // reasoning metadata (e.g. a plain pi-ai chat route). The fake mirrors
+    // that validation, so a request carrying the field would fail before the
+    // adapter and regress the draft to a silent `none`.
+    const fake = fakeLlm(fixedStream([{ type: "text-delta", text: "ok" }]), {
+      modelInfo: NO_REASONING,
+      rejectUnsupportedEffort: true,
+    });
+    expect(await suggestDraft(baseInput({ llm: fake.llm }))).toEqual({
+      kind: "suggested",
+      text: "ok",
+    });
+    expect(fake.capabilityReads()).toBe(1);
+    expect(fake.calls()).toBe(1);
+    expect(fake.requests[0]).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("omits reasoningEffort when the capability read rejects", async () => {
+    const fake = fakeLlm(fixedStream([{ type: "text-delta", text: "ok" }]), {
+      modelInfo: () => Promise.reject(new Error("INVALID_MODEL_INFO")),
+    });
+    expect(await suggestDraft(baseInput({ llm: fake.llm }))).toEqual({
+      kind: "suggested",
+      text: "ok",
+    });
+    expect(fake.capabilityReads()).toBe(1);
+    expect(fake.calls()).toBe(1);
+    expect(fake.requests[0]).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("omits reasoningEffort when the llm seam has no capability read", async () => {
+    const fake = fakeLlm(fixedStream([{ type: "text-delta", text: "ok" }]), {
+      withoutCapability: true,
+    });
+    expect(await suggestDraft(baseInput({ llm: fake.llm }))).toEqual({
+      kind: "suggested",
+      text: "ok",
+    });
+    expect(fake.capabilityReads()).toBe(0);
+    expect(fake.calls()).toBe(1);
+    expect(fake.requests[0]).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("does not call the model when the caller aborts during the capability read", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    let capabilityReads = 0;
+    const llm: DraftLlm = {
+      async resolveModelInfo() {
+        capabilityReads += 1;
+        controller.abort();
+        return REASONING_OFF;
+      },
+      stream() {
+        calls += 1;
+        return fixedStream([{ type: "text-delta", text: "never" }])();
+      },
+    };
+    expect(
+      await suggestDraft(baseInput({ llm, signal: controller.signal })),
+    ).toEqual({ kind: "none", reason: "aborted" });
+    expect(capabilityReads).toBe(1);
+    expect(calls).toBe(0);
   });
 });
 

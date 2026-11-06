@@ -108,6 +108,11 @@ const requests: DraftLlmRequest[] = [];
 
 beforeAll(async () => {
   const llm: DraftLlm = {
+    // The route advertises `off`, so the one-shot request may disable
+    // reasoning; a non-reasoning route would omit the field instead.
+    resolveModelInfo: async () => ({
+      reasoning: { efforts: [{ id: "off" }, { id: "high" }] },
+    }),
     stream(options: DraftLlmRequest) {
       requests.push(options);
       const chunks: DraftLlmChunk[] = [
