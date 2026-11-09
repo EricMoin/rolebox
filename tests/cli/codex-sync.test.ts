@@ -697,23 +697,14 @@ describe("rolebox sync codex", () => {
     expect(after).toContain(MANAGED_END);
   });
 
-  it("warns with the missing server entry path before Codex is started", async () => {
-    const { warnIfCodexServerEntryMissing } = await import(
+  it("names the missing server entry before Codex is started", async () => {
+    const { codexServerEntryWarning } = await import(
       "../../src/platform/adapters/codex/sync.ts"
     );
-    const warnings: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
-    try {
-      warnIfCodexServerEntryMissing({ serverEntry: "/missing/entry.js", serverEntryExists: false });
-      warnIfCodexServerEntryMissing({ serverEntry: SERVER_ENTRY, serverEntryExists: true });
-    } finally {
-      console.warn = origWarn;
-    }
-
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("/missing/entry.js");
-    expect(warnings[0]).toContain("Build or reinstall rolebox before starting Codex");
+    const warning = codexServerEntryWarning({ serverEntry: "/missing/entry.js", serverEntryExists: false });
+    expect(warning ?? "").toContain("/missing/entry.js");
+    expect(warning ?? "").toContain("Build or reinstall rolebox before starting Codex");
+    expect(codexServerEntryWarning({ serverEntry: SERVER_ENTRY, serverEntryExists: true })).toBeUndefined();
   });
 
   it("reports the partial Codex sync when config.toml registration fails, then rethrows", async () => {

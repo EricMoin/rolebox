@@ -150,7 +150,11 @@ export async function sync(target: string, relink = false): Promise<void> {
   // bundle and registers it in `config.toml`). The CLI stays neutral: it asks
   // the descriptor for the target and calls the hook when one is declared.
   const descriptor = PLATFORM_REGISTRY.find((p) => p.id === target);
-  await descriptor?.postSync?.({ syncTarget });
+  const report = (line: string, level: "info" | "warn" = "info"): void => {
+    if (level === "warn") console.warn(line);
+    else console.log(line);
+  };
+  await descriptor?.postSync?.({ syncTarget, report });
 
   // ── Relinked role directories ───────────────────────────────────────
   // Only populated by an explicit `--relink`. The original directory was

@@ -35,18 +35,18 @@ function readPackageVersion(packageRoot: string): string {
 }
 
 /**
- * Warn when the bundle points Codex at an MCP server entry that does not
- * exist yet. A source checkout that was never built still syncs — Codex just
- * cannot start the server until rolebox is built or reinstalled.
+ * The warning shown when the bundle points Codex at an MCP server entry that
+ * does not exist yet. A source checkout that was never built still syncs —
+ * Codex just cannot start the server until rolebox is built or reinstalled.
  */
-export function warnIfCodexServerEntryMissing(bundle: {
+export function codexServerEntryWarning(bundle: {
   serverEntry: string;
   serverEntryExists: boolean;
-}): void {
-  if (bundle.serverEntryExists) return;
-  console.warn(
+}): string | undefined {
+  if (bundle.serverEntryExists) return undefined;
+  return (
     `Warning: the Codex MCP server entry ${bundle.serverEntry} does not exist. ` +
-      "Build or reinstall rolebox before starting Codex (for a source checkout, `npm run build`).",
+    "Build or reinstall rolebox before starting Codex (for a source checkout, `npm run build`)."
   );
 }
 
@@ -54,6 +54,11 @@ export function warnIfCodexServerEntryMissing(bundle: {
 export interface SyncCodexTargetOptions {
   /** Sync target directory (`{codexHome}/rolebox`) the roles were deployed into. */
   syncTarget: string;
+  /**
+   * Emit one user-facing line. The CLI owns console output (the logging guard
+   * reserves it for `src/cli`), so this adapter reports instead of printing.
+   */
+  report: (line: string, level?: "info" | "warn") => void;
 }
 
 /**
@@ -68,28 +73,30 @@ export async function syncCodexTarget(options: SyncCodexTargetOptions): Promise<
     packageRoot,
     version: readPackageVersion(packageRoot),
   });
-  warnIfCodexServerEntryMissing(bundle);
+  const entryWarning = codexServerEntryWarning(bundle);
+  if (entryWarning !== undefined) options.report(entryWarning, "warn");
   try {
     registerCodexPlugin(bundle.configPath, bundle.marketplaceDir);
   } catch (error) {
     // The bundle is already on disk; name what did and did not happen before
     // failing, and say that a retry is safe (both steps are idempotent).
-    console.error(
+    options.report(
       `Codex plugin: wrote the marketplace directory ${bundle.marketplaceDir}, ` +
         `but registering it in ${bundle.configPath} failed: ` +
         `${error instanceof Error ? error.message : String(error)}. ` +
         "Fix the cause and re-run `rolebox sync codex` — the sync is safe to repeat.",
+      "warn",
     );
     throw error;
   }
-  console.log(`Codex plugin: registered ${bundle.marketplaceDir} in ${bundle.configPath}`);
-  console.log("Codex plugin: install or refresh with `codex plugin add rolebox@rolebox`, then restart Codex");
+  options.report(`Codex plugin: registered ${bundle.marketplaceDir} in ${bundle.configPath}`);
+  options.report("Codex plugin: install or refresh with `codex plugin add rolebox@rolebox`, then restart Codex");
   const directories = resolveRoleboxDirectories({ platformId: "codex" });
   const { resolvedRoles } = await initializeRoleboxRuntime({
     directories: { ...directories, roleboxDir: options.syncTarget },
     roleFunctionsMap: new Map(),
   });
   const agents = syncCodexAgents(resolvedRoles, { codexHome: directories.configDir });
-  for (const warning of agents.warnings) console.warn(`Warning: ${warning}`);
-  console.log(`Codex agents: ${agents.agents.filter(agent => agent.parentId === undefined).length} public roles, ${agents.agents.filter(agent => agent.parentId !== undefined).length} private children; restart Codex to refresh native agents`);
+  for (const warning of agents.warnings) options.report(`Warning: ${warning}`, "warn");
+  options.report(`Codex agents: ${agents.agents.filter(agent => agent.parentId === undefined).length} public roles, ${agents.agents.filter(agent => agent.parentId !== undefined).length} private children; restart Codex to refresh native agents`);
 }

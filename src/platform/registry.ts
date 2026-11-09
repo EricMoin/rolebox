@@ -96,7 +96,11 @@ export interface PlatformDescriptor {
    * native agent files), so the neutral CLI calls the descriptor instead of
    * naming the platform. Omitted = the generic sync is the whole step.
    */
-  postSync?: (ctx: { syncTarget: string }) => Promise<void>;
+  postSync?: (ctx: {
+    syncTarget: string;
+    /** Emit one user-facing line; the CLI owns console output. */
+    report: (line: string, level?: "info" | "warn") => void;
+  }) => Promise<void>;
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────
