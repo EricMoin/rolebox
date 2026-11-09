@@ -176,7 +176,11 @@ function notification(client: CodexAppServerClient, name: string): Promise<Codex
 afterEach(async () => {
   for (const client of clients.splice(0)) client.close();
   await Promise.all(processes.splice(0).map(process => process.closed));
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  // Windows can briefly keep a directory locked after a terminated descendant
+  // closes, which surfaces as EPERM on an immediate recursive removal.
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
   vi.unstubAllEnvs();
 });
 

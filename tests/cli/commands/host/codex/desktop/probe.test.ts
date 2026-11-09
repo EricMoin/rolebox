@@ -61,7 +61,8 @@ it("uses exit 2 and owner-only permissions for a blocked report, including an ex
   mocks.probe.mockResolvedValue({ status: "blocked", stage: "initialize", code: "timeout", toolCount: 0, readOnlyToolVerified: false });
   await invoke({ report });
   expect(process.exitCode).toBe(2);
-  expect(statSync(report).mode & 0o777).toBe(0o600);
+  // Windows does not model POSIX owner/group bits; chmod only toggles read-only.
+  if (process.platform !== "win32") expect(statSync(report).mode & 0o777).toBe(0o600);
   expect(JSON.parse(readFileSync(report, "utf8"))).toEqual({ bridge: expect.objectContaining({ code: "timeout" }), parentNotificationAvailableAfter: true, hostConfigurationChanged: false });
   expect(mocks.close).toHaveBeenCalledOnce();
 });
