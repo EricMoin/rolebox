@@ -20,8 +20,8 @@ const DRAFT_DEFAULTS = {
   enabled: false,
   timeout_ms: 4000,
   max_chars: 120,
-  window_size: 8,
-  transcript_max_chars: 4000,
+  window_size: 40,
+  transcript_max_chars: 24_000,
 } as const;
 
 /**
@@ -162,8 +162,8 @@ describe("parseCopilotConfig — clamps", () => {
 
     expect(config.draft.timeout_ms).toBe(10_000);
     expect(config.draft.max_chars).toBe(500);
-    expect(config.draft.window_size).toBe(40);
-    expect(config.draft.transcript_max_chars).toBe(20_000);
+    expect(config.draft.window_size).toBe(200);
+    expect(config.draft.transcript_max_chars).toBe(128_000);
   });
 
   it("honors in-range values", () => {
@@ -598,7 +598,7 @@ describe("copilot.draft YAML example", () => {
         timeout_ms: 200,
         max_chars: 80,
         window_size: 12,
-        transcript_max_chars: 4000,
+        transcript_max_chars: 24_000,
       },
     });
   });

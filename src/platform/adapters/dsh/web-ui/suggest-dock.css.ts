@@ -74,6 +74,12 @@ export const suggestCss = `
   outline-offset: -2px;
 }
 
+.rolebox-suggest:focus-visible {
+  outline: 2px solid var(--rolebox-focus-ring, rgb(65, 118, 230));
+  outline-offset: 2px;
+  border-radius: var(--rolebox-radius-control, 8px);
+}
+
 .rolebox-suggest-button:disabled {
   cursor: default;
   opacity: 0.45;
@@ -99,11 +105,8 @@ export const suggestCss = `
   text-overflow: ellipsis;
 }
 
-/* The state-aware explanation: above the pill, right-aligned, and inert to the
-   pointer so it can never swallow the click it describes. The wrapper stays
-   interactive even when the button is disabled, so a wrapper :hover is what
-   makes a disabled control explain itself; :focus-within covers the keyboard
-   path while the button is enabled/focusable. */
+/* The hover/focus panel includes an automatic-suggestions switch. Hidden
+   controls leave the tab order; a bridge spans the gap above the pill. */
 .rolebox-suggest-tip {
   box-sizing: border-box;
   position: absolute;
@@ -123,6 +126,7 @@ export const suggestCss = `
   background: var(--rolebox-popover-surface, rgb(255, 255, 255));
   border: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
   border-radius: var(--rolebox-radius-control, 8px);
+  visibility: hidden;
   pointer-events: none;
   opacity: 0;
   transform: translateY(2px);
@@ -133,16 +137,34 @@ export const suggestCss = `
 
 .rolebox-suggest:hover .rolebox-suggest-tip,
 .rolebox-suggest:focus-within .rolebox-suggest-tip {
+  visibility: visible;
+  pointer-events: auto;
   opacity: 1;
   transform: translateY(0);
 }
 
-/* A manual request that produced no draft raises a transient notice in the
-   tooltip area. The data-notice attribute forces that (pointer-inert) tooltip
-   visible for its short window: no focus is taken and no click is intercepted. */
+/* A manual miss briefly shows its explanation without moving focus. */
 .rolebox-suggest[data-notice] .rolebox-suggest-tip {
+  visibility: visible;
+  pointer-events: auto;
   opacity: 1;
   transform: translateY(0);
+}
+
+.rolebox-suggest[data-popover-dismissed="true"] .rolebox-suggest-tip {
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.rolebox-suggest-tip::after,
+.rolebox-suggest-card::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 10px;
 }
 
 /* While the hint card is open it owns the space above the pill: the tooltip is
@@ -152,10 +174,7 @@ export const suggestCss = `
   display: none;
 }
 
-/* The hint card: an absolutely positioned panel above the pill. It is the only
-   interactive overlay (the tooltip stays pointer-inert); its buttons are real
-   <button>s, take no focus on their own and never move focus into the composer
-   row. */
+/* The hint card shares the same settings footer as the hover/focus panel. */
 .rolebox-suggest-card {
   box-sizing: border-box;
   position: absolute;
@@ -247,6 +266,77 @@ export const suggestCss = `
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
 }
 
+.rolebox-suggest-auto-settings {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
+}
+
+.rolebox-suggest-auto-toggle {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 28px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.rolebox-suggest-auto-toggle:focus-visible {
+  outline: 2px solid var(--rolebox-focus-ring, rgb(65, 118, 230));
+  outline-offset: 2px;
+}
+
+.rolebox-suggest-auto-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
+  white-space: nowrap;
+}
+
+.rolebox-suggest-auto-track {
+  display: inline-block;
+  position: relative;
+  width: 26px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--rolebox-ink-glyph, rgb(129, 133, 140));
+}
+
+.rolebox-suggest-auto-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--rolebox-popover-surface, rgb(255, 255, 255));
+}
+
+.rolebox-suggest-auto-toggle[aria-checked="true"] .rolebox-suggest-auto-track {
+  background: var(--rolebox-accent, rgb(65, 118, 230));
+}
+
+.rolebox-suggest-auto-toggle[aria-checked="true"] .rolebox-suggest-auto-track::after {
+  left: 12px;
+}
+
+.rolebox-suggest-auto-description {
+  display: block;
+  margin-top: 2px;
+  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
+}
+
 @keyframes rolebox-suggest-pulse {
   0%,
   100% {
@@ -280,6 +370,11 @@ export const suggestClass = {
   tip: "rolebox-suggest-tip",
   tipTitle: "rolebox-suggest-tip-title",
   tipBody: "rolebox-suggest-tip-body",
+  autoSettings: "rolebox-suggest-auto-settings",
+  autoToggle: "rolebox-suggest-auto-toggle",
+  autoState: "rolebox-suggest-auto-state",
+  autoTrack: "rolebox-suggest-auto-track",
+  autoDescription: "rolebox-suggest-auto-description",
   card: "rolebox-suggest-card",
   cardEyebrow: "rolebox-suggest-card-eyebrow",
   cardText: "rolebox-suggest-card-text",

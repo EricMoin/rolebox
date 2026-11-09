@@ -1,12 +1,4 @@
-/**
- * Transcript assembly for the composer draft suggester.
- *
- * Builds a role-labeled plain-text transcript of the tail window of a
- * session's conversation, for consumption by the draft prompt builder.
- * This module owns NO prompt template text — it only
- * formats. On read failure or timeout it returns null and the caller
- * treats that as "no transcript available".
- */
+/** Builds bounded session excerpts while preserving the user's task and latest exchange. */
 
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { Part, ToolPart } from "../session/types.ts";
@@ -14,139 +6,169 @@ import { withTimeout, DEFAULT_TIMEOUT_MS } from "../utils/timeout.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("copilot-transcript");
-
-/** Cap on a single tool-result summary line (kept brief by construction). */
 const TOOL_SUMMARY_MAX = 120;
+const TOOL_SUMMARY_COUNT = 12;
 
 export interface TranscriptOptions {
-  /** Number of most recent messages to include in the transcript window. */
+  /** Recent text-bearing user/assistant messages; tool-only messages do not count. */
   window_size: number;
-  /** Hard cap on the returned transcript length; tail-truncated when exceeded. */
+  /** Total character cap, including labels and tool summaries. */
   max_chars: number;
-  /** When true, append brief one-line summaries of tool results; when false, drop tool parts. */
+  /** Include brief tool results only after allocating space to the conversation. */
   include_tools: boolean;
 }
 
-/**
- * Assemble a role-labeled plain-text transcript of the tail window of a
- * session's conversation.
- *
- * - Reads messages via `client.messages(sid, { limit: window_size })`,
- *   guarded by `withTimeout` (ROLEBOX_CLIENT_TIMEOUT_MS override applies,
- *   see src/utils/timeout.ts). The tail window is enforced defensively
- *   even if the client returns more messages than requested.
- * - Emits `user: <text>` / `assistant: <text>` lines from text parts. When
- *   `include_tools` is true, tool results are appended as brief one-line
- *   summaries; when false, tool parts are dropped entirely.
- * - Enforces `max_chars` by TAIL truncation: keeps the most recent content.
- * - Returns null on read failure or timeout; returns "" for an empty window.
- */
+interface TranscriptEntry {
+  index: number;
+  role: "user" | "assistant";
+  text: string;
+  tools: string[];
+}
+
+/** Returns null on a read failure, or an empty string when there is no usable context. */
 export async function assembleTranscript(
   client: ISessionClient,
   sid: string,
   opts: TranscriptOptions,
 ): Promise<string | null> {
-  const windowSize = Math.max(0, opts.window_size);
-  const maxChars = Math.max(0, opts.max_chars);
+  const windowSize = Math.max(0, Math.floor(opts.window_size));
+  const maxChars = Math.max(0, Math.floor(opts.max_chars));
+  if (windowSize === 0 || maxChars === 0) return "";
 
   try {
+    // Adapter limits can select a prefix (DSH/Pi), so window the complete
+    // conversation here rather than mistaking its first messages for its tail.
     const msgs = await withTimeout(
-      client.messages(sid, { limit: windowSize }),
+      client.messages(sid),
       DEFAULT_TIMEOUT_MS,
       `assembleTranscript:${sid}`,
       log,
     );
     if (msgs === null) return null;
 
-    const tail = windowSize > 0 ? msgs.slice(-windowSize) : [];
+    const entries: TranscriptEntry[] = [];
+    for (const [index, msg] of msgs.entries()) {
+      const sourceRole = msg.info?.role;
+      if (sourceRole !== "user" && sourceRole !== "assistant") continue;
+      const role = sourceRole === "user" ? "user" : "assistant";
 
-    const lines: string[] = [];
-    for (const msg of tail) {
-      const role = msg.info?.role;
-      // Only the canonical harness roles are labeled; adapter-specific
-      // roles (e.g. toolResult) are never mislabeled as user/assistant.
-      if (role !== "user" && role !== "assistant") continue;
-
-      const text = msg.parts
-        .filter(
-          (p) =>
-            p.type === "text" &&
-            "text" in p &&
-            typeof (p as { text?: string }).text === "string",
-        )
-        .map((p) => (p as { text: string }).text)
-        .join("");
-      if (text.length > 0) lines.push(`${role}: ${text}`);
-
-      if (opts.include_tools) {
-        for (const part of msg.parts) {
-          const summary = summarizeTool(part);
-          if (summary !== null) lines.push(`${role} ${summary}`);
-        }
-      }
+      const text = oneLine(msg.parts
+        .filter((p): p is Part & { text: string } =>
+          p.type === "text" && !p.synthetic && !p.ignored && typeof p.text === "string")
+        .map((p) => p.text)
+        .join(""));
+      const tools = opts.include_tools
+        ? msg.parts.map(summarizeTool).filter((s): s is string => s !== null)
+        : [];
+      if (text || tools.length > 0) entries.push({ index, role, text, tools });
     }
 
-    let transcript = lines.join("\n");
-    if (transcript.length > maxChars) {
-      transcript = transcript.slice(transcript.length - maxChars);
+    const dialogue = entries.filter((entry) => entry.text.length > 0);
+    const recent = dialogue.slice(-windowSize);
+    const users = dialogue.filter((entry) => entry.role === "user");
+    const latestAssistant = dialogue.findLast((entry) => entry.role === "assistant");
+    const anchors = [...new Set([users.at(-1), latestAssistant, users[0]])]
+      .filter((entry): entry is TranscriptEntry => entry !== undefined);
+
+    const selected = new Map<number, string>();
+    let remaining = maxChars;
+    const add = (entry: TranscriptEntry, limit: number): void => {
+      if (selected.has(entry.index)) return;
+      const separator = selected.size > 0 ? 1 : 0;
+      const available = Math.min(limit, remaining - separator);
+      const prefix = `${entry.role}: `;
+      if (available <= prefix.length) return;
+      const line = prefix + excerpt(entry.text, available - prefix.length);
+      selected.set(entry.index, line);
+      remaining -= line.length + separator;
+    };
+
+    // Reserve excerpts before a long assistant reply can displace the task.
+    for (const entry of anchors) add(entry, Math.floor(maxChars / 4));
+    for (const entry of recent.toReversed()) {
+      if (entry.role === "user") add(entry, remaining);
     }
-    return transcript;
+    for (const entry of recent.toReversed()) add(entry, remaining);
+
+    // Short histories can spend their unused budget on fuller anchor excerpts.
+    for (const entry of anchors) {
+      const previous = selected.get(entry.index);
+      if (previous === undefined) continue;
+      const prefix = `${entry.role}: `;
+      const line = prefix + excerpt(entry.text, previous.length - prefix.length + remaining);
+      remaining -= line.length - previous.length;
+      selected.set(entry.index, line);
+    }
+
+    // Tools provide supporting evidence, not the user's intent. Keep only
+    // recent results and spend at most an eighth of the transcript on them.
+    const start = recent[0]?.index ?? entries.at(-windowSize)?.index ?? 0;
+    const tools = entries.filter((entry) => entry.index >= start)
+      .flatMap((entry) => entry.tools.map((summary) => ({
+        index: entry.index,
+        line: `${entry.role} ${summary}`,
+      })))
+      .slice(-TOOL_SUMMARY_COUNT);
+    let toolBudget = Math.min(2000, Math.floor(maxChars / 8), remaining);
+    const selectedTools: typeof tools = [];
+    for (const tool of tools.toReversed()) {
+      const separator = selected.size > 0 || selectedTools.length > 0 ? 1 : 0;
+      const cost = tool.line.length + separator;
+      if (cost > toolBudget) continue;
+      selectedTools.push(tool);
+      toolBudget -= cost;
+    }
+    for (const tool of selectedTools.toReversed()) {
+      const previous = selected.get(tool.index);
+      selected.set(tool.index, previous === undefined ? tool.line : `${previous}\n${tool.line}`);
+    }
+
+    return [...selected].sort(([a], [b]) => a - b).map(([, text]) => text).join("\n");
   } catch {
     return null;
   }
 }
 
-/**
- * Type guard for tool parts. Required because `Part` carries a catch-all
- * member whose index signature would otherwise leave `state` as `unknown`
- * after a plain `type === "tool"` check.
- */
 function isToolPart(part: Part): part is ToolPart {
-  return (
-    part.type === "tool" &&
-    "state" in part &&
-    "tool" in part &&
-    "callID" in part
-  );
+  return part.type === "tool" && "state" in part && "tool" in part && "callID" in part;
 }
 
-/**
- * One-line summary of a tool result part, or null when the part is not a
- * tool result (non-tool parts, or tool parts still pending/running).
- */
 function summarizeTool(part: Part): string | null {
   if (!isToolPart(part)) return null;
   const state = part.state;
 
   if (state.status === "completed") {
-    const title =
-      typeof state.title === "string" && state.title.length > 0
-        ? state.title
-        : null;
-    const outputFirstLine = firstNonEmptyLine(state.output);
-    const detail = title ?? outputFirstLine ?? "(no output)";
-    return `[tool ${part.tool}] completed: ${truncate(detail, TOOL_SUMMARY_MAX)}`;
+    const title = firstNonEmptyLine(state.title);
+    const output = firstNonEmptyLine(state.output);
+    const detail = title && title !== part.tool ? title : output ?? title ?? "(no output)";
+    return `[tool ${oneLine(part.tool)}] completed: ${truncate(detail, TOOL_SUMMARY_MAX)}`;
   }
-
   if (state.status === "error") {
-    return `[tool ${part.tool}] error: ${truncate(String(state.error), TOOL_SUMMARY_MAX)}`;
+    return `[tool ${oneLine(part.tool)}] error: ${truncate(oneLine(String(state.error)), TOOL_SUMMARY_MAX)}`;
   }
-
-  // pending / running carry no result yet.
   return null;
 }
 
-/** First non-empty line of a string, trimmed; null when empty. */
 function firstNonEmptyLine(text: string): string | null {
   if (typeof text !== "string") return null;
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length > 0) return trimmed;
-  }
-  return null;
+  return text.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? null;
 }
 
-/** Truncate to `max` chars; unchanged when already short enough. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** Keep the opening context and closing question/constraints without losing the role label. */
+function excerpt(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const marker = " …[truncated]… ";
+  if (limit <= marker.length) return text.slice(0, limit);
+  const available = limit - marker.length;
+  const head = Math.ceil(available / 2);
+  const tail = Math.floor(available / 2);
+  return text.slice(0, head) + marker + (tail > 0 ? text.slice(-tail) : "");
+}
+
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }

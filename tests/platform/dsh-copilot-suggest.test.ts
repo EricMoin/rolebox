@@ -16,6 +16,8 @@ import type {
   CopilotSuggesterDeps,
 } from "../../src/platform/adapters/dsh/copilot-suggest.ts";
 import { createCopilotSuggester } from "../../src/platform/adapters/dsh/copilot-suggest.ts";
+import { DshSessionAdapter } from "../../src/platform/adapters/dsh/session.ts";
+import type { DshSessionLike, DshMessageLike } from "../../src/platform/adapters/dsh/session.ts";
 import type {
   DraftLlm,
   DraftLlmChunk,
@@ -482,6 +484,84 @@ describe("createCopilotSuggester — config gating", () => {
 // ── Transcript and call ─────────────────────────────────────────────────────
 
 describe("createCopilotSuggester — transcript and call", () => {
+  it("sends a longer conversation by default instead of the former eight-message tail", async () => {
+    const messages = Array.from({ length: 30 }, (_, i) =>
+      (i % 2 === 0 ? userMessage : assistantMessage)(`context-${i}: ${"detail ".repeat(40)}`),
+    );
+    const captured = capturingLlm();
+    const suggest = createCopilotSuggester(deps({
+      sessionClient: fakeClient({ messages }), llm: captured.llm,
+    }));
+
+    await suggest("s1", signal());
+
+    const text = captured.requests[0]!.messages[0]!.content[0]!.text;
+    expect(text.length).toBeGreaterThan(4000);
+    expect(text.length).toBeLessThanOrEqual(24_000 + "Transcript:\n".length);
+    expect(text).toContain("user: context-2:");
+    expect(text).toContain("assistant: context-29:");
+  });
+
+  it("uses the current exchange through the DSH adapter after a long tool-heavy session", async () => {
+    const message = (id: string, role: string, text: string): DshMessageLike => ({
+      id, role, content: [{ type: "text", text }],
+    });
+    const history: DshMessageLike[] = [
+      message("goal", "user", "Investigate retry behavior."),
+      ...Array.from({ length: 20 }, (_, i) => message(`old-${i}`, "assistant", `Old finding ${i}.`)),
+      message("current", "user", "现在只修复取消逻辑，保持接口不变"),
+      ...Array.from({ length: 80 }, (_, i): DshMessageLike => ({
+        id: `tool-${i}`, role: "user",
+        content: [{ type: "tool-result", toolCallId: `call-${i}`, content: [{ type: "text", text: "checked cancellation" }] }],
+      })),
+      message("latest", "assistant", "Cancellation is fixed; the timeout case still needs coverage."),
+    ];
+    const makeSession = (id: string, messages: DshMessageLike[]): DshSessionLike => ({
+      id, seq: 0, events: [], deriveMessages: () => messages,
+      append() { throw new Error("read-only fixture"); },
+    });
+    const sessions = [
+      makeSession("s1", history),
+      makeSession("s2", [message("u2", "user", "Plan a garden."), message("a2", "assistant", "What can grow in shade?")]),
+    ];
+    const sessionClient = new DshSessionAdapter({
+      get: (id) => sessions.find((session) => session.id === id),
+      list: () => sessions,
+      create() { throw new Error("read-only fixture"); },
+      fork() { throw new Error("read-only fixture"); },
+    });
+    const captured = capturingLlm();
+    const suggest = createCopilotSuggester(deps({
+      sessionClient, llm: captured.llm,
+      roles: [role("alpha", { ...ENABLED_DRAFT, window_size: 2 })],
+    }));
+
+    await suggest("s1", signal());
+    const text = captured.requests[0]!.messages[0]!.content[0]!.text;
+    expect(text).toContain("user: Investigate retry behavior.");
+    expect(text).toContain("user: 现在只修复取消逻辑，保持接口不变");
+    expect(text).toContain("assistant: Cancellation is fixed; the timeout case still needs coverage.");
+    expect(text).not.toContain("Old finding");
+    expect(captured.requests[0]!.system).toContain("The most recent user message is in Chinese.");
+
+    await suggest("s2", signal());
+    const otherText = captured.requests[1]!.messages[0]!.content[0]!.text;
+    expect(otherText).toContain("user: Plan a garden.");
+    expect(otherText).not.toContain("取消逻辑");
+    expect(otherText).not.toContain("retry behavior");
+  });
+
+  it("does not call the model for an empty session", async () => {
+    const llm = fakeLlm();
+    const suggest = createCopilotSuggester(deps({
+      sessionClient: fakeClient({ messages: [] }), llm: llm.llm,
+    }));
+    expect(await suggest("s1", signal(), "manual")).toEqual({
+      status: "none", reason: "insufficient-context",
+    });
+    expect(llm.calls()).toBe(0);
+  });
+
   it("returns the suggestion with the configured model and a duration", async () => {
     const llm = fakeLlm("Run the tests");
     const suggest = createCopilotSuggester(deps({ llm: llm.llm }));
@@ -555,9 +635,10 @@ describe("createCopilotSuggester — intent", () => {
     expect(captured.requests).toHaveLength(1);
     const system = captured.requests[0]!.system;
     expect(system).toContain(
-      "always propose the single most plausible next message",
+      "look for a useful continuation of the current task",
     );
-    expect(system).not.toMatch(/task is finished/);
+    expect(system).toContain("reply exactly [none] if no grounded candidate exists");
+    expect(system).not.toMatch(/always propose/);
   });
 
   it("keeps the transcript as data for both intents", async () => {

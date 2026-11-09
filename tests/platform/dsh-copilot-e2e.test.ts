@@ -240,9 +240,10 @@ describe("copilot suggest over live HTTP", () => {
     expect(requests).toHaveLength(1);
     const request = requests[0]!;
     expect(request.system).toContain(
-      "The user explicitly asked for a suggestion: always propose the single most plausible next message.",
+      "The user explicitly asked for a suggestion: look for a useful continuation of the current task",
     );
-    expect(request.system).not.toMatch(/task is finished/);
+    expect(request.system).toContain("reply exactly [none] if no grounded candidate exists");
+    expect(request.system).not.toMatch(/always propose/);
     // Still one bounded, provider-neutral call with the same transcript.
     expect(request).not.toHaveProperty("stop");
     expect(request.maxTokens).toBe(256);

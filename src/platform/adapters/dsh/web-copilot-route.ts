@@ -32,8 +32,8 @@
  * The optional `intent` says WHY the browser asked: an absent field means
  * `"auto"` (the session went idle and the composer was empty), while
  * `"manual"` means the human clicked the suggestion button. It only selects
- * the prompt's `[none]` rule — `auto` stays conservative, `manual` must propose
- * its best candidate — and never changes the response shape.
+ * the prompt's `[none]` rule — `auto` stays conservative, `manual` can consider
+ * grounded follow-ups but may also abstain — and never changes the response shape.
  *
  * Operational notes:
  *   - The request body is capped at 8192 bytes and drained when oversized, so

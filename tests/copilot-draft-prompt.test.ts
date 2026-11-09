@@ -87,19 +87,32 @@ describe("buildDraftPrompt — intent", () => {
     expect(omitted.system).not.toMatch(/always propose/);
   });
 
-  it("makes a manual request always propose a candidate", () => {
+  it("lets a manual request abstain instead of manufacturing a follow-up", () => {
     const manual = prompt("manual");
     expect(manual.system).toContain(
-      "The user explicitly asked for a suggestion: always propose the single most plausible next message.",
+      "The user explicitly asked for a suggestion: look for a useful continuation of the current task, but reply exactly [none] if no grounded candidate exists.",
     );
-    // The finished-task escape hatch is the auto rule; manual must not carry it.
-    expect(manual.system).not.toMatch(/task is finished/);
+    expect(manual.system).toContain("A completed task does not require a follow-up.");
+    expect(manual.system).not.toMatch(/always propose/);
   });
 
-  it("reserves manual [none] for a transcript with no assistant message", () => {
-    expect(prompt("manual").system).toContain(
-      "Reply exactly [none] only when the transcript has no assistant message to respond to.",
-    );
+  it("requires both intents to abstain when the context would require guessing", () => {
+    for (const intent of ["auto", "manual"] as const) {
+      expect(prompt(intent).system).toContain(
+        "For either request intent, reply exactly [none] when context is insufficient, no user/assistant exchange exists, or a useful next message would require guessing.",
+      );
+    }
+  });
+
+  it("grounds both intents in the current goal and latest user constraints", () => {
+    for (const intent of ["auto", "manual"] as const) {
+      const system = prompt(intent).system;
+      expect(system).toContain("the most recent user instructions and topic changes take precedence");
+      expect(system).toContain("Do not introduce unrelated tasks");
+      expect(system).toContain("repeat completed work");
+      expect(system).toContain("without an unresolved need in the current task");
+      expect(system).toContain("do not invent their answer");
+    }
   });
 
   it("varies ONLY the none rule between the two intents", () => {

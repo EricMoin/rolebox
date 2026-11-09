@@ -304,6 +304,17 @@ describe("suggestDraft — reasoning capability", () => {
 // ── Misses ──────────────────────────────────────────────────────────────────
 
 describe("suggestDraft — misses", () => {
+  it("does not call the model without a usable user/assistant exchange", async () => {
+    for (const transcript of ["", "user: fix retry", "assistant: done", "user [tool bash] completed: ok\nassistant: done"]) {
+      const fake = fakeLlm(fixedStream([{ type: "text-delta", text: "invented task" }]));
+      expect(await suggestDraft(baseInput({ transcript, llm: fake.llm }))).toEqual({
+        kind: "none", reason: "insufficient-context",
+      });
+      expect(fake.calls()).toBe(0);
+      expect(fake.capabilityReads()).toBe(0);
+    }
+  });
+
   it("maps an error finish after text deltas to none, not to the partial draft", async () => {
     const fake = fakeLlm(
       fixedStream([{ type: "text-delta", text: "partial" }], {

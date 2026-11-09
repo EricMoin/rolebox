@@ -213,8 +213,8 @@ copilot:
     model: example-model
     timeout_ms: 4000
     max_chars: 120
-    window_size: 8
-    transcript_max_chars: 4000
+    window_size: 40
+    transcript_max_chars: 24000
 ```
 
 The same shape is the `copilot` value in `.rolebox/config.json`:
@@ -238,8 +238,23 @@ The same shape is the `copilot` value in `.rolebox/config.json`:
 | `model` | — | Required with `provider` when enabled; non-empty string. |
 | `timeout_ms` | `4000` | Clamped to 200–10000; one model call, no retry. A ceiling, not added latency: the call answers as soon as the provider responds, and a timeout degrades to a silent `none`. |
 | `max_chars` | `120` | Clamped to 16–500; draft length, word-boundary preferred. |
-| `window_size` | `8` | Clamped to 2–40; most recent transcript messages. |
-| `transcript_max_chars` | `4000` | Clamped to 500–20000; tail cap on transcript text. |
+| `window_size` | `40` | Clamped to 2–200; recent text-bearing user/assistant messages, plus initial user goal and latest exchange when outside the window. Tool-only messages do not count. |
+| `transcript_max_chars` | `24000` | Clamped to 500–128000; total transcript cap, preserving user goal and latest exchange before filling other context. |
+
+The host reads the requested session's available history and selects the window
+locally. It retains the first user message, latest user message and latest
+assistant reply as additional excerpts when outside that window. Ignored and
+synthetic text parts and reasoning are excluded. Within the character cap,
+those anchors receive reserved space, recent user constraints take priority
+over older assistant progress, and long messages retain both opening and
+closing text with a truncation marker and their role label. Whitespace is
+collapsed within each message. Only the last 12 tool-result summaries are
+eligible, using leftover space up to one eighth of the budget and at most 2000
+characters. Content already removed from the host's history cannot be recovered.
+
+Explicit settings still win: an existing `window_size: 8` or
+`transcript_max_chars: 4000` retains that smaller budget. Remove those fields to
+use the new defaults, or increase them explicitly.
 
 Merge rules: every field resolves independently. An invalid value warns once and
 is treated as absent, so a lower-precedence source can still supply it. A role
@@ -274,21 +289,52 @@ available; the old injected/clear state is gone. The tooltip keeps explaining
 the button but is hidden while the card is open, so the two cannot overlap, and
 the card takes no focus (its two actions are ordinary buttons).
 
+Hover or keyboard-focus the Suggest / 建议 control to open its settings panel.
+The Automatic suggestions / 自动建议 switch defaults to on; a visible hint card
+includes the same switch. The pointer can move into the panel without closing
+it. Tab reaches the switch, Space/Enter toggles it, and Escape closes the panel
+or card and restores focus to the suggestion control. A disabled/loading
+button's wrapper is focusable so the settings remain reachable.
+
+Switching off cancels the pending automatic timer and any automatic request,
+drops late automatic responses, and dismisses an automatic card. Manual asks
+and manual cards remain usable. A manual click also cancels the pending
+automatic timer. Switching back on resumes automatic requests for an eligible
+idle that has not already spent its one attempt.
+
+This is a browser-local preference, stored in `localStorage` under
+`rolebox.copilot.autoSuggest`: only the string `false` disables automatic
+requests; absence defaults to on. It applies across sessions on the same DSH
+origin, survives reloads, and synchronizes mounted controls and browser tabs.
+If storage is blocked it still works for the current page. It does not edit
+role/project/global configuration or override `copilot.draft.enabled: false`.
+Refresh the page after installing an updated browser bundle to load this UI;
+toggling the switch itself needs no host restart.
+
 The request body is `{ "session": "<id>", "intent": "auto" | "manual" }`.
 `intent` is optional and defaults to `"auto"` (any other present value is a
 400). It selects only the prompt's miss rule: an automatic request is
 conservative and may answer nothing when the task looks finished, while a
-manual request (the button click) must propose the most plausible next message
-and reserves "nothing" for a transcript with no assistant message. A manual
-request that still yields no draft shows a transient 4-second notice in the
+manual request (the button click) looks for a useful continuation of the current
+task but may answer nothing when no grounded candidate exists. Both intents
+must follow the session's user goal and constraints, with the latest user
+instructions and topic changes taking precedence. They must avoid unrelated
+tasks, repeating completed work and generic testing/review/refactoring without
+an unresolved need. They must not guess facts or preferences only the user
+knows; an assistant's optional offer alone is not a new user request. A
+transcript without a usable user/assistant exchange returns `none` without a
+model call. A manual request that still yields no draft shows a transient
+4-second notice in the
 tooltip area — "No suggestion right now" / 暂时没有合适的建议 — instead of looking
 like a dead button; a manual `disabled` answer shows the disabled title and
 reason the same way. Automatic requests never raise the notice, and typing, a
 new turn, a session switch or unmount clears it.
 
-Privacy: the last `window_size` messages, truncated to
-`transcript_max_chars`, with brief tool summaries, are sent to the configured
-`provider`/`model` — which may differ from the model running the session.
+Privacy: selected excerpts from this session, including initial/latest user
+messages and the latest assistant reply even when outside `window_size`, plus
+recent dialogue and brief tool summaries within `transcript_max_chars`, are
+sent to the configured `provider`/`model` — which may differ from the model
+running the session.
 
 The old top-level `copilot.enabled`, `copilot.rules` and `copilot.llm` turn-end
 decision modes were removed. They are ignored with one warning per key; use

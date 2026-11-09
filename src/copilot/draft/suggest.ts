@@ -8,7 +8,8 @@
  * fake async iterable.
  *
  * Contract:
- *   - exactly ONE `llm.stream(...)` call per suggestion — no retry, ever;
+ *   - at most ONE `llm.stream(...)` call per suggestion — no retry, ever;
+ *     a transcript without a usable user/assistant exchange skips the call;
  *   - only `text-delta` chunks contribute text; the first `finish` chunk ends
  *     the stream, and an `error`/`aborted` finish is a miss;
  *   - the call is bounded by `config.timeout_ms` through its OWN
@@ -142,7 +143,7 @@ export interface DraftLlm {
 export interface SuggestDraftInput {
   /** Parsed draft config (timeout / character budget). */
   config: CopilotDraftConfig;
-  /** Role-labeled transcript tail. */
+  /** Role-labeled session excerpts. */
   transcript: string;
   /** The host llm service. */
   llm: DraftLlm;
@@ -233,6 +234,9 @@ export async function suggestDraft(
   input: SuggestDraftInput,
 ): Promise<SuggestDraftResult> {
   if (input.signal.aborted) return { kind: "none", reason: "aborted" };
+  if (!/^user: \S/m.test(input.transcript) || !/^assistant: \S/m.test(input.transcript)) {
+    return { kind: "none", reason: "insufficient-context" };
+  }
 
   const prompt = buildDraftPrompt({
     transcript: input.transcript,

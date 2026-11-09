@@ -29,7 +29,8 @@ export interface SuggestCopy {
 /**
  * The single copy table: short pill labels, tooltip titles and bodies, the
  * hint-card eyebrow and its two action labels, one body per disabled reason,
- * and the transient notice a MANUAL request raises when it yields no draft.
+ * the automatic-suggestions switch, and the transient notice a MANUAL request
+ * raises when it yields no draft.
  */
 export const SUGGEST_COPY = {
   "label.idle": { en: "Suggest", zh: "建议" },
@@ -74,6 +75,14 @@ export const SUGGEST_COPY = {
   "card.eyebrow": { en: "Suggestion", zh: "建议" },
   "card.fill": { en: "Fill", zh: "填入" },
   "card.dismiss": { en: "Dismiss", zh: "忽略" },
+  "settings.title": { en: "Suggestion settings", zh: "建议设置" },
+  "auto.label": { en: "Automatic suggestions", zh: "自动建议" },
+  "auto.on": { en: "On", zh: "已开启" },
+  "auto.off": { en: "Off", zh: "已关闭" },
+  "auto.description": {
+    en: "You can still click Suggest to request one manually.",
+    zh: "关闭后仍可点击“建议”手动生成。",
+  },
 } as const satisfies Record<string, SuggestCopy>;
 
 /** Every copy key, derived from {@link SUGGEST_COPY}. */

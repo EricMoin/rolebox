@@ -109,6 +109,7 @@ function renderNow(): void {
 
 /** Mount the component (fresh hook slots) and run its mount effects. */
 function mount(component: (props: unknown) => unknown, props: unknown): void {
+  if (renderState !== null) unmount();
   currentComponent = component;
   currentProps = props;
   renderState = { states: [], effects: [], pending: [] };
@@ -194,6 +195,9 @@ vi.doMock("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragmen
 const suggest = await import("../../src/platform/adapters/dsh/web-ui/suggest-dock.tsx");
 const css = await import("../../src/platform/adapters/dsh/web-ui/suggest-dock.css.ts");
 const locales = await import("../../src/platform/adapters/dsh/web-ui/suggest-locales.ts");
+const preferences = await import("../../src/platform/adapters/dsh/web-ui/suggest-preferences.ts");
+const storedPreferences = new Map<string, string>();
+let browserEvents: EventTarget;
 
 // ── Host snapshot + props ──────────────────────────────────────────────────
 
@@ -305,6 +309,10 @@ function button(): VNode {
   return byClass(css.suggestClass.button)[0]!;
 }
 
+function autoToggle(): VNode {
+  return allNodes().find((node) => node.props.role === "switch")!;
+}
+
 /** The mounted root (its `data-has-suggestion` / `data-notice` attributes drive the CSS). */
 function root(): VNode {
   return byClass(css.suggestClass.root)[0]!;
@@ -351,6 +359,14 @@ async function advance(ms: number): Promise<void> {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  storedPreferences.clear();
+  browserEvents = new EventTarget();
+  vi.stubGlobal("window", browserEvents);
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storedPreferences.get(key) ?? null,
+    setItem: (key: string, value: string) => storedPreferences.set(key, value),
+  });
+  preferences.setAutoSuggestEnabled(true);
   host = {
     session: { running: false, blank: false, subagent: null },
     input: { draft: "", phase: "plain" },
@@ -363,10 +379,156 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  unmount();
   vi.clearAllTimers();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   renderState = null;
   tree = null;
+});
+
+describe("SuggestDock — automatic suggestion preference", () => {
+  it("cancels the pending automatic request while leaving the manual button usable", async () => {
+    mountDock();
+    expect(autoToggle().props["aria-label"]).toBe("Automatic suggestions");
+    expect(autoToggle().props["aria-checked"]).toBe(true);
+    click(autoToggle());
+
+    await advance(1_000);
+    expect(calls).toHaveLength(0);
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    expect(storedPreferences.get(preferences.AUTO_SUGGEST_STORAGE_KEY)).toBe("false");
+    expect(button().props.disabled).toBe(false);
+
+    click(button());
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!).intent).toBe("manual");
+    expect(cardNode()).toBeDefined();
+    expect(drafts).toEqual([]);
+  });
+
+  it("persists across session switches and remounts", async () => {
+    mountDock();
+    click(autoToggle());
+    rerender(propsFor("sess-2"));
+    await advance(1_000);
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    expect(calls).toHaveLength(0);
+
+    unmount();
+    mountDock("sess-3");
+    await advance(1_000);
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("aborts an automatic request immediately and drops its late response without clearing a manual successor", async () => {
+    autoRespond = false;
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    click(autoToggle());
+    expect(calls[0]!.signal!.aborted).toBe(true);
+    expect(button().props.disabled).toBe(false);
+
+    click(button());
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(calls[1]!.body!).intent).toBe("manual");
+    responders[0]!(responseForMode());
+    await settle();
+    expect(cardNode()).toBeUndefined();
+    expect(button().props["data-state"]).toBe("loading");
+
+    responders[1]!(responseForMode());
+    await settle();
+    expect(cardNode()).toBeDefined();
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+  });
+
+  it("preserves a manual request and its card when automatic suggestions are switched off", async () => {
+    autoRespond = false;
+    mountDock();
+    click(button());
+    click(autoToggle());
+    expect(calls[0]!.signal!.aborted).toBe(false);
+
+    responders[0]!(responseForMode());
+    await settle();
+    expect(cardNode()).toBeDefined();
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    await advance(1_000);
+    expect(calls).toHaveLength(1);
+
+    click(autoToggle());
+    click(autoToggle());
+    expect(cardNode()).toBeDefined();
+  });
+
+  it("dismisses an automatic card when switched off and resumes on a later turn after re-enabling", async () => {
+    mountDock();
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(cardNode()).toBeDefined();
+    click(autoToggle());
+    expect(cardNode()).toBeUndefined();
+    host.session.running = true;
+    rerender(propsFor());
+    host.session.running = false;
+    rerender(propsFor());
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(calls).toHaveLength(1);
+
+    click(autoToggle());
+    await advance(suggest.SUGGEST_DELAY_MS);
+    expect(calls).toHaveLength(2);
+    expect(cardNode()).toBeDefined();
+    expect(storedPreferences.get(preferences.AUTO_SUGGEST_STORAGE_KEY)).toBe("true");
+  });
+
+  it("reacts to preferences changed by another control or tab", async () => {
+    mountDock();
+    preferences.setAutoSuggestEnabled(false);
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    storedPreferences.set(preferences.AUTO_SUGGEST_STORAGE_KEY, "true");
+    browserEvents.dispatchEvent(Object.assign(new Event("storage"), { key: preferences.AUTO_SUGGEST_STORAGE_KEY }));
+    expect(autoToggle().props["aria-checked"]).toBe(true);
+    storedPreferences.set(preferences.AUTO_SUGGEST_STORAGE_KEY, "false");
+    browserEvents.dispatchEvent(Object.assign(new Event("storage"), { key: preferences.AUTO_SUGGEST_STORAGE_KEY }));
+    await advance(1_000);
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("works for the page when persistent storage is blocked", async () => {
+    vi.stubGlobal("localStorage", {
+      getItem() { throw new Error("blocked"); },
+      setItem() { throw new Error("blocked"); },
+    });
+    mountDock();
+    click(autoToggle());
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    await advance(1_000);
+    expect(calls).toHaveLength(0);
+    unmount();
+    mountDock();
+    expect(autoToggle().props["aria-checked"]).toBe(false);
+    click(button());
+    await settle();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("localizes the switch and lets Escape dismiss the card and hover panel", async () => {
+    mountDock("sess-1", (key) => locales.zh[key] ?? key);
+    expect(autoToggle().props["aria-label"]).toBe("自动建议");
+    expect(textOf(autoToggle())).toContain("已开启");
+    await advance(suggest.SUGGEST_DELAY_MS);
+    const preventDefault = vi.fn();
+    (root().props.onKeyDown as (event: unknown) => void)({ key: "Escape", preventDefault });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(cardNode()).toBeUndefined();
+    expect(root().props["data-popover-dismissed"]).toBe("true");
+    (root().props.onMouseEnter as () => void)();
+    expect(root().props["data-popover-dismissed"]).toBeUndefined();
+  });
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -740,7 +902,7 @@ describe("SuggestDock", () => {
     expect(css.suggestCss).toContain("pointer-events: none");
     expect(css.suggestCss).toContain(".rolebox-suggest:hover .rolebox-suggest-tip");
     expect(css.suggestCss).toContain(".rolebox-suggest:focus-within .rolebox-suggest-tip");
-    // A manual notice forces the (pointer-inert) tooltip visible.
+    // A manual notice forces the explanation/settings panel visible.
     expect(css.suggestCss).toContain(
       ".rolebox-suggest[data-notice] .rolebox-suggest-tip",
     );

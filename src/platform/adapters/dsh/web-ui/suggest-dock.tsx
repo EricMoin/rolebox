@@ -10,7 +10,7 @@
  *
  *   - idle (the session is not running, the draft is empty, the session is not
  *     blank and not a subagent) — one click asks the host for a draft with
- *     `intent: "manual"` (an explicit request, so the host always proposes);
+ *     `intent: "manual"` (the host may abstain when no useful draft exists);
  *   - the automatic path — after a turn ends (`running` true -> false) with a
  *     plain input phase and an empty draft, the component waits
  *     {@link SUGGEST_DELAY_MS} and then asks ONCE with `intent: "auto"` (the
@@ -57,12 +57,15 @@
  *     mounted); a stale answer is dropped;
  *   - no state is written after unmount.
  *
+ * Automatic requests can be disabled from the hover/focus panel or hint card.
+ * That browser-local preference survives reloads and leaves manual asks usable.
+ *
  * The slot contract is consumed structurally: the component receives
  * `sessionId` through the entry's inject factory and the renderer's
  * `SessionStandardProps` (`useSession`, `useInput`, `inputActions`). It imports
  * only `react`, its own CSS module, its own copy table and a TYPE-ONLY intent
  * union — no node builtins, no host packages, no non-relative imports. The only
- * external I/O is the same-origin relative `fetch` above.
+ * external I/O is the same-origin relative `fetch` above and local preferences.
  *
  * @module
  */
@@ -71,6 +74,7 @@ import { useState, useEffect, useRef } from "react";
 import type { DraftIntent } from "../../../../copilot/draft/prompt.ts";
 import { suggestClass } from "./suggest-dock.css.ts";
 import { en as suggestEn, type SuggestKey } from "./suggest-locales.ts";
+import { getAutoSuggestEnabled, setAutoSuggestEnabled, subscribeAutoSuggest } from "./suggest-preferences.ts";
 
 /** `POST /rolebox/copilot/suggest` — same-origin relative path on the dsh web server. */
 export const SUGGEST_ENDPOINT = "/rolebox/copilot/suggest";
@@ -198,6 +202,8 @@ export function SuggestDock({
   const [disabled, setDisabled] = useState(false);
   /** A manual request's transient explanation; `null` when none is showing. */
   const [notice, setNotice] = useState<SuggestNotice | null>(null);
+  const [autoEnabled, setAutoEnabled] = useState(getAutoSuggestEnabled);
+  const [popoverDismissed, setPopoverDismissed] = useState(false);
 
   /** Session ids the host reported `disabled` for (survives a re-render). */
   const disabledRef = useRef<Set<string>>(new Set());
@@ -207,6 +213,11 @@ export function SuggestDock({
   const mountedRef = useRef(true);
   /** The in-flight request's controller (one request at a time). */
   const activeControllerRef = useRef<AbortController | null>(null);
+  const activeIntentRef = useRef<DraftIntent | null>(null);
+  const suggestionIntentRef = useRef<DraftIntent | null>(null);
+  const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   /** True while the request behind `activeControllerRef` is unresolved. */
   const inflightRef = useRef(false);
   /** The pending auto-clear timer of the transient manual notice. */
@@ -219,8 +230,18 @@ export function SuggestDock({
     running,
     blank,
     subagent,
+    autoEnabled,
   });
-  latestRef.current = { sessionId, draft, phase, running, blank, subagent };
+  latestRef.current = { sessionId, draft, phase, running, blank, subagent, autoEnabled };
+
+  function cancelRequest(): void {
+    const controller = activeControllerRef.current;
+    activeControllerRef.current = null;
+    activeIntentRef.current = null;
+    controller?.abort();
+    inflightRef.current = false;
+    if (mountedRef.current) setInflight(false);
+  }
 
   /** Drop the transient notice (and its pending auto-clear timer). */
   function clearNotice(): void {
@@ -234,7 +255,7 @@ export function SuggestDock({
   /**
    * Raise one transient notice for a MANUAL request's non-draft outcome.
    * Never called for an automatic request, and never steals focus: the notice
-   * only forces the (pointer-inert) tooltip visible.
+   * only forces the hover/focus panel visible.
    */
   function showNotice(kind: SuggestNotice): void {
     if (!mountedRef.current) return;
@@ -254,19 +275,35 @@ export function SuggestDock({
     tooltipIdRef.current ?? `rolebox-suggest-tip-${++tooltipSequence}`;
   if (tooltipIdRef.current === null) tooltipIdRef.current = tooltipId;
 
+  useEffect(() => subscribeAutoSuggest((enabled) => {
+    latestRef.current.autoEnabled = enabled;
+    setAutoEnabled(enabled);
+  }), []);
+
+  useEffect(() => {
+    if (autoEnabled) return;
+    if (activeIntentRef.current === "auto") cancelRequest();
+    if (suggestionIntentRef.current === "auto") {
+      suggestionIntentRef.current = null;
+      setSuggestion(null);
+      // Closing the automatic card must not strand keyboard focus on its switch.
+      const card = cardRef.current;
+      if (card !== null && typeof document !== "undefined" && card.contains(document.activeElement)) {
+        buttonRef.current?.focus();
+      }
+    }
+  }, [autoEnabled]);
+
   // Unmount guard: abort whatever is in flight and refuse every later write.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (noticeTimerRef.current !== null) {
         clearTimeout(noticeTimerRef.current);
         noticeTimerRef.current = null;
       }
-      const controller = activeControllerRef.current;
-      if (controller !== null) {
-        activeControllerRef.current = null;
-        controller.abort();
-      }
+      cancelRequest();
     };
   }, []);
 
@@ -275,15 +312,11 @@ export function SuggestDock({
   useEffect(() => {
     autoRequestedRef.current = false;
     setSuggestion(null);
+    suggestionIntentRef.current = null;
+    setPopoverDismissed(false);
     setDisabled(disabledRef.current.has(sessionId));
     clearNotice();
-    const controller = activeControllerRef.current;
-    if (controller !== null) {
-      activeControllerRef.current = null;
-      controller.abort();
-    }
-    inflightRef.current = false;
-    setInflight(false);
+    cancelRequest();
   }, [sessionId]);
 
   // The hint card belongs to an idle, empty composer. Typing (a non-empty
@@ -303,16 +336,16 @@ export function SuggestDock({
     clearNotice();
   }, [sessionId, running, draft, phase, blank, subagent]);
 
-  // The idle watcher. It owns BOTH the one-per-idle automatic request and the
-  // cancellation of whatever request an earlier render started:
-  //   - `running` true starts a new turn, so the next idle may ask again;
-  //   - any dependency change (draft typed, phase left plain, running resumed,
-  //     session changed, feature disabled) aborts the in-flight request — the
-  //     timer is cleared and the controller is aborted here, not later.
+  // Session/input invalidation cancels either intent. Keep it separate from
+  // the auto preference so toggling that preference cannot cancel a manual ask.
+  useEffect(() => () => cancelRequest(), [sessionId, running, phase, draft, blank, subagent, disabled]);
+
+  // Spend at most one automatic request per idle, even if its schedule is cancelled.
   useEffect(() => {
     if (running) autoRequestedRef.current = false;
 
     const canAutoRequest =
+      autoEnabled &&
       !running &&
       !blank &&
       subagent === null &&
@@ -329,19 +362,19 @@ export function SuggestDock({
       autoRequestedRef.current = true;
       timer = setTimeout(() => {
         timer = undefined;
+        autoTimerRef.current = null;
         startRequest("auto");
       }, SUGGEST_DELAY_MS);
+      autoTimerRef.current = timer;
     }
 
     return () => {
-      if (timer !== undefined) clearTimeout(timer);
-      const controller = activeControllerRef.current;
-      if (controller !== null) {
-        activeControllerRef.current = null;
-        controller.abort();
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        if (autoTimerRef.current === timer) autoTimerRef.current = null;
       }
     };
-  }, [sessionId, running, phase, draft, blank, subagent, disabled]);
+  }, [sessionId, running, phase, draft, blank, subagent, disabled, autoEnabled]);
 
   /**
    * Begin one request. The latest render values are checked again first: the
@@ -355,15 +388,26 @@ export function SuggestDock({
     if (latest.running || latest.blank || latest.subagent !== null) return;
     if (latest.phase !== "plain" || latest.draft !== "") return;
     if (disabledRef.current.has(latest.sessionId)) return;
+    if (intent === "auto" && !latest.autoEnabled) return;
+    if (inflightRef.current) return;
+    if (intent === "manual") {
+      autoRequestedRef.current = true;
+      if (autoTimerRef.current !== null) {
+        clearTimeout(autoTimerRef.current);
+        autoTimerRef.current = null;
+      }
+    }
 
     // A new request replaces whatever the previous manual outcome explained
     // and any card still on screen.
     clearNotice();
     setSuggestion(null);
+    suggestionIntentRef.current = null;
     const previous = activeControllerRef.current;
     if (previous !== null) previous.abort();
     const controller = new AbortController();
     activeControllerRef.current = controller;
+    activeIntentRef.current = intent;
     inflightRef.current = true;
     setInflight(true);
     void runRequest(controller, latest.sessionId, intent);
@@ -384,6 +428,7 @@ export function SuggestDock({
     const isCurrent = (): boolean =>
       mountedRef.current &&
       !controller.signal.aborted &&
+      (intent !== "auto" || latestRef.current.autoEnabled) &&
       latestRef.current.sessionId === requestSessionId;
 
     try {
@@ -436,17 +481,17 @@ export function SuggestDock({
 
       // Hold the answer for the hint card. The composer is untouched until
       // the user chooses Fill.
+      suggestionIntentRef.current = intent;
       setSuggestion(text);
     } catch {
       // Aborted, offline or a malformed transport: a miss. The next idle (or
       // the button) may ask again.
     } finally {
       const active = activeControllerRef.current;
-      // Reset the loading state only when this request is still the current
-      // one, or when a cleanup already detached it. A request that a newer one
-      // replaced must not clear its successor's loading state.
-      if (active === controller || active === null) {
-        if (active === controller) activeControllerRef.current = null;
+      // An obsolete response must not clear its successor's loading state.
+      if (active === controller) {
+        activeControllerRef.current = null;
+        activeIntentRef.current = null;
         inflightRef.current = false;
         if (mountedRef.current) setInflight(false);
       }
@@ -541,6 +586,26 @@ export function SuggestDock({
     if (state === "idle") startRequest("manual");
   };
 
+  const autoControls = (
+    <div className={suggestClass.autoSettings}>
+      <button
+        type="button"
+        className={suggestClass.autoToggle}
+        role="switch"
+        aria-label={copy("auto.label")}
+        aria-checked={autoEnabled}
+        onClick={() => setAutoSuggestEnabled(!latestRef.current.autoEnabled)}
+      >
+        <span>{copy("auto.label")}</span>
+        <span className={suggestClass.autoState} aria-hidden="true">
+          {copy(autoEnabled ? "auto.on" : "auto.off")}
+          <span className={suggestClass.autoTrack} />
+        </span>
+      </button>
+      <span className={suggestClass.autoDescription}>{copy("auto.description")}</span>
+    </div>
+  );
+
   return (
     <div
       className={suggestClass.root}
@@ -548,9 +613,25 @@ export function SuggestDock({
       data-state={state}
       data-notice={notice ?? undefined}
       data-has-suggestion={cardVisible ? "true" : undefined}
+      data-popover-dismissed={popoverDismissed ? "true" : undefined}
+      role="group"
+      aria-label={copy("settings.title")}
+      tabIndex={state === "idle" ? undefined : 0}
+      onMouseEnter={() => setPopoverDismissed(false)}
+      onFocus={() => setPopoverDismissed(false)}
+      onKeyDown={(event: { key: string; preventDefault(): void; currentTarget: HTMLElement }) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        setSuggestion(null);
+        clearNotice();
+        if (state === "idle") buttonRef.current?.focus();
+        else event.currentTarget.focus();
+        setPopoverDismissed(true);
+      }}
     >
       <button
         type="button"
+        ref={buttonRef}
         className={suggestClass.button}
         data-state={state}
         aria-label={title}
@@ -568,6 +649,7 @@ export function SuggestDock({
       {cardVisible && suggestion !== null ? (
         <div
           className={suggestClass.card}
+          ref={cardRef}
           role="group"
           aria-label={eyebrow}
           aria-live="polite"
@@ -592,16 +674,20 @@ export function SuggestDock({
               {copy("card.dismiss")}
             </button>
           </div>
+          {autoControls}
         </div>
       ) : null}
       <div
         className={suggestClass.tip}
-        role="tooltip"
-        id={tooltipId}
+        role="group"
+        aria-label={copy("settings.title")}
         data-hidden={cardVisible ? "true" : undefined}
       >
-        <span className={suggestClass.tipTitle}>{tipTitle}</span>
-        <span className={suggestClass.tipBody}>{tipBody}</span>
+        <div role="tooltip" id={tooltipId} data-hidden={cardVisible ? "true" : undefined}>
+          <span className={suggestClass.tipTitle}>{tipTitle}</span>
+          <span className={suggestClass.tipBody}>{tipBody}</span>
+        </div>
+        {!cardVisible ? autoControls : null}
       </div>
     </div>
   );

@@ -19,9 +19,9 @@ export interface CopilotDraftConfig {
   timeout_ms: number;
   /** Max characters in the suggested draft (default 120). */
   max_chars: number;
-  /** Number of recent transcript messages fed to the draft request (default 8). */
+  /** Recent text-bearing user/assistant messages (default 40), plus user anchors. */
   window_size: number;
-  /** Max characters of transcript text fed to the draft request (default 4000). */
+  /** Max characters of transcript text fed to the draft request (default 24000). */
   transcript_max_chars: number;
 }
 
@@ -50,7 +50,7 @@ export interface CopilotDraftFragment {
   timeout_ms?: number;
   /** Max characters in the suggested draft. */
   max_chars?: number;
-  /** Number of recent transcript messages fed to the draft request. */
+  /** Recent text-bearing user/assistant messages, plus user anchors. */
   window_size?: number;
   /** Max characters of transcript text fed to the draft request. */
   transcript_max_chars?: number;

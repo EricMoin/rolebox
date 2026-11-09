@@ -25,8 +25,8 @@
  * An optional `intent` separates the browser's automatic idle request
  * (`"auto"`, the default) from a human clicking the button (`"manual"`). It is
  * forwarded to {@link suggestDraft} and only selects the prompt's `[none]`
- * rule: `auto` may answer nothing when the task is finished, `manual` must
- * propose its most plausible candidate. The model call, its bounds and its
+ * rule: `auto` may answer nothing when the task is finished, `manual` looks
+ * for a grounded continuation and may also abstain. The model call, its bounds and its
  * single-attempt contract are identical for both.
  *
  * @module

@@ -51,8 +51,8 @@ export const DEFAULT_COPILOT_DRAFT_CONFIG: Readonly<CopilotDraftConfig> =
     enabled: false,
     timeout_ms: 4000,
     max_chars: 120,
-    window_size: 8,
-    transcript_max_chars: 4000,
+    window_size: 40,
+    transcript_max_chars: 24_000,
   });
 
 /**
@@ -195,14 +195,14 @@ function parseCopilotDraftBlock(
   const maxChars = parseOptionalBoundedNumber(raw.max_chars, "max_chars", 16, 500);
   if (maxChars !== undefined) fragment.max_chars = maxChars;
 
-  const windowSize = parseOptionalBoundedNumber(raw.window_size, "window_size", 2, 40);
+  const windowSize = parseOptionalBoundedNumber(raw.window_size, "window_size", 2, 200);
   if (windowSize !== undefined) fragment.window_size = windowSize;
 
   const transcriptMaxChars = parseOptionalBoundedNumber(
     raw.transcript_max_chars,
     "transcript_max_chars",
     500,
-    20_000,
+    128_000,
   );
   if (transcriptMaxChars !== undefined) {
     fragment.transcript_max_chars = transcriptMaxChars;
