@@ -41,6 +41,7 @@ const COMPUTER_TOOL_NAMES = [
   "computer_key",
   "computer_move",
   "computer_permissions",
+  "computer_record",
   "computer_screenshot",
   "computer_scroll",
   "computer_status",

@@ -35,6 +35,8 @@ import { DEFAULT_COMPUTER_TIMEOUT_MS, helperAvailable, runComputerPlan, spawnVec
 import { computerOperationQueue } from "./queue.ts";
 import { COMPUTER_DISPLAY_SCHEMA, computerScreenshots, parseCaptureGeometry } from "./geometry.ts";
 import { permissionRecovery, PERMISSION_REQUEST_GUIDANCE, PERMISSION_USER_GUIDANCE } from "./permissions.ts";
+import { OperationRecorder } from "../recording/recorder.ts";
+import { createRecordingTool, withRecording } from "../recording/tools.ts";
 
 /** The action names every result reports in `metadata.action`. */
 type ActionName = ComputerInputRequest["action"] | "screenshot" | "permissions" | "status";
@@ -250,7 +252,7 @@ function withCapturePermission(result: ToolResult, permission: CapturePermission
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /** `computer_screenshot` — capture the screen, one window or one region. */
-export function createComputerScreenshotTool() {
+export function createComputerScreenshotTool(options: { remember?: boolean } = {}) {
   return defineComputerTool("screenshot", {
     description:
       "Capture the screen, one window or one region as a PNG and return it as an image attachment. " +
@@ -338,6 +340,7 @@ export function createComputerScreenshotTool() {
         };
         const result = captureResult(target, platform, prepared.plan.driver, captureTarget, geometry);
         if (typeof result === "string" || result.attachments === undefined) return result;
+        if (options.remember === false) return result;
         const screenshotId = computerScreenshots.remember({
           sessionID: context.sessionID, worktree: context.worktree, platform,
           target: captureTarget, geometry, width: result.metadata!.width as number, height: result.metadata!.height as number,
@@ -848,19 +851,47 @@ export function createComputerPermissionsTool() {
  *
  * `buildCanonicalTools` merges this record when the resolved gate permits it.
  */
-export function createComputerTools(): Record<string, CanonicalToolDef> {
+const recordings = new OperationRecorder("computer");
+
+export function createComputerTools(options: { recorder?: OperationRecorder } = {}): Record<string, CanonicalToolDef> {
+  const recorder = options.recorder ?? recordings;
+  const sampler = createComputerScreenshotTool({ remember: false });
   return {
-    computer_screenshot: createComputerScreenshotTool(),
-    computer_windows: createComputerWindowsTool(),
-    computer_click: createComputerClickTool(),
-    computer_move: createComputerMoveTool(),
-    computer_type: createComputerTypeTool(),
-    computer_key: createComputerKeyTool(),
-    computer_permissions: createComputerPermissionsTool(),
-    computer_displays: createComputerDisplaysTool(),
-    computer_focus: createComputerFocusTool(),
-    computer_scroll: createComputerScrollTool(),
-    computer_drag: createComputerDragTool(),
-    computer_status: createComputerStatusTool(),
+    ...withRecording(recorder, {
+      computer_screenshot: createComputerScreenshotTool(),
+      computer_windows: createComputerWindowsTool(),
+      computer_click: createComputerClickTool(),
+      computer_move: createComputerMoveTool(),
+      computer_type: createComputerTypeTool(),
+      computer_key: createComputerKeyTool(),
+      computer_permissions: createComputerPermissionsTool(),
+      computer_displays: createComputerDisplaysTool(),
+      computer_focus: createComputerFocusTool(),
+      computer_scroll: createComputerScrollTool(),
+      computer_drag: createComputerDragTool(),
+      computer_status: createComputerStatusTool(),
+    }),
+    computer_record: createRecordingTool({
+      recorder,
+      targetArgs: {
+        window_id: z.number().int().positive().optional().describe("Window to record; use computer_windows to find its ID"),
+        display: z.number().int().min(0).optional().describe("Display to record; use computer_displays to find its ID"),
+        region: z.object({ x: z.number().finite(), y: z.number().finite(), w: z.number().positive().finite(), h: z.number().positive().finite() }).optional(),
+      },
+      targetDescription: "Select at most one of window_id, region or display; omitted records the default display. Capturing uses existing OS screenshot permissions and helpers.",
+      metadata: () => ({ platform: getSystem().id, driver: "ffmpeg", action: "record" }),
+      async capture(args, context) {
+        if ([args.window_id, args.region, args.display].filter(value => value !== undefined).length > 1) {
+          throw new Error("Select only one recording target: window_id, region or display.");
+        }
+        return async (path, signal) => {
+          const result = await sampler.execute({ window_id: args.window_id, region: args.region, display: args.display, path, timeout_ms: 10_000 }, { ...context, abort: signal });
+          if (typeof result === "string" || result.attachments === undefined) {
+            throw new Error(typeof result === "string" ? result : result.output);
+          }
+          return { width: result.metadata!.width as number, height: result.metadata!.height as number };
+        };
+      },
+    }),
   };
 }

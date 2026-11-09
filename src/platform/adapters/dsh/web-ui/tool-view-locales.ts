@@ -123,6 +123,7 @@ export const NOUN_COPY = {
   script: { en: "script", zh: "脚本" },
   "page snapshot": { en: "page snapshot", zh: "页面快照" },
   screen: { en: "screen", zh: "屏幕" },
+  recording: { en: "recording", zh: "录制" },
   terminal: { en: "terminal", zh: "终端" },
   command: { en: "command", zh: "命令" },
   asset: { en: "asset", zh: "资产" },

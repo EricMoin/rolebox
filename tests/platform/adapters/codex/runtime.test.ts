@@ -102,9 +102,9 @@ describe("Codex MCP runtime integration", () => {
   it("adds both optional tool families without replacing the runtime tools", async () => {
     const harness = await boot({ computerUse: true, browseUse: true });
     const listed = (await harness.request("tools/list")).tools!;
-    expect(listed).toHaveLength(65);
-    expect(listed.filter(tool => tool.name.startsWith("computer_"))).toHaveLength(12);
-    expect(listed.filter(tool => tool.name.startsWith("browse_"))).toHaveLength(23);
+    expect(listed).toHaveLength(67);
+    expect(listed.filter(tool => tool.name.startsWith("computer_"))).toHaveLength(13);
+    expect(listed.filter(tool => tool.name.startsWith("browse_"))).toHaveLength(24);
   });
 
   it.each([false, true])("writes native roles into the effective global/project Codex layer (project=%s)", async project => {

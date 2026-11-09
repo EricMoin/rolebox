@@ -26,6 +26,7 @@ export const BROWSE_TOOL_NAMES = [
   "browse_wait",
   "browse_eval",
   "browse_screenshot",
+  "browse_record",
   "browse_upload",
   "browse_downloads",
   "browse_dialog",

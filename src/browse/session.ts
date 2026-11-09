@@ -566,6 +566,27 @@ export class BrowseSessionManager {
     return this.factory.status();
   }
 
+  /** Sampling must never reopen a page or launch a browser after its target closes. */
+  async recordingFrame(sessionKey: string, pageName: string, signal: AbortSignal): Promise<ScreenshotResult> {
+    this.assertNotDisposed();
+    this.assertNotCancelled(signal);
+    const record = this.sessions.get(sessionKey.trim());
+    if (record === undefined) throw browseError("no_such_page", "the recording session is closed", "Open the page with browse_open before recording.");
+    const operation = this.enqueue(record, async () => {
+      this.assertOpen(record);
+      const page = record.pages.get(pageName);
+      if (page === undefined || page.driver.isClosed()) {
+        throw browseError("no_such_page", "the recording page is closed", "Open the page with browse_open before recording.");
+      }
+      return new BrowseSessionPage(record, page, signal).screenshot({ format: "png", timeoutMs: 10_000 });
+    }, signal);
+    const cancelled = Promise.withResolvers<never>();
+    const onAbort = () => cancelled.reject(browseError("cancelled", "recording capture was cancelled", "Start another recording if needed."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    try { return await Promise.race([operation, cancelled.promise]); }
+    finally { signal.removeEventListener("abort", onAbort); }
+  }
+
   /** How many live sessions this manager holds (a test seam). */
   get sessionCount(): number {
     return this.sessions.size;

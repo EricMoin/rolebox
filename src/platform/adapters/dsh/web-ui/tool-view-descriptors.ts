@@ -312,6 +312,7 @@ export const TOOL_DESCRIPTORS: Readonly<Record<string, ToolDescriptor>> = {
 
   // ── Computer use ────────────────────────────────────────────────────────
   computer_status: { icon: "computer", verb: "read", noun: "computer status" },
+  computer_record: { icon: "computer", verb: "manage", noun: "recording", summarize: args => text(args, "action") },
   computer_permissions: {
     icon: "computer", verb: "check", noun: "permissions",
     summarize: args => (args.request === true ? "request" : undefined),
@@ -366,6 +367,7 @@ export const TOOL_DESCRIPTORS: Readonly<Record<string, ToolDescriptor>> = {
     summarize: args => text(args, "page"),
   },
   browse_status: { icon: "browse", verb: "read", noun: "browser" },
+  browse_record: { icon: "browse", verb: "manage", noun: "recording", summarize: args => text(args, "action") },
   browse_snapshot: {
     icon: "browse", verb: "capture", noun: "page snapshot",
     summarize: args => text(args, "selector"),

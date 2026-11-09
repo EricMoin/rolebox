@@ -48,7 +48,7 @@ describe("dsh browse_* native presentation", () => {
     // Drift guard: the real tool record (src/browse/tools.ts) supplies the
     // names; every one of them must have a declared presentation decision.
     expect(Object.keys(createBrowseTools()).sort()).toEqual([...BROWSE_TOOL_NAMES].sort());
-    expect(BROWSE_TOOL_NAMES).toHaveLength(23);
+    expect(BROWSE_TOOL_NAMES).toHaveLength(24);
     for (const name of BROWSE_TOOL_NAMES) {
       expect(DSH_TOOL_PRESENTATION[name], name).toBeDefined();
     }

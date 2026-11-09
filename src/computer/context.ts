@@ -32,6 +32,7 @@ export function buildComputerContext(options: ComputerContextOptions): string {
   if (tools.has("computer_windows")) instructions.push("Use computer_windows to identify the target application's current window IDs.");
   if (tools.has("computer_displays")) instructions.push("Use computer_displays to identify the display and its screen bounds when working across displays.");
   if (tools.has("computer_focus")) instructions.push("Use computer_focus with an observed window ID to bring that window forward for observation; a focus failure must be resolved before proceeding.");
+  if (tools.has("computer_record")) instructions.push("When a video of your desktop operations is requested, use computer_record action=start with the intended window_id, region or display, then action=stop to finalize its MP4, step timeline and HTML replay. It uses sampled screenshots and requires ffmpeg plus screen-capture permission. Use action=status to check automatic stops; visible content remains in the video even though input text is omitted from the timeline.");
 
   const inputs = INPUT_TOOLS.filter(name => tools.has(name));
   if (tools.has("computer_screenshot")) {

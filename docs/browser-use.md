@@ -1,6 +1,6 @@
 # Browser use
 
-Rolebox's `browse_*` family provides 23 tools for semantic browser automation:
+Rolebox's `browse_*` family provides 24 tools for semantic browser automation:
 a local Playwright browser whose pages are read as an ARIA-shaped tree and
 operated through element refs instead of screen coordinates. It is the DOM-level
 alternative to the coordinate-driven `computer_*` family when the target is a
@@ -63,7 +63,7 @@ failure — the gate decided before the tool surface was built.
 
 | Host | Behavior |
 | --- | --- |
-| DSH | Registers the 23 tools when the gate is on and the host exposes its tool-guard seam, the surface that refuses a call for a role that never granted it. Without the seam, registration is refused rather than exposed unprotected. The gate is applied before `enabledNamespaces`, so a namespace list matching `browse_*` cannot turn the family on. One session manager per plugin boot is closed when the plugin disposes, and the browser workflow block is injected as the `rolebox:browse` prompt context for the tools a role or worker actually has. |
+| DSH | Registers the 24 tools when the gate is on and the host exposes its tool-guard seam, the surface that refuses a call for a role that never granted it. Without the seam, registration is refused rather than exposed unprotected. The gate is applied before `enabledNamespaces`, so a namespace list matching `browse_*` cannot turn the family on. One session manager per plugin boot is closed when the plugin disposes, and the browser workflow block is injected as the `rolebox:browse` prompt context for the tools a role or worker actually has. |
 | Pi | Adds the family to its extra tools only when the gate is on, and a browse interceptor seam refuses a per-role call and returns the correction, so a role's `tools:` map is enforced per call. The workflow block is appended to the system transform and to a worker's prompt. |
 | Codex | Takes the `browseUse` host option, resolves the same gate, builds the same family, and appends the workflow block to the MCP initialization instructions. |
 | OpenCode (v1 and v2) | Registers neither family. With the gate on, role configuration materializes an explicit `false` for every `browse_*` tool the role's `tools:` map does not grant, so the policy is recorded even though no tool is added. |
@@ -156,6 +156,7 @@ on the code. Every result also carries `driver`, `action`, `session`, `page`,
 | `browse_wait` | exactly one of `text?`, `selector?`, `url?`, plus `state?`, `page?`, `timeout_ms?` | Wait until text, a visible element or a URL fragment appears |
 | `browse_eval` | `expression`, `page?`, `max_chars?`, `timeout_ms?` | Evaluate a JavaScript expression in the page and return its value |
 | `browse_screenshot` | `page?`, `selector?`, `full_page?`, `path?`, `format?`, `quality?`, `timeout_ms?` | Capture a PNG or JPEG, save it under `.rolebox/browse` and return it as an image attachment |
+| `browse_record` | `action`, `page?`, `fps?`, `max_duration_ms?` | Start, inspect or stop an MP4 recording with a step timeline and local HTML replay |
 | `browse_upload` | `target`, `paths`, `page?` | Attach existing files to an `<input type=file>` element |
 | `browse_downloads` | `page?`, `clear?` | List the downloads saved under `.rolebox/browse/downloads` since the last read |
 | `browse_dialog` | `action`, `prompt_text?`, `page?` | Accept or dismiss the dialog currently blocking the page |
@@ -165,6 +166,44 @@ on the code. Every result also carries `driver`, `action`, `session`, `page`,
 | `browse_network` | `page?`, `filter?`, `method?`, `status?`, `failed_only?`, `limit?`, `clear?` | Read request, response and failure records since the last read |
 | `browse_cookies` | `action`, `name?`, `value?`, `url?`/`domain?`+`path?`, `secure?`, `http_only?`, `same_site?`, `expires?`, `page?` | Read, write or clear cookies in the session's browser context |
 | `browse_close` | `page?`, `all?` | Close one page, or the whole browser session |
+
+### Recording operations
+
+After opening the target page, call `browse_record` with
+`{"action":"start","page":"main","fps":2,"max_duration_ms":120000}`.
+Continue using the browser tools, then call `{"action":"stop"}` to encode the
+video. `{"action":"status"}` reports progress without launching a browser or
+capturing a frame. Recording stays on the page selected at start, including
+across navigations; switching the active tab does not change that target. Its
+timeline includes this session's calls to the browser tool family.
+
+The tool requires `ffmpeg` with `libx264` on the host's `PATH`. It samples PNG
+screenshots at a requested 1–5 fps (default 2); capture time and the browser queue
+reduce the actual rate. Samples retain their wall-clock timing, and stop attempts
+a final frame so short operations appear in the video. There is no audio, and
+animations between samples may be missed. Video fits within 1920×1080 with
+constant dimensions if the target resizes.
+
+The result names `recording.mp4`, `timeline.jsonl`, `manifest.json` and
+`replay.html` under `.rolebox/browse/recordings/<generated-id>/`. Open the replay
+locally to watch the video and select a step to seek to its time. Steps contain
+the tool name, relative start/end times, success status and a small set of safe
+arguments (coordinates, element refs, input length); raw text, selectors, URLs,
+cookies, script source and tool output are omitted. Video retains everything
+visible in the recorded page. Review artifacts before sharing them.
+
+One recording per host session and worktree may run at a time, with at most four
+active browser recordings per process. Recording continues across turns. It
+automatically stops on capture failure (including a closed page), after the
+requested duration (default 120 seconds, maximum 600), at 256 MiB of raw frames,
+or after 5,000 steps. `status` reports the stop reason; `stop` is idempotent.
+Frames are sampled through the existing session queue and cannot reopen a closed
+page. They do not refresh the session's idle expiry. Stop before closing the
+browser to finish promptly. Encoding has a 60-second limit; cancellation or an
+encoding failure retains captured frames for recovery. A host restart loses live
+recording state. Files are local, with owner-only permissions on POSIX systems.
+These arguments need no new configuration; the existing browser gate and role
+tool rules apply. Restart the host after updating rolebox.
 
 Defaults: `browse_open` uses Chromium, headless, `domcontentloaded` and a
 1440x900 viewport. `browse_click` clicks the left button once unless `button`,
@@ -376,7 +415,7 @@ The full-surface live suite is gated the same way:
 ROLEBOX_BROWSE_LIVE=1 npm test -- tests/browse/live-e2e.test.ts
 ```
 
-It starts a fixture site on an ephemeral loopback port and drives all 23 tools
+It starts a fixture site on an ephemeral loopback port and drives the browser tools
 through the real Playwright driver and a headless browser — snapshot refs, click,
 drag, type, press, select, hover, scroll, read, screenshot, console, network, tabs,
 history, cookies, a dialog, a download and an upload — and disposes each session
@@ -398,7 +437,7 @@ npm run test:browse:e2e
 ```
 
 The runner builds once, runs module and host regression checks, then executes
-each live suite in its own process, including the 23-tool acceptance suite on
+each live suite in its own process, including the browser acceptance suite on
 all three engines. It also checks production and test types. Keeping native
 browser transports separate from module mocks avoids interference between
 these suites; a failed suite remains a nonzero result and does not stop the

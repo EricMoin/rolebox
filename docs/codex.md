@@ -325,8 +325,8 @@ registers 65; role and host policies can further restrict execution.
 | Runtime | `signal`, `interactive_terminal` |
 | Sessions | `session_list`, `session_read`, `session_search`, `session_info`, `session_diff`, `session_fork` |
 | Graphs | `graph_declare`, `graph_submit_outcome`, `graph_wait`, `graph_status`, `graph_audit`, `graph_control` |
-| Desktop, enabled by default | 12 `computer_*` tools, subject to the global gate and OS permissions |
-| Browser, enabled by its gate | 23 `browse_*` tools, with optional Playwright support |
+| Desktop, enabled by default | 13 `computer_*` tools, subject to the global gate and OS permissions |
+| Browser, enabled by its gate | 24 `browse_*` tools, with optional Playwright support |
 
 ## Sessions and graph execution
 

@@ -27,6 +27,7 @@ import type { DriverStatus } from "../../../src/browse/types.ts";
 import type { SnapshotRef } from "../../../src/browse/types.ts";
 import { createBrowseTools } from "../../../src/browse/tools.ts";
 import { FakeDriverFactory, FakePageDriver } from "../fixtures/fake-driver.ts";
+import type { OperationRecorder } from "../../../src/recording/recorder.ts";
 
 /** The structured branch of a tool result. */
 export interface StructuredToolResult {
@@ -82,6 +83,7 @@ export class HarnessDriverFactory extends FakeDriverFactory {
 
 /** The options a harness accepts. */
 export interface BrowseHarnessOptions {
+  recorder?: OperationRecorder;
   available?: boolean;
   reason?: string;
   version?: string;
@@ -129,7 +131,7 @@ export function createBrowseHarness(options: BrowseHarnessOptions = {}): BrowseH
     },
   });
   const manager = new BrowseSessionManager({ worktree, driverFactory: factory, idleTtlMs: 0 });
-  const tools = createBrowseTools({ manager });
+  const tools = createBrowseTools({ manager, recorder: options.recorder });
 
   const harness: BrowseHarness = {
     worktree,

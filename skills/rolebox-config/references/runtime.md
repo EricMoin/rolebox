@@ -103,6 +103,59 @@ open; timeout/cancellation closes it, so reopen with `browse_open`. Raising
 for driver availability or persistent protocol failures. This behavior applies
 to every harness exposing `browse_eval`; restart the host after updating rolebox.
 
+### Operation videos and timelines
+
+Use `browse_record` and `computer_record` with `action: start`, `status` or `stop`
+to record AI tool use as an MP4 plus a synchronized JSONL timeline and local HTML
+replay. These tools inherit their family's global/project/host gate, role tool
+rules and worker grants; there is no separate recording config or `role.yaml`
+field. DSH, Pi and Codex expose them when the corresponding family is registered;
+the OpenCode entries do not register either family. Restart the host after
+updating rolebox to load the schemas.
+
+Open a browser page first, then call `browse_record` with
+`{"action":"start","page":"main","fps":2,"max_duration_ms":120000}`.
+The page defaults to the active page at start and stays fixed across tab switches
+and navigation. Closed pages stop sampling rather than reopening. For desktop
+recording, call `computer_record` with `{"action":"start","window_id":42}`;
+select at most one of `window_id`, `region` or `display`, or omit them to capture
+the default display. Capturing does not focus a window and keeps the same
+platform/occlusion limitations as screenshots. Recording samples do not consume
+desktop screenshot IDs. Browser recording samples do not reset idle expiry.
+
+Both tools require `ffmpeg` with `libx264` on the host's `PATH`. Desktop recording
+also needs the normal screen-capture helpers and OS authorization; start never
+opens an OS permission prompt. Browser recording uses the existing Playwright
+driver, including its supported browser engines and CDP sessions. `status` does
+not launch or capture. `fps` requests 1–5 sampled screenshots per second, default
+2; capture time and the existing operation queues can reduce the rate. There is
+no audio, and brief changes between samples may be missed. Encoding preserves
+wall-clock intervals and uses a fixed canvas within 1920×1080; stop attempts a
+final frame before encoding.
+
+Continue normal tool calls after start, then call `{"action":"stop"}`. The
+result contains `video_path`, `timeline_path`, `replay_path` and `directory` under
+`.rolebox/<browse|computer>/recordings/<generated-id>/`; `manifest.json` is saved
+there too. Open `replay.html` locally to play the video and select a step to seek.
+Timeline steps cover calls to the corresponding tool family in that host session
+and worktree. They include relative start/end milliseconds (including queue
+time), success or an incomplete marker, and safe arguments such as coordinates,
+element refs and input lengths. Typed text, raw key contents, arbitrary selectors,
+URLs, cookies, evaluated code and raw results are omitted. Video retains visible
+content; inspect artifacts before sharing. POSIX directories/files are created
+with owner-only permissions.
+
+One recording per family/session/worktree runs at once, with at most four active
+recordings per family in a process. Recording persists across turns and stops on
+`stop`, capture failure, 256 MiB of raw frames, 5,000 tool steps or
+`max_duration_ms` (default 120000; range 1000–600000). Check `status` for automatic
+stop reasons. `stop` is idempotent and waits for MP4 encoding, with a 60-second
+encoding limit. Failure/cancellation keeps raw frames for recovery. Stop before
+closing a target or ending the host. A host restart does not resume live state.
+Each family retains 32 recent session records in memory; older completed records
+may be forgotten by `status`, while their files remain on disk.
+Use the actual `browse_record` name; the browser family is `browse_*`.
+
 ## Hooks and recovery
 
 Codex's app-server adapter observes events only for managed worker threads. It does

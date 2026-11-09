@@ -135,8 +135,8 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | lsp_* (32 tools) | ✓ | ✓ | — (not exposed) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not exposed) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
-| [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (default on) | ✓ (default on) |
-| [browse_* (23 tools)](browser-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (when the browseUse gate is on) | ✓ (when the browseUse gate is on) |
+| [computer_* (13 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (default on) | ✓ (default on) |
+| [browse_* (24 tools)](browser-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (when the browseUse gate is on) | ✓ (when the browseUse gate is on) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not exposed) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
@@ -153,7 +153,7 @@ for the other hosts' presentation support.
 Rolebox's computer-use family — `computer_screenshot`, `computer_windows`,
 `computer_click`, `computer_move`, `computer_type`, `computer_key`,
 `computer_permissions`, `computer_scroll`, `computer_drag`, `computer_focus`,
-`computer_displays` and `computer_status` — is assembled by the shared `buildCanonicalTools`, which
+`computer_displays`, `computer_status` and `computer_record` — is assembled by the shared `buildCanonicalTools`, which
 merges it only when the host asked for it (`src/platform/tool-assembly.ts:146-151`).
 DSH, Pi and Codex enable it by default. No role YAML opt-in is needed; optional
 role `tools` rules can restrict it. An explicit `computerUse: false` in a host
@@ -174,7 +174,7 @@ explicitly documented for Pi and Codex — see [limitations.md](limitations.md).
 Rolebox's browser family — `browse_status`, `browse_open`, `browse_snapshot`,
 `browse_read`, `browse_click`, `browse_type`, `browse_press`, `browse_select`,
 `browse_drag`, `browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`,
-`browse_screenshot`, `browse_upload`, `browse_downloads`, `browse_dialog`,
+`browse_screenshot`, `browse_record`, `browse_upload`, `browse_downloads`, `browse_dialog`,
 `browse_tabs`, `browse_history`, `browse_console`, `browse_network`,
 `browse_cookies` and `browse_close` — is the DOM-level counterpart to computer
 use: it reads a page as an ARIA-shaped tree and acts on element refs. It is

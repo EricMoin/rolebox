@@ -1099,6 +1099,7 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   computer_focus: {},
   computer_displays: { isConcurrencySafe: () => true },
   computer_status: { isConcurrencySafe: () => true },
+  computer_record: {},
   // Browse (src/browse/tools.ts, merged only when the host's browse gate
   // resolved on). One browser session is parent-owned state shared by every
   // page, so ONLY the read-only dependency/session probe may join a parallel
@@ -1108,6 +1109,7 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   browse_open: { presentCall: presentBrowseOpenCall },
   browse_screenshot: { presentCall: presentBrowseScreenshotCall },
   browse_status: { isConcurrencySafe: () => true },
+  browse_record: {},
   browse_snapshot: {},
   browse_read: {},
   browse_click: {},

@@ -141,7 +141,7 @@ Operating-system permissions and these platform limits still apply.
   must be committed through the host attachment service, and with no attachment
   service wired the model gets the text line plus the saved path under
   `.rolebox/computer/` instead of an image.
-- **Registration is host-side.** dsh, Pi and Codex register the 12 tools
+- **Registration is host-side.** dsh, Pi and Codex register the 13 tools
   themselves (`src/entries/dsh.ts:2237-2246`, `src/entries/pi.ts:1244`,
   `src/entries/codex.ts:138`); the two opencode entries enforce the gate and the
   explicit role restrictions as agent-config tool rules
@@ -164,7 +164,7 @@ when its `browseUse` gate is on (see
 
 - **Playwright is optional, so the family can be absent.** With no explicit
   setting the gate is on only when `playwright` resolves from the rolebox
-  install. An explicit `browseUse: true` registers the 23 tools even without the
+  install. An explicit `browseUse: true` registers the 24 tools even without the
   driver so `browse_status` can report the gap, but every action fails until the
   driver (`npm install playwright`) and a browser build
   (`npx playwright install chromium`) are installed. The gate is read at boot;

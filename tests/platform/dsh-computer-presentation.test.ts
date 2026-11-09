@@ -42,6 +42,7 @@ const COMPUTER_TOOL_NAMES = [
   "computer_focus",
   "computer_displays",
   "computer_status",
+  "computer_record",
 ] as const;
 
 /** Tools that mutate shared desktop state. */

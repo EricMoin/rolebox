@@ -1,6 +1,6 @@
 # Computer use
 
-Rolebox's `computer_*` family provides 12 tools for observing and operating a
+Rolebox's `computer_*` family provides 13 tools for observing and operating a
 native desktop: screenshots, windows, displays, focus, mouse input, text, keys
 and diagnostics. Drivers cover macOS, Windows and Linux X11. Wayland is
 explicitly unsupported.
@@ -104,6 +104,7 @@ terminating the host cannot guarantee release.
 | `computer_windows` | `app?` | List visible windows and the IDs used by capture/focus |
 | `computer_displays` | None | Return JSON display IDs, bounds, scale and primary flag |
 | `computer_screenshot` | `window_id?`, `region?`, `display?`, `path?` | Capture a PNG and return an image attachment |
+| `computer_record` | `action`, `window_id?`, `region?`, `display?`, `fps?`, `max_duration_ms?` | Start, inspect or stop an MP4 recording with a step timeline and local HTML replay |
 | `computer_focus` | `window_id` | Bring the selected window forward and verify focus, or report refusal |
 | `computer_click` | `x`, `y`, `button?`, `clicks?`, `window_id?`, `screenshot_id?` | Click at screen coordinates, or image pixels with `screenshot_id`; button defaults to left, clicks to 1 |
 | `computer_move` | `x`, `y`, `window_id?`, `screenshot_id?` | Move the pointer without clicking |
@@ -111,6 +112,40 @@ terminating the host cannot guarantee release.
 | `computer_key` | `keys`, `window_id?` | Press modifiers followed by one final key |
 | `computer_scroll` | `direction`, `amount?`, `x?`, `y?`, `window_id?`, `screenshot_id?` | Scroll up/down/left/right by 1–100 wheel ticks, default 3; position requires both coordinates and is required with `screenshot_id` |
 | `computer_drag` | `from_x`, `from_y`, `to_x`, `to_y`, `duration_ms?`, `window_id?`, `screenshot_id?` | Left-button drag between screen coordinates, or image pixels with `screenshot_id`, over 100–5000 ms, default 500 ms |
+
+### Recording operations
+
+Call `computer_record` with `{"action":"start","window_id":42}` after
+discovering the intended window. Choose at most one of `window_id`, `region`
+or `display`; omission captures the default display. Capturing does not focus
+the window and retains the platform's normal screenshot behavior, including
+occlusion on Windows and X11. Continue using computer tools, then call
+`{"action":"stop"}` to finalize the MP4, JSONL timeline and HTML replay under
+`.rolebox/computer/recordings/<generated-id>/`. `{"action":"status"}` has no
+capture or input side effects. Background samples do not create screenshot IDs
+or evict IDs used for coordinate mapping.
+
+Recording requires `ffmpeg` with `libx264` on `PATH` and the existing screen
+capture helpers and OS permission. Start never requests an OS permission prompt;
+use `computer_permissions` for diagnosis and the supported permission flow.
+`fps` requests 1–5 sampled screenshots per second (default 2), with actual rate
+limited by native capture time and the desktop queue. There is no audio. Samples
+retain wall-clock timing, stop attempts a final frame, and output fits within
+1920×1080. Brief changes between samples may be missed.
+
+`max_duration_ms` defaults to 120000 and accepts 1000–600000. Recording also
+stops on capture failure, 256 MiB of raw frames or 5,000 tool steps. Inspect
+`status` for the reason; repeated `stop` returns the same result. Recording is
+scoped to the host session and worktree and continues across turns. At most
+four desktop recordings run per process. Encoding has a 60-second limit;
+failure/cancellation keeps raw frames. Host restart loses live recording state.
+
+The timeline includes this session's computer tool calls, their start/end times,
+success and safe arguments such as coordinates, window IDs and input lengths.
+It omits typed text, raw key contents and tool results; the video still contains
+visible content. Files use owner-only POSIX permissions. Review them before
+sharing. Existing computer gates and tool grants apply to `computer_record`;
+restart the host after updating rolebox to load its schema.
 
 `computer_click.button` is `left`, `right` or `middle`; `clicks` is 1 or 2.
 `computer_key.keys` is an array such as `["cmd", "shift", "t"]` or

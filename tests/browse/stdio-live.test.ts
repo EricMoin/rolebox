@@ -38,7 +38,7 @@ async function withClient(run: (client: ReturnType<typeof startStdioClient>, wor
 }
 
 describe.skipIf(!live)("built Node MCP browser end to end", () => {
-  it("drives all 23 tools through stdin/stdout and transports screenshots as images", async () => {
+  it("drives every registered tool through stdin/stdout and transports screenshots as images", async () => {
     await withClient(async (client, worktree) => {
       const list = await client.request<{ tools: Array<{ name: string }> }>("tools/list").result;
       expect(list.tools.filter(tool => tool.name.startsWith("browse_")).map(tool => tool.name).sort()).toEqual([...BROWSE_TOOL_NAMES].sort());
@@ -52,6 +52,7 @@ describe.skipIf(!live)("built Node MCP browser end to end", () => {
         return result;
       };
       expect(text(await call("browse_status"))).toContain("no pages");
+      expect(text(await call("browse_record", { action: "status" }))).toContain('"state": "idle"');
       await call("browse_open", { url: site.baseUrl });
       const snapshot = text(await call("browse_snapshot"));
       const ref = (name: string) => {

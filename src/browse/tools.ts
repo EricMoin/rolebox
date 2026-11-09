@@ -1,5 +1,5 @@
 /**
- * The `browse_*` tool family: one browser, 23 actions.
+ * The `browse_*` tool family: one browser, 24 actions.
  *
  * The family is split by intent — navigation (`tools-navigation.ts`),
  * observation (`tools-observe.ts`) and interaction (`tools-interact.ts`) — and
@@ -24,6 +24,9 @@
 
 import type { CanonicalToolDef } from "../platform/ports/tool-factory.ts";
 import { createBrowseRuntime, type BrowseToolsOptions } from "./tool-helpers.ts";
+import { OperationRecorder } from "../recording/recorder.ts";
+import { withRecording } from "../recording/tools.ts";
+import { createBrowseRecordTool } from "./tools-record.ts";
 import {
   createBrowseClickTool,
   createBrowseCookiesTool,
@@ -54,7 +57,9 @@ import {
   createBrowseStatusTool,
 } from "./tools-observe.ts";
 
-/** The 23 tool names this module registers, in the order they are documented. */
+const recordings = new OperationRecorder("browse");
+
+/** The tool names this module registers, in the order they are documented. */
 export const BROWSE_TOOL_NAMES = [
   "browse_status",
   "browse_open",
@@ -70,6 +75,7 @@ export const BROWSE_TOOL_NAMES = [
   "browse_wait",
   "browse_eval",
   "browse_screenshot",
+  "browse_record",
   "browse_upload",
   "browse_downloads",
   "browse_dialog",
@@ -92,30 +98,34 @@ export type BrowseToolName = (typeof BROWSE_TOOL_NAMES)[number];
  */
 export function createBrowseTools(options: BrowseToolsOptions = {}): Record<string, CanonicalToolDef> {
   const runtime = createBrowseRuntime(options);
+  const recorder = options.recorder ?? recordings;
   return {
-    browse_status: createBrowseStatusTool(runtime),
-    browse_open: createBrowseOpenTool(runtime),
-    browse_snapshot: createBrowseSnapshotTool(runtime),
-    browse_read: createBrowseReadTool(runtime),
-    browse_click: createBrowseClickTool(runtime),
-    browse_drag: createBrowseDragTool(runtime),
-    browse_type: createBrowseTypeTool(runtime),
-    browse_press: createBrowsePressTool(runtime),
-    browse_select: createBrowseSelectTool(runtime),
-    browse_hover: createBrowseHoverTool(runtime),
-    browse_scroll: createBrowseScrollTool(runtime),
-    browse_wait: createBrowseWaitTool(runtime),
-    browse_eval: createBrowseEvalTool(runtime),
-    browse_screenshot: createBrowseScreenshotTool(runtime),
-    browse_upload: createBrowseUploadTool(runtime),
-    browse_downloads: createBrowseDownloadsTool(runtime),
-    browse_dialog: createBrowseDialogTool(runtime),
-    browse_tabs: createBrowseTabsTool(runtime),
-    browse_history: createBrowseHistoryTool(runtime),
-    browse_console: createBrowseConsoleTool(runtime),
-    browse_network: createBrowseNetworkTool(runtime),
-    browse_cookies: createBrowseCookiesTool(runtime),
-    browse_close: createBrowseCloseTool(runtime),
+    ...withRecording(recorder, {
+      browse_status: createBrowseStatusTool(runtime),
+      browse_open: createBrowseOpenTool(runtime),
+      browse_snapshot: createBrowseSnapshotTool(runtime),
+      browse_read: createBrowseReadTool(runtime),
+      browse_click: createBrowseClickTool(runtime),
+      browse_drag: createBrowseDragTool(runtime),
+      browse_type: createBrowseTypeTool(runtime),
+      browse_press: createBrowsePressTool(runtime),
+      browse_select: createBrowseSelectTool(runtime),
+      browse_hover: createBrowseHoverTool(runtime),
+      browse_scroll: createBrowseScrollTool(runtime),
+      browse_wait: createBrowseWaitTool(runtime),
+      browse_eval: createBrowseEvalTool(runtime),
+      browse_screenshot: createBrowseScreenshotTool(runtime),
+      browse_upload: createBrowseUploadTool(runtime),
+      browse_downloads: createBrowseDownloadsTool(runtime),
+      browse_dialog: createBrowseDialogTool(runtime),
+      browse_tabs: createBrowseTabsTool(runtime),
+      browse_history: createBrowseHistoryTool(runtime),
+      browse_console: createBrowseConsoleTool(runtime),
+      browse_network: createBrowseNetworkTool(runtime),
+      browse_cookies: createBrowseCookiesTool(runtime),
+      browse_close: createBrowseCloseTool(runtime),
+    }),
+    browse_record: createBrowseRecordTool(runtime, recorder),
   };
 }
 

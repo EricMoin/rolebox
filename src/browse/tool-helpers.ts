@@ -4,7 +4,7 @@
  * Every tool in the family is written against the same four helpers:
  *
  * - the argument vocabulary (`page`, `timeout`, target, URL) so the schemas and
- *   their descriptions stay identical across 23 tools;
+ *   their descriptions stay identical across the tool family;
  * - {@link defineBrowseTool}, the one wrapper that parses arguments and turns
  *   any thrown value into the canonical `Error:` tool result — a browse tool
  *   never rejects;
@@ -29,6 +29,7 @@ import type { BrowseSessionPage, BrowseSessionSettings } from "./session.ts";
 import { BrowseSessionManager } from "./session.ts";
 import { browseError, type BrowseError, type BrowseViewport } from "./types.ts";
 import { checkedArtifactPath } from "./artifact-path.ts";
+import type { OperationRecorder } from "../recording/recorder.ts";
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -107,6 +108,7 @@ export function timeoutArg(defaultMs: number, maximumMs: number = BROWSE_MAX_TIM
 
 /** Construction options for the tool family. */
 export interface BrowseToolsOptions {
+  recorder?: OperationRecorder;
   /**
    * A manager to bind every tool to. When omitted, one manager per worktree is
    * created on first use, so a host with several worktrees never shares a

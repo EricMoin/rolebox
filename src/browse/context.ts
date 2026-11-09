@@ -33,7 +33,7 @@ const PRESENTATION_CODE =
 /**
  * Render the browse workflow block for the tools a host registered.
  *
- * Returns `""` when none of the 23 names is present, so a host that did not
+ * Returns `""` when none of the registered names is present, so a host that did not
  * grant browsing injects no browser instructions at all.
  */
 export function buildBrowseContext(options: BrowseContextOptions): string {
@@ -88,6 +88,9 @@ export function buildBrowseContext(options: BrowseContextOptions): string {
     instructions.push(
       "Playwright is an optional local dependency: browse_status reports whether it is installed, its version and whether the browser binary is present, and it never launches a browser.",
     );
+  }
+  if (has("browse_record")) {
+    instructions.push("When a video of your browser operations is requested, use browse_record action=start after opening the target page, then action=stop to finalize its MP4, step timeline and HTML replay. It records one fixed page using sampled screenshots and requires ffmpeg. Use action=status to check automatic stops; visible content remains in the video even though input text is omitted from the timeline.");
   }
   instructions.push(
     "The local browser can reach localhost addresses, so a development server on 127.0.0.1 or localhost can be opened with browse_open.",
