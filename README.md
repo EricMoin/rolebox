@@ -330,6 +330,9 @@ Architecture and the full toolset: [graph-outcome-protocol.md](docs/graph-outcom
 | `rolebox memory` | Manage the rolebox memory store (`list`, `show`, `search`, `delete`, `export`, `clean`, `stats`) |
 | `rolebox checkpoint` | Manage dispatch checkpoints (`list`, `clean`) |
 | `rolebox mcp` | Run the rolebox MCP server on stdio (Codex integration) |
+| `rolebox host <harness> <connection> <action>` | Harness host connections and IPC adapters; currently `codex desktop` |
+| `rolebox host codex desktop probe --binding <file>` | Probe the original Codex desktop MCP through an explicit IPC binding (experimental, Unix) |
+| `rolebox host codex desktop prepare --config <file> --output <path>` | Prepare a desktop-owned shared Codex launcher (experimental, Unix) |
 
 Full flags and examples: [cli.md](docs/cli.md). Build a suite with [Benchmarks on dsh](docs/benchmarks.md): response/file assertions, trusted local command checks, a `code-fix` template, independent trials, feedback against a saved baseline after role edits, and offline JSON/HTML results with file-change evidence.
 

@@ -49,6 +49,10 @@ try {
   const manifest = JSON.parse(packed.slice(packed.indexOf("[\n"), packed.lastIndexOf("]") + 1)) as Array<{ filename: string; files: Array<{ path: string }> }>;
   const archive = join(scratch, manifest[0]!.filename);
   assert(manifest[0]!.files.some(file => file.path === "dist/cli/main.js"));
+  for (const moduleName of ["launcher-process", "relay-process"]) {
+    assert(manifest[0]!.files.some(file => file.path === `dist/platform/adapters/codex/desktop/${moduleName}.js`));
+  }
+  assert(!manifest[0]!.files.some(file => file.path.startsWith("dist/entries/codex-desktop-")));
   assert(manifest[0]!.files.some(file => file.path === "skills/rolebox-config/SKILL.md"));
   assert(manifest[0]!.files.some(file => file.path === "skills/rolebox-config/references/roles.md"));
   assert(!manifest[0]!.files.some(file => /(?:bun\.lock|bunfig|patch-opentui)/.test(file.path)));
@@ -127,7 +131,25 @@ try {
   `);
   process.stdout.write(command(process.execPath, [probe], consumer));
   const installedCli = join(consumer, "node_modules/rolebox/dist/cli/main.js");
-  assert.match(command(process.execPath, [installedCli, "--help"], consumer), /rolebox/i);
+  const help = command(process.execPath, [installedCli, "--help"], consumer);
+  assert.match(help, /rolebox/i);
+  assert.match(help, /host/);
+  assert.doesNotMatch(help, /codex-desktop-(bridge|launcher)/);
+  for (const [route, expected] of [
+    [["host"], /codex/],
+    [["host", "codex"], /desktop/],
+    [["host", "codex", "desktop"], /prepare[\s\S]*probe/],
+    [["host", "codex", "desktop", "prepare"], /--config[\s\S]*--output/],
+    [["host", "codex", "desktop", "probe"], /--binding[\s\S]*--max-response-bytes/],
+  ] as const) {
+    assert.match(command(process.execPath, [installedCli, ...route, "--help"], consumer), expected);
+  }
+  console.log("packed host command discovery: PASS");
+  if (process.platform !== "win32" && typeof process.execve === "function") {
+    const desktopProbe = join(consumer, "desktop-launcher-probe.mjs");
+    await cp(join(repository, "scripts/fixtures/packed-codex-desktop-launcher.mjs"), desktopProbe);
+    process.stdout.write(command(process.execPath, [desktopProbe], consumer, 60_000));
+  }
   const typeProbe = join(consumer, "probe.ts");
   await writeFile(typeProbe, 'import tui from "rolebox/tui"; import { startCodexMcpServer } from "rolebox/codex"; import opencode from "rolebox"; import server from "rolebox/server"; import pi from "rolebox/pi"; import dsh from "rolebox/dsh"; const id: string | undefined = tui.id; void [id, startCodexMcpServer, opencode, server, pi, dsh];');
   command(process.execPath, [join(repository, "node_modules/typescript/bin/tsc"), "--noEmit", "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022", "--strict", "--skipLibCheck", typeProbe], consumer);

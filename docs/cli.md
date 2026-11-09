@@ -348,6 +348,81 @@ its paths and how to detect that rolebox is registered with the host tool. The
 JSON output includes a `targets` array (one entry per platform) alongside the
 legacy `opencode` field retained for backward compatibility.
 
+### `host <harness> <connection> <action>`
+
+Manage harness host connections, including Unix sockets and native IPC adapters.
+The command tree groups each harness's connection modes and actions under `host`:
+
+```sh
+rolebox host --help
+rolebox host codex --help
+rolebox host codex desktop --help
+```
+
+Currently only `codex desktop` is implemented, with `prepare` and `probe` actions.
+Each adapter defines its own transport, binding format, permissions and activation
+steps; a shared command group does not make those protocols interchangeable.
+There is no default harness or action. Unknown harnesses, connection modes and
+actions fail without selecting another adapter. Future harness connection
+adapters belong under this group. Role installation and synchronization remain
+available through `install` and `sync`.
+
+#### `host codex desktop probe`
+
+Probe the original Codex desktop MCP using an explicit desktop IPC binding.
+This experimental Unix-only command checks a loaded parent in the existing shared
+app-server, then attempts MCP initialization, tool discovery and a read of that
+same chat.
+
+```bash
+rolebox host codex desktop probe --binding /path/to/binding.json \
+  --thread THREAD_ID --peer-log /path/to/current-desktop-main.log
+```
+
+| Option | Meaning |
+|---|---|
+| `--binding <file>` | Required JSON with `pluginRoot`, `nodePath` and `pipePath` from the current desktop launch |
+| `--thread <id>` | Existing parent chat; defaults to `CODEX_THREAD_ID` |
+| `--socket <path>` | Existing shared Unix socket; defaults to parent notification discovery |
+| `--peer-log <file>` | Current desktop main-process log; reads only new rejection events |
+| `--timeout-ms <n>` | One MCP probe deadline, `1`–`60000` milliseconds, default `10000` |
+| `--max-response-bytes <n>` | Maximum bytes per MCP response line, `1024`–`104857600`, default `16777216` (16 MiB) |
+| `--report <file>` | Save the sanitized JSON report with owner-only permissions |
+
+Exit `0` requires a verified read of the selected chat; exit `2` reports a blocked
+stage. Exit `1` covers command errors such as invalid input JSON or an unwritable
+report file. Oversized response lines use `response_too_large`; framing or JSON
+errors use `invalid_protocol`. This command leaves host configuration unchanged. It does not install a
+native desktop tool catalog. Binding format, measured native authorization
+limitations and activation details are in the
+[Codex bridge guide](codex.md#desktop-ipc-bridge-probe).
+
+#### `host codex desktop prepare`
+
+Prepare an experimental Unix startup adapter for a desktop-owned shared Codex
+host. The command writes a new executable and its private adjacent `.json` file;
+it refuses to overwrite either file. It does not change the desktop environment.
+
+```sh
+rolebox host codex desktop prepare --config /path/to/launcher-input.json \
+  --output /path/to/private/codex-desktop
+```
+
+`--config` and `--output` are required. The output must be an absolute path.
+The output directory must be owned by the invoking user with owner-only
+permissions, including when it already exists. The JSON selects the original CLI, Node runtime, desktop executable, Unix socket
+and diagnostic log. The [desktop launch adapter guide](codex.md#desktop-launch-adapter-experimental)
+describes its fields, activation, rollback and acceptance checks. The installed
+rolebox build must contain both adapter process modules. Keep the original signed CLI
+unchanged; this wrapper is a separate executable selected for the next desktop
+launch with `CODEX_CLI_PATH`.
+
+The generated files contain absolute paths to the package's internal launcher
+and relay processes. After upgrading from the earlier experimental `dist/entries/`
+desktop layout, run `prepare` at a new output path and select that executable
+before the next desktop launch. Rebuilding rolebox does not rewrite generated
+launchers.
+
 ## Configuration
 
 The CLI stores its state in two files:

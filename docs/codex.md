@@ -411,7 +411,10 @@ main client with `codex --remote unix://`. For a custom path, use
 `--listen unix:///path/to/control.sock`, `--remote unix:///path/to/control.sock` and
 `ROLEBOX_CODEX_PARENT_SOCKET=/path/to/control.sock` for that same host. A desktop
 stdio session does not acquire this capability merely because another daemon was
-started; without its own shared endpoint it reports `available: false`.
+started; without its own shared endpoint it reports `available: false`. See
+[Desktop launch adapter](#desktop-launch-adapter-experimental) for a desktop-owned
+host, or [Desktop shared host](#desktop-shared-host-experimental) for an external
+daemon and its desktop-tool limitation.
 
 When the notification channel is unavailable, call `graph_wait` with the returned
 `graph_id` as a fallback instead of repeatedly polling `graph_status`.
@@ -449,6 +452,305 @@ remain supported. A positive node `timeout_ms` starts at attempt delivery, inclu
 thread/turn startup time. Its watchdog records a durable timeout control for that
 exact attempt and requests interruption; it does not confirm cancellation. Zero
 disables the timeout, and expiry never retries the attempt automatically.
+
+### Desktop launch adapter (experimental)
+
+`rolebox host codex desktop prepare` prepares a separate startup executable selected
+through the desktop's internal `CODEX_CLI_PATH` override. On Unix with
+`process.execve` support, it hands its PID to the original CLI, preserving the
+desktop as that CLI's direct parent. A child relay retains the desktop's stdio
+and forwards its JSON-RPC messages to the original CLI's Unix WebSocket listener.
+The relay sends no additional initialization and preserves client metadata,
+requests, responses and notifications. The original host receives the desktop's
+MCP environment and launches its bundled tools itself.
+
+Desktop implementation and its internal process modules live together under
+`platform/adapters/codex/desktop`; `entries/` holds the public harness entries.
+The generated executable and JSON contain absolute paths into the installed
+build. When upgrading from the earlier experimental `dist/entries/codex-desktop-*`
+layout, prepare a replacement at a new output path and select it with
+`CODEX_CLI_PATH` before reopening the desktop. Rebuilding the package alone does
+not migrate previously generated files.
+
+Create a configuration using the current desktop's original executables:
+
+```json
+{
+  "codexPath": "/path/to/desktop-runtime/codex",
+  "nodePath": "/path/to/desktop-runtime/node",
+  "desktopExecutable": "/path/to/desktop/main-executable",
+  "socketPath": "/path/to/private/desktop-control.sock",
+  "logPath": "/path/to/private/desktop-launcher.jsonl",
+  "startupTimeoutMs": 15000,
+  "maxMessageBytes": 104857600
+}
+```
+
+All paths must be absolute; the three executables must exist and be executable.
+Use a short socket path inside an owner-only directory. `startupTimeoutMs`
+defaults to `15000`, accepts `100`–`60000`, and only bounds listener startup.
+The relay's readiness handshake is capped at the smaller of that value and five
+seconds. Graph execution has no launcher-imposed deadline. `maxMessageBytes` defaults to
+100 MiB and accepts `1024`–`104857600`; it bounds each JSONL message and incoming
+WebSocket message. Partial lines are buffered without repeated copies; outgoing
+text fragments are at most 1 MiB and wait for the previous write callback before
+another is queued. stdin stays paused while those messages are draining. The
+100 MiB default retains support for large desktop requests; lower it when a
+smaller message limit fits the workload. The adapter
+records event codes and process IDs without logging protocol contents or startup
+arguments. Keep the prepared executable and its adjacent JSON in a private
+directory. Preparation refuses an existing output directory unless it is owned
+by the invoking user with owner-only permissions. The JSON is owner-readable/writable only.
+
+On the checked macOS desktop, prepare and activate with:
+
+```sh
+rolebox sync codex
+codex plugin add rolebox@rolebox
+rolebox host codex desktop prepare --config /path/to/launcher-input.json \
+  --output /path/to/private/codex-desktop
+launchctl setenv CODEX_CLI_PATH /path/to/private/codex-desktop
+launchctl unsetenv CODEX_APP_SERVER_WS_URL
+```
+
+Save any existing values first. Finish active turns and background graphs, fully
+quit the desktop and reopen the same chat. If moving from an external daemon,
+disable any per-login job that restores its URL; stop that host only after its
+clients and workers are idle. On the checked desktop build `26.1103.60933`, the
+URL takes precedence over the startup adapter.
+The adapter sets `ROLEBOX_CODEX_PARENT_SOCKET` on its original host, which the
+rolebox MCP inherits. It converts only a direct stdio `app-server` invocation
+from the configured desktop parent with the desktop originator. Worker launches,
+inspection commands, subcommands and explicit non-stdio transports pass through.
+The activation gate requires `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` to equal
+`Codex Desktop`, as supplied by the desktop, and the parent's resolved executable
+to match `desktopExecutable`. Do not set that variable to force activation from
+another process. In `native_passthrough` events, `desktopParent: false` means the
+parent check failed; `parentCheck` is `matched`, `different_executable` or
+`unresolved` (for example, `ps` returned a bare command name). With
+`desktopParent: true` and `desktopOriginator: false`, the caller is another desktop
+invocation. `startupInspection: true` identifies the configuration probe. A
+matching parent and originator can still pass through inspection commands,
+subcommands or explicit non-stdio transports. No process arguments are logged.
+
+The installed rolebox plugin must forward `ROLEBOX_CODEX_PARENT_SOCKET` in its
+`.mcp.json` `env_vars`. `sync` updates the marketplace source; `plugin add`
+refreshes the installed cache. An older cache can restore desktop tools while
+still returning `parent_notification.available: false` for graphs. Reload the
+MCP configuration or restart after refreshing it, then check the capability again.
+The checked app-server accepts `config/mcpServer/reload` with omitted parameters
+on an initialized app-server connection. This reload covers loaded threads in
+that host; finish active turns and graph executions first. It applies the updated
+MCP environment without restarting the desktop. Hosts without this method need
+a full desktop restart.
+Keep unrelated plugin sections outside rolebox's managed `config.toml` markers
+before syncing; everything between those markers is regenerated.
+
+An already-running terminal or restart helper can still inherit the old external
+URL after `launchctl unsetenv`. On macOS, explicitly supply the next app's startup
+environment when reopening it:
+
+```sh
+open --env CODEX_CLI_PATH=/path/to/private/codex-desktop \
+  --env CODEX_APP_SERVER_WS_URL= --env CODEX_APP_SERVER_USE_LOCAL_DAEMON= \
+  -a /path/to/desktop.app
+```
+
+Check that the desktop selects its stdio frontend and that the launcher records
+`desktop_shared_start`, `native_cli_exec` and `relay_connected`. A
+`native_passthrough` event with `startupInspection: true` only establishes that
+the desktop ran its configuration probe; it does not establish a shared launch.
+When opening an existing local chat through a deep link, specify
+`codex://threads/THREAD_ID?hostId=local` after the host is ready. A link without
+`hostId` depends on the desktop's host catalog being ready to resolve the chat.
+
+An existing socket is refused rather than removed or adopted. After a crash,
+verify that no process owns it before removing a stale socket or selecting a new
+path. EOF on the desktop protocol or a lost relay connection stops only the
+relay's own host. Closing a secondary graph notification client preserves it.
+The relay sends SIGTERM, waits for its original parent to exit and escalates to
+SIGKILL after 500 ms only if it is still that process's child. Post-readiness
+fatal errors record `relay_runtime_failed` and use the same cleanup. Forced
+termination can leave a stale socket; the launcher still refuses to delete or
+adopt an existing socket automatically. Only `PATH`, `TMPDIR`, `TMP` and `TEMP`
+are forwarded to the relay. The original CLI retains the desktop environment,
+including the native MCP bindings.
+
+This uses internal desktop startup options and needs validation after desktop
+updates. Native IPC authorization remains enforced by the desktop. Verify the
+original CLI's parent, a working native `codex_app` call in the same chat, and a
+real graph completion after the main turn ends. A reachable socket or a successful
+MCP handshake alone does not establish desktop-tool recovery. If ownership is
+unavailable, `graph_wait` remains the fallback.
+
+On macOS desktop `26.1103.60933` with CLI `0.167.0-alpha.3.2`, the adapter preserved
+the original CLI as the desktop's direct child, and the same chat discovered 50
+native `codex_app` tools. Native `read_thread` and `list_threads` calls succeeded;
+the current desktop log recorded no peer rejection. This verifies those read
+operations; write operations were not exercised by the acceptance probe.
+After refreshing the rolebox cache and reloading MCP, a new real teacher node
+continued its 65-second delay after the main turn ended. Its accepted `done`
+outcome automatically started a new turn in that same desktop chat. The live
+probe used no `graph_wait` or status polling; `graph_status` was read once after
+the completion notification. A native `read_thread` call also succeeded in the
+woken turn. This verifies desktop tools and graph wake together on that build.
+
+`npm run build && npm run test:codex:launcher` runs the original CLI with an isolated
+home and loopback model fixture. `ROLEBOX_CODEX_COMMAND` selects that CLI;
+`ROLEBOX_CODEX_DESKTOP_NODE` optionally selects the launcher runtime. It verifies
+PID preservation, stdio forwarding, a second client, graph-triggered continuation
+after parent completion, notifier disconnection and desktop-EOF cleanup. It
+checks for missing/stale launcher build entries before creating its temporary
+home or model server, and uses a short socket path with `?` and `#` to verify
+literal Unix path handling in the selected CLI. It does not exercise native
+desktop IPC authorization or use real model credentials.
+
+For rollback, restore the previous `CODEX_CLI_PATH` and
+`CODEX_APP_SERVER_WS_URL` values, or unset them if previously absent, remove any
+per-login adapter setup, and fully restart the desktop. Restore an external daemon
+setup when that was the previous configuration. The generated files alone have
+no effect on an already-running desktop.
+
+### Desktop shared host (experimental)
+
+The macOS desktop build checked with bundled CLI `0.167.0-alpha.3.2` accepts
+`CODEX_APP_SERVER_WS_URL`. Its WebSocket client supports a Unix socket URL, so
+the desktop and rolebox can share the control socket without a TCP listener.
+This is an internal desktop option, not a stable cross-version interface. This
+section connects the desktop to an external daemon; the
+[launch adapter](#desktop-launch-adapter-experimental) instead keeps the host
+under the desktop process.
+
+Use the same CLI build as the desktop runtime:
+
+```sh
+codex -c features.code_mode_host=true app-server daemon start
+rolebox_codex_home="${CODEX_HOME:-$HOME/.codex}"
+launchctl setenv CODEX_APP_SERVER_WS_URL \
+  "ws+unix://localhost${rolebox_codex_home}/app-server-control/app-server-control.sock:/rpc"
+```
+
+Finish active turns, fully quit the desktop app, then reopen the same chat.
+The desktop must load that chat in the shared server. Rolebox discovers the
+existing socket when its MCP process starts and verifies ownership through
+`graph_declare.parent_notification.available`. Neither starting the daemon nor
+setting the URL alone establishes that ownership. The retained
+`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` path requires empty startup overrides;
+the automatic desktop MCP override prevents that path in this build.
+
+Acceptance was checked with an existing desktop chat and a real rolebox worker:
+the main turn ended while the node was running, the worker's `done` outcome was
+accepted, and `[GRAPH COMPLETE]` started a new turn in the same chat. No
+`graph_wait`, status polling, or test chat was used to keep the parent alive.
+
+**Desktop-tool limitation:** in this shared configuration, the bundled
+`codex_app` MCP server failed because the daemon did not receive
+`CODEX_APP_TOOLS_PIPE_PATH`. Its chat-management and automation tools were
+unavailable; rolebox graph execution and native command tools remained usable.
+Passing the current pipe and desktop Node runtime through the adapter allowed
+MCP initialization, but `tools/list` failed with `-32603`. The desktop recorded
+`dynamic_app_tools_peer_rejected reason=untrusted-process-ancestry`. An isolated
+app-server launching the original MCP produced the same native rejection without
+loading a real chat. The supplied Node had the same signing team as the desktop;
+the native process-ancestry check still rejected this launch chain. This setup
+therefore does not provide full desktop-tool parity. Rejection occurs when the
+desktop accepts the native socket, before it dispatches a tool request. Related upstream reports cover the
+[daemon-selection guard](https://github.com/openai/codex/issues/41014) and
+[shared-host app-tool binding](https://github.com/openai/codex/issues/47425).
+
+The `launchctl` environment lasts for the login session. A persistent setup
+needs a user LaunchAgent that starts the daemon and sets the URL before the
+desktop launches. To restore the normal desktop connection, remove that
+per-login setup if installed, run the following, and fully restart the desktop:
+
+```sh
+launchctl unsetenv CODEX_APP_SERVER_WS_URL
+```
+
+This changes the next desktop launch; it does not stop the shared daemon or its
+other clients. Recheck ownership and actual wake delivery after a host update.
+
+#### Desktop IPC bridge probe
+
+`rolebox host codex desktop probe` tests the adapter's connection to the original
+bundled `codex_app` MCP. Supply a JSON binding from the current desktop launch:
+
+```json
+{
+  "pluginRoot": "/path/to/codex-app-tools",
+  "nodePath": "/path/to/desktop-runtime/node",
+  "pipePath": "/path/to/current-desktop.sock"
+}
+```
+
+`pluginRoot` contains the desktop's original `.mcp.json`; `nodePath` is its
+`CODEX_MCP_NODE_PATH`. The current desktop main-process log records `pipePath`
+in `dynamic_app_tools_listening`. Select the log for the current desktop process
+and refresh this binding after a desktop restart. The probe requires a private
+Unix socket owned by the invoking user and uses the original bundle's launcher
+and environment whitelist.
+
+```sh
+rolebox host codex desktop probe --binding /path/to/binding.json \
+  --thread THREAD_ID --socket /path/to/app-server-control.sock \
+  --peer-log /path/to/current-desktop-main.log --report /path/to/report.json
+```
+
+`--thread` defaults to `CODEX_THREAD_ID`; `--socket` uses the same discovery as
+parent notifications. `--timeout-ms` bounds the MCP handshake, discovery and read
+to one deadline, from `1` through `60000`, default `10000`. The optional peer log
+only contributes complete rejection lines appended during this attempt. It is
+opened before probing and identified through its descriptor; a replacement log
+is not treated as evidence. Failed handshakes may wait up to another 500 ms for
+the host's log flush. Reports contain stages and reason codes, not pipe paths,
+environment values or chat contents.
+
+`--max-response-bytes` bounds each MCP JSONL response line independently of the
+launcher's `maxMessageBytes`: default `16777216` (16 MiB), range
+`1024`–`104857600`. It accepts coalesced lines separately and buffers fragmented
+UTF-8 until a full line is available. A response exceeding this limit reports
+`response_too_large`, rather than `invalid_protocol`.
+
+stdout and `--report` use the same JSON structure:
+
+```json
+{
+  "bridge": {
+    "status": "ready",
+    "stage": "tools/call",
+    "code": "verified",
+    "toolCount": 1,
+    "readOnlyToolVerified": true
+  },
+  "parentNotificationAvailableAfter": true,
+  "hostConfigurationChanged": false
+}
+```
+
+`bridge.status` is `ready` or `blocked`; `stage` is `parent`, `binding`,
+`initialize`, `tools/list` or `tools/call`. `code` is a stable diagnostic:
+`verified`, `parent_unavailable`, `invalid_binding`, `invalid_timeout`,
+`invalid_response_limit`, `cancelled`, `timeout`, `process_unavailable`,
+`transport_closed`, `invalid_protocol`, `response_too_large`, `ipc_closed`,
+`host_context_missing`, `mcp_refused`, `read_tool_unavailable`,
+`read_result_unverified`, `peer_rejected`, `invalid_request` or `probe_failed`.
+MCP refusals can add numeric `mcpErrorCode`; verified fresh log evidence adds
+`peerRejection: { reason, timestamp }`. Counts are integers and the remaining
+flags are booleans. `parentNotificationAvailableAfter` is a fresh ownership check
+after probing; it is independent of bridge success. `hostConfigurationChanged`
+is always false. The report file is owner-readable/writable only, including when
+overwriting an existing file.
+
+The probe verifies shared-host ownership, initializes MCP, discovers all tool
+pages, and calls only `read_thread` for the selected chat. Exit `0` and
+`readOnlyToolVerified: true` mean that connection read the correct chat. Exit `2`
+means blocked. Exit `1` covers command/input/report failures; those need not
+produce a JSON report. `peer_rejected` requires a new desktop rejection event, while an
+IPC closure without that evidence remains `ipc_closed` or `transport_closed`.
+The command does not install a host configuration override or restore the
+desktop's native tool inventory. A successful probe is a prerequisite for that
+separate integration. On the checked build it stops at native ancestry rejection,
+leaving the existing graph notification channel configured as before.
 
 ## Not supported on Codex yet
 

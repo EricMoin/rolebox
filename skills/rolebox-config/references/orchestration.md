@@ -223,8 +223,10 @@ instructions. Parent delivery auto-discovers the existing default control socket
 [Codex connection setup](configuration.md#codex-native-agents-and-session-execution)
 for precedence and activation. Only a shared server that already owns the loaded
 parent is eligible: this feature does not resume it in another process. An external
-desktop stdio conversation without that channel stays in `graph_wait`. Boot does
-not redispatch persisted graphs. Fatal transport failure terminates its app-server process tree;
+desktop stdio conversation without that channel stays in `graph_wait`. The
+[experimental desktop setup](configuration.md#desktop-shared-host-experimental)
+describes a checked macOS connection and its bundled app-tool limitation. Boot
+does not redispatch persisted graphs. Fatal transport failure terminates its app-server process tree;
 local close and connection loss leave an execution without a native terminal event
 unknown, without inventing failure, completion or interruption. Uncertain create
 claims are retained; credentials are not retained durably. Diagnose the recorded state before
