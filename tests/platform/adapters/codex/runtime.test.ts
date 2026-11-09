@@ -86,14 +86,14 @@ describe("Codex MCP runtime integration", () => {
     expect(harness.calls).toEqual([]);
     const initialized = await harness.request("initialize", { protocolVersion: "2025-06-18" });
     expect(initialized.capabilities).toEqual({ tools: { listChanged: false }, experimental: { "codex/sandbox-state": {} } });
-    expect(initialized.instructions).toContain("cannot wake an external UI-owned chat");
+    expect(initialized.instructions).toContain("do not assume this capability without parent_notification.available=true");
     const listed = (await harness.request("tools/list")).tools!;
-    expect(listed).toHaveLength(29);
+    expect(listed).toHaveLength(30);
     expect(listed.filter(tool => tool.name.startsWith("session_")).map(tool => tool.name).sort()).toEqual([
       "session_diff", "session_fork", "session_info", "session_list", "session_read", "session_search",
     ]);
     expect(listed.filter(tool => tool.name.startsWith("graph_")).map(tool => tool.name).sort()).toEqual([
-      "graph_audit", "graph_control", "graph_declare", "graph_status", "graph_submit_outcome",
+      "graph_audit", "graph_control", "graph_declare", "graph_status", "graph_submit_outcome", "graph_wait",
     ]);
     expect(listed.every(tool => tool.inputSchema.type === "object")).toBe(true);
     expect(harness.calls).toEqual([]);
@@ -102,7 +102,7 @@ describe("Codex MCP runtime integration", () => {
   it("adds both optional tool families without replacing the runtime tools", async () => {
     const harness = await boot({ computerUse: true, browseUse: true });
     const listed = (await harness.request("tools/list")).tools!;
-    expect(listed).toHaveLength(64);
+    expect(listed).toHaveLength(65);
     expect(listed.filter(tool => tool.name.startsWith("computer_"))).toHaveLength(12);
     expect(listed.filter(tool => tool.name.startsWith("browse_"))).toHaveLength(23);
   });
