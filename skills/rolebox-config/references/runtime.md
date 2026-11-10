@@ -238,10 +238,11 @@ roles, the service uses the first supplied recovery configuration; configure a
 consistent policy rather than relying on role discovery order. Disabling
 `hooks.builtin.recovery` prevents creating the recovery engine.
 
-## Composer draft suggestions (Copilot)
+## Copilot suggestions and automatic continuation
 
-`copilot.draft` shows the next human message as a hint card above the composer
-tool-row button. It is a dsh web feature: the host exposes
+`copilot.draft` generates a possible next human message. Browser modes choose
+whether to show it as a hint card or send it automatically to continue the
+session. It is a dsh web feature: the host exposes
 `POST /rolebox/copilot/suggest` and the dsh web client adds the button. Other
 harnesses do not register either half.
 
@@ -326,43 +327,76 @@ reads the route's capability metadata first (a read-only lookup, not a model
 call) and omits the field for a route with no reasoning metadata, because the
 host rejects an unsupported effort (`UNSUPPORTED_REASONING_EFFORT`) before the
 adapter runs; that route then uses the provider's own reasoning default instead
-of failing. After a turn ends with an empty draft, the browser waits 300 ms and
-posts once; typing before the answer aborts the request and a late answer is
-dropped. An automatic `none` is not retried until the next turn, while the
-button can ask again. A returned draft is **never inserted automatically**: it
-is held in the button's state and shown as a hint card above the button — the
-eyebrow "Suggestion" / 建议, the text, and two buttons, Fill / 填入 and
-Dismiss / 忽略. Only Fill writes the composer (via `setDraft`); Dismiss writes
-nothing. Typing (any non-empty draft), a new turn, a session switch, unmount,
-Fill and Dismiss all clear the card, and it does not reappear for the same
-idle. The button has three states — idle (`Suggest` / 建议), loading
-(`Suggesting` / 生成中) and disabled (still labelled `Suggest`, with an
-"unavailable" tooltip) — and gains an accent background while a suggestion is
-available; the old injected/clear state is gone. The tooltip keeps explaining
-the button but is hidden while the card is open, so the two cannot overlap, and
-the card takes no focus (its two actions are ordinary buttons).
+of failing. In automatic modes, an eligible idle session with an empty draft
+and no attachments waits 300 ms and posts once. An automatic `none`, timeout or
+error is not retried until the next turn; choosing a different automatic mode
+can start a fresh attempt for the current idle. A manual click cancels the
+pending automatic timer and can ask again.
 
-Hover or keyboard-focus the Suggest / 建议 control to open its settings panel.
-The Automatic suggestions / 自动建议 switch defaults to on; a visible hint card
-includes the same switch. The pointer can move into the panel without closing
-it. Tab reaches the switch, Space/Enter toggles it, and Escape closes the panel
-or card and restores focus to the suggestion control. A disabled/loading
-button's wrapper is focusable so the settings remain reachable.
+When no result is open, hover or keyboard-focus Suggest / 建议 to open the
+settings panel. This panel alone contains the **Copilot mode / Copilot 模式**
+selector and a short description of the selected mode:
 
-Switching off cancels the pending automatic timer and any automatic request,
-drops late automatic responses, and dismisses an automatic card. Manual asks
-and manual cards remain usable. A manual click also cancels the pending
-automatic timer. Switching back on resumes automatic requests for an eligible
-idle that has not already spent its one attempt.
+| Mode | UI label | Behavior |
+| --- | --- | --- |
+| `none` | Off / 关闭 | No requests or automatic sends; the suggestion button is disabled, settings stay reachable. |
+| `manual` | Manual suggestions / 仅手动建议 | Clicking Suggest generates a hint card. Fill writes the draft; the user sends it. |
+| `auto-advise` (default) | Automatic suggestions / 自动建议 | An eligible idle automatically generates a hint card. The user chooses whether to fill and send it. |
+| `auto-mated` | Automatic continuation / 全自动接续 | An automatic answer is filled and submitted through the host's normal composer actions. After the next turn, the cycle repeats; no suggestion means it stops. Manual clicks still show a card. |
 
-This is a browser-local preference, stored in `localStorage` under
-`rolebox.copilot.autoSuggest`: only the string `false` disables automatic
-requests; absence defaults to on. It applies across sessions on the same DSH
-origin, survives reloads, and synchronizes mounted controls and browser tabs.
-If storage is blocked it still works for the current page. It does not edit
-role/project/global configuration or override `copilot.draft.enabled: false`.
-Refresh the page after installing an updated browser bundle to load this UI;
-toggling the switch itself needs no host restart.
+Full automation must be selected explicitly. Its pill reads Auto continue /
+自动接续. It runs in the mounted DSH browser control, not as a host background
+job, and has no separate turn budget. It still requires an enabled host config
+and a configured model. Host submission admission and failure handling apply;
+a failed send is not retried automatically. If the host lacks a composer submit
+action, the answer falls back to a hint card.
+
+All other answers appear as a card above the button with the eyebrow
+Suggestion / 建议, the text, Fill / 填入 and Dismiss / 忽略. Fill writes the
+composer without sending, even in full automation mode. Dismiss writes nothing.
+Typing, adding attachments, leaving the plain input phase, a new turn, a
+session switch, unmount, Fill and Dismiss clear the card. Dismissal does not
+re-ask during the same idle. The card contains only the suggestion and its
+Fill / Dismiss actions, with no mode settings. The card takes no focus; hover
+settings stay hidden while a suggestion or status card is open. To change the
+mode, close the result first with Fill, Dismiss or Escape as applicable, then
+hover again or move keyboard focus out of the control and back in.
+Loading reads Suggesting / 生成中. Disabled reasons
+remain available through the button's accessible description.
+
+Clicking Suggest while a card is visible keeps the existing card mounted and
+marks it busy until the replacement arrives. A new suggestion replaces its
+text; a `none`/`disabled` result replaces it with a short status card. Starting
+a manual request closes hover settings. Fill, Dismiss and Escape close the
+result directly and cancel a pending manual replacement, so late answers cannot
+reopen it or flash settings underneath. A fresh pointer entry or focus from
+outside the control can open settings again. Floating panels use a solid
+theme background and no opacity transition.
+
+Changing modes cancels the pending automatic timer and request, drops late
+automatic responses and dismisses an automatic card. Switching to `none` also
+cancels manual requests and clears manual cards. Other mode changes preserve
+manual work and never promote a displayed card or a pending request into an
+automatic send. Typing, attachments, an editor revision change, a new turn,
+a session switch or unmount invalidates requests before they can fill or send.
+Existing text and attachments are never submitted by Copilot.
+
+The pointer can move into the panel without closing it. Tab reaches the native
+mode selector, arrow keys choose a mode (Enter confirms where needed), and
+Escape closes the panel/card and restores focus. A disabled/loading button's
+wrapper remains focusable.
+
+The preference is browser-local, stored in `localStorage` under
+`rolebox.copilot.mode`. A valid mode takes precedence over the former
+`rolebox.copilot.autoSuggest` key. When the new key is absent, the old string
+`false` maps to `manual`; any other old value or no preference maps to
+`auto-advise`. An invalid new value also falls back to `auto-advise`, never
+full automation. It applies across sessions on the same DSH origin, survives
+reloads and synchronizes mounted controls and browser tabs. Blocked storage
+still permits a page-local preference. It is not a `role.yaml` or project/global
+configuration field and cannot override `copilot.draft.enabled: false`.
+Refresh after installing the updated browser bundle; choosing a mode needs
+no host restart.
 
 The request body is `{ "session": "<id>", "intent": "auto" | "manual" }`.
 `intent` is optional and defaults to `"auto"` (any other present value is a
@@ -376,12 +410,11 @@ tasks, repeating completed work and generic testing/review/refactoring without
 an unresolved need. They must not guess facts or preferences only the user
 knows; an assistant's optional offer alone is not a new user request. A
 transcript without a usable user/assistant exchange returns `none` without a
-model call. A manual request that still yields no draft shows a transient
-4-second notice in the
-tooltip area — "No suggestion right now" / 暂时没有合适的建议 — instead of looking
-like a dead button; a manual `disabled` answer shows the disabled title and
-reason the same way. Automatic requests never raise the notice, and typing, a
-new turn, a session switch or unmount clears it.
+model call. A manual request that still yields no draft shows a separate
+4-second status card — "No suggestion right now" / 暂时没有合适的建议. A manual
+`disabled` answer shows the disabled title and reason the same way. Automatic
+requests never raise the notice. Typing, a new turn, a session switch, Escape
+or unmount clears it; expiry closes it without revealing hover settings.
 
 Privacy: selected excerpts from this session, including initial/latest user
 messages and the latest assistant reply even when outside `window_size`, plus

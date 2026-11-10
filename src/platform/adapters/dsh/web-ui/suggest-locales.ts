@@ -2,7 +2,7 @@
  * Locale dictionaries for the composer draft-suggestion control.
  *
  * The Web client's composer slot hands a registered entry the `t` seat of the
- * namespace it declares as its `locale`, so the pill's short label, its tooltip
+ * namespace it declares as its `locale`, so the pill's short label, its settings
  * and the hint card's eyebrow/actions follow the ACTIVE dsh UI locale with no
  * per-component language switch: register `en` (the registry fallback) and
  * `zh`, and every other installed language resolves through its fallback chain
@@ -10,7 +10,7 @@
  *
  * The two dictionaries are DERIVED from one copy table rather than written out
  * twice, so a key can never exist in one language and be missing in the other
- * (the failure mode: a tooltip renders a raw `title.idle` key in one locale).
+ * (the failure mode: a control renders a raw `title.idle` key in one locale).
  *
  * @module
  */
@@ -27,29 +27,19 @@ export interface SuggestCopy {
 }
 
 /**
- * The single copy table: short pill labels, tooltip titles and bodies, the
+ * The single copy table: short pill labels, accessible state descriptions, the
  * hint-card eyebrow and its two action labels, one body per disabled reason,
- * the automatic-suggestions switch, and the transient notice a MANUAL request
+ * the mode selector, and the transient notice a MANUAL request
  * raises when it yields no draft.
  */
 export const SUGGEST_COPY = {
   "label.idle": { en: "Suggest", zh: "建议" },
   "label.loading": { en: "Suggesting", zh: "生成中" },
+  "label.automated": { en: "Auto continue", zh: "自动接续" },
   "title.idle": { en: "Suggest the next message", zh: "建议下一条消息" },
-  "body.idle": {
-    en: "Asks the configured fast model for one likely next message and shows it in a card above - nothing is written into the composer until you choose Fill.",
-    zh: "让配置的快模型生成一条可能的下一条消息并显示在上方卡片中；在你选择“填入”前不会写入输入框。",
-  },
+  "title.automated": { en: "Automatic continuation is on", zh: "已开启全自动接续" },
   "title.loading": { en: "Generating a suggestion", zh: "正在生成建议" },
-  "body.loading": {
-    en: "Reading the conversation tail with the configured fast model. Typing cancels it.",
-    zh: "正在用配置的快模型读取对话尾部；开始输入会取消。",
-  },
   "title.ready": { en: "Suggestion ready", zh: "建议已就绪" },
-  "body.ready": {
-    en: "Choose Fill in the card above to write it into the composer, or Dismiss to ignore it. Nothing is inserted until you choose.",
-    zh: "在上方卡片中选择“填入”写入输入框，或选择“忽略”放弃这条建议；在你选择前不会写入任何内容。",
-  },
   "title.disabled": { en: "Suggestion unavailable", zh: "建议不可用" },
   "body.disabled.blank": {
     en: "This session has no conversation yet.",
@@ -67,6 +57,14 @@ export const SUGGEST_COPY = {
     en: "The composer already has your text - it is never overwritten.",
     zh: "输入框里已有你的内容，不会被覆盖。",
   },
+  "body.disabled.attachments": {
+    en: "The composer has your attachments. Remove or send them before requesting a suggestion.",
+    zh: "输入框里已有附件，请先移除或发送附件，再生成建议。",
+  },
+  "body.disabled.mode": {
+    en: "Copilot is off. Choose a mode below to enable it.",
+    zh: "Copilot 已关闭，可在下方选择模式重新开启。",
+  },
   "notice.none": { en: "No suggestion right now", zh: "暂时没有合适的建议" },
   "notice.none.body": {
     en: "Try again after the next turn, or type your own message.",
@@ -76,12 +74,26 @@ export const SUGGEST_COPY = {
   "card.fill": { en: "Fill", zh: "填入" },
   "card.dismiss": { en: "Dismiss", zh: "忽略" },
   "settings.title": { en: "Suggestion settings", zh: "建议设置" },
-  "auto.label": { en: "Automatic suggestions", zh: "自动建议" },
-  "auto.on": { en: "On", zh: "已开启" },
-  "auto.off": { en: "Off", zh: "已关闭" },
-  "auto.description": {
-    en: "You can still click Suggest to request one manually.",
-    zh: "关闭后仍可点击“建议”手动生成。",
+  "mode.label": { en: "Copilot mode", zh: "Copilot 模式" },
+  "mode.none": { en: "Off", zh: "关闭" },
+  "mode.manual": { en: "Manual suggestions", zh: "仅手动建议" },
+  "mode.auto-advise": { en: "Automatic suggestions", zh: "自动建议" },
+  "mode.auto-mated": { en: "Automatic continuation", zh: "全自动接续" },
+  "mode.none.description": {
+    en: "No suggestions or messages are generated.",
+    zh: "不生成建议，也不自动发送消息。",
+  },
+  "mode.manual.description": {
+    en: "Click Suggest to generate a draft.",
+    zh: "点击“建议”生成草稿。",
+  },
+  "mode.auto-advise.description": {
+    en: "Shows suggestions after each turn; you send them.",
+    zh: "每轮结束后弹出建议，由你发送。",
+  },
+  "mode.auto-mated.description": {
+    en: "Generates and sends messages after each turn.",
+    zh: "每轮结束后自动生成并发送消息。",
   },
 } as const satisfies Record<string, SuggestCopy>;
 

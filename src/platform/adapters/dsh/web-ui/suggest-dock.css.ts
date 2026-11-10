@@ -33,7 +33,7 @@ export const suggestCss = `
   --rolebox-ink-glyph: var(--dsw-alias-label-tertiary, rgb(129, 133, 140));
   --rolebox-accent: var(--dsw-alias-state-business-primary, rgb(65, 118, 230));
   --rolebox-focus-ring: var(--dsw-alias-state-business-primary, rgb(65, 118, 230));
-  --rolebox-popover-surface: var(--dsw-specific-menu, rgb(255, 255, 255));
+  --rolebox-popover-surface: var(--dsw-alias-bg-base, rgb(255, 255, 255));
   --rolebox-border-hairline: var(--dsw-alias-border-l2, rgba(15, 17, 21, 0.12));
   --rolebox-radius-control: 8px;
   --rolebox-dur-fast: 130ms;
@@ -82,7 +82,7 @@ export const suggestCss = `
 
 .rolebox-suggest-button:disabled {
   cursor: default;
-  opacity: 0.45;
+  color: var(--rolebox-ink-glyph, rgb(129, 133, 140));
 }
 
 /* A held suggestion turns the pill's label accent-colored so it reads as ready
@@ -91,6 +91,10 @@ export const suggestCss = `
 .rolebox-suggest[data-has-suggestion="true"] .rolebox-suggest-button {
   color: var(--rolebox-accent, rgb(65, 118, 230));
   background: var(--rolebox-surface-accent, rgb(228, 237, 253));
+}
+
+.rolebox-suggest[data-mode="auto-mated"] .rolebox-suggest-button {
+  color: var(--rolebox-accent, rgb(65, 118, 230));
 }
 
 .rolebox-suggest-glyph {
@@ -105,7 +109,7 @@ export const suggestCss = `
   text-overflow: ellipsis;
 }
 
-/* The hover/focus panel includes an automatic-suggestions switch. Hidden
+/* The hover/focus panel includes the mode selector. Hidden
    controls leave the tab order; a bridge spans the gap above the pill. */
 .rolebox-suggest-tip {
   box-sizing: border-box;
@@ -113,7 +117,7 @@ export const suggestCss = `
   right: 0;
   bottom: calc(100% + 8px);
   z-index: 60;
-  display: block;
+  display: none;
   width: max-content;
   max-width: 260px;
   padding: 8px 10px;
@@ -126,35 +130,16 @@ export const suggestCss = `
   background: var(--rolebox-popover-surface, rgb(255, 255, 255));
   border: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
   border-radius: var(--rolebox-radius-control, 8px);
-  visibility: hidden;
-  pointer-events: none;
-  opacity: 0;
-  transform: translateY(2px);
-  transition:
-    opacity var(--rolebox-dur-fast, 130ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1)),
-    transform var(--rolebox-dur-fast, 130ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1));
+  box-shadow: 0 6px 18px rgba(15, 17, 21, 0.14);
 }
 
 .rolebox-suggest:hover .rolebox-suggest-tip,
 .rolebox-suggest:focus-within .rolebox-suggest-tip {
-  visibility: visible;
-  pointer-events: auto;
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* A manual miss briefly shows its explanation without moving focus. */
-.rolebox-suggest[data-notice] .rolebox-suggest-tip {
-  visibility: visible;
-  pointer-events: auto;
-  opacity: 1;
-  transform: translateY(0);
+  display: block;
 }
 
 .rolebox-suggest[data-popover-dismissed="true"] .rolebox-suggest-tip {
-  visibility: hidden;
-  pointer-events: none;
-  opacity: 0;
+  display: none;
 }
 
 .rolebox-suggest-tip::after,
@@ -167,15 +152,13 @@ export const suggestCss = `
   height: 10px;
 }
 
-/* While the hint card is open it owns the space above the pill: the tooltip is
-   removed from layout (not merely transparent) so it can never overlap the
-   card or its buttons. */
-.rolebox-suggest[data-has-suggestion="true"] .rolebox-suggest-tip {
+/* Result cards own this space until they close; settings must not flash beneath them. */
+.rolebox-suggest[data-has-result="true"] .rolebox-suggest-tip {
   display: none;
 }
 
-/* The hint card shares the same settings footer as the hover/focus panel. */
-.rolebox-suggest-card {
+.rolebox-suggest-card,
+.rolebox-suggest-notice {
   box-sizing: border-box;
   position: absolute;
   right: 0;
@@ -248,92 +231,69 @@ export const suggestCss = `
   outline-offset: -2px;
 }
 
-/* Fill is the primary action: the only one that writes the composer. */
+/* Fill is the card's primary action. */
 .rolebox-suggest-card-fill {
   color: var(--rolebox-accent, rgb(65, 118, 230));
   background: var(--rolebox-surface-accent, rgb(228, 237, 253));
   border-color: transparent;
 }
 
-.rolebox-suggest-tip-title {
+.rolebox-suggest-notice-title {
   display: block;
   font-weight: 600;
 }
 
-.rolebox-suggest-tip-body {
+.rolebox-suggest-notice-body {
   display: block;
   margin-top: 2px;
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
 }
 
-.rolebox-suggest-auto-settings {
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
+.rolebox-suggest-mode-settings {
+  min-width: 220px;
 }
 
-.rolebox-suggest-auto-toggle {
-  box-sizing: border-box;
+.rolebox-suggest-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.rolebox-suggest-mode-label {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  width: 100%;
-  min-height: 28px;
-  padding: 2px 0;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  border-radius: 4px;
+  gap: 8px;
 }
 
-.rolebox-suggest-auto-toggle:focus-visible {
+.rolebox-suggest-mode-select {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 170px;
+  min-height: 28px;
+  padding: 2px 4px;
+  border: 1px solid var(--rolebox-border-hairline, rgba(15, 17, 21, 0.12));
+  border-radius: 4px;
+  background: var(--rolebox-popover-surface, rgb(255, 255, 255));
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.rolebox-suggest-mode-select:focus-visible {
   outline: 2px solid var(--rolebox-focus-ring, rgb(65, 118, 230));
   outline-offset: 2px;
 }
 
-.rolebox-suggest-auto-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
-  white-space: nowrap;
-}
-
-.rolebox-suggest-auto-track {
-  display: inline-block;
-  position: relative;
-  width: 26px;
-  height: 16px;
-  border-radius: 8px;
-  background: var(--rolebox-ink-glyph, rgb(129, 133, 140));
-}
-
-.rolebox-suggest-auto-track::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--rolebox-popover-surface, rgb(255, 255, 255));
-}
-
-.rolebox-suggest-auto-toggle[aria-checked="true"] .rolebox-suggest-auto-track {
-  background: var(--rolebox-accent, rgb(65, 118, 230));
-}
-
-.rolebox-suggest-auto-toggle[aria-checked="true"] .rolebox-suggest-auto-track::after {
-  left: 12px;
-}
-
-.rolebox-suggest-auto-description {
+.rolebox-suggest-mode-description {
   display: block;
-  margin-top: 2px;
+  margin-top: 4px;
   color: var(--rolebox-ink-muted, rgb(97, 102, 107));
 }
 
@@ -353,7 +313,6 @@ export const suggestCss = `
 
 @media (prefers-reduced-motion: reduce) {
   .rolebox-suggest-button,
-  .rolebox-suggest-tip,
   .rolebox-suggest-button[data-state="loading"] .rolebox-suggest-glyph {
     transition: none;
     animation: none;
@@ -368,13 +327,14 @@ export const suggestClass = {
   glyph: "rolebox-suggest-glyph",
   label: "rolebox-suggest-label",
   tip: "rolebox-suggest-tip",
-  tipTitle: "rolebox-suggest-tip-title",
-  tipBody: "rolebox-suggest-tip-body",
-  autoSettings: "rolebox-suggest-auto-settings",
-  autoToggle: "rolebox-suggest-auto-toggle",
-  autoState: "rolebox-suggest-auto-state",
-  autoTrack: "rolebox-suggest-auto-track",
-  autoDescription: "rolebox-suggest-auto-description",
+  srOnly: "rolebox-suggest-sr-only",
+  notice: "rolebox-suggest-notice",
+  noticeTitle: "rolebox-suggest-notice-title",
+  noticeBody: "rolebox-suggest-notice-body",
+  modeSettings: "rolebox-suggest-mode-settings",
+  modeLabel: "rolebox-suggest-mode-label",
+  modeSelect: "rolebox-suggest-mode-select",
+  modeDescription: "rolebox-suggest-mode-description",
   card: "rolebox-suggest-card",
   cardEyebrow: "rolebox-suggest-card-eyebrow",
   cardText: "rolebox-suggest-card-text",
