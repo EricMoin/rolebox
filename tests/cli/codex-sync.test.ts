@@ -22,7 +22,7 @@ import {
   unregisterCodexPlugin,
   writeCodexPluginBundle,
   type CodexPluginBundlePaths,
-} from "../../src/platform/adapters/codex/plugin-bundle.ts";
+} from "../../src/platform/adapters/codex/installation/plugin-bundle.ts";
 
 // This file NEVER touches the developer's real Codex home: CODEX_HOME (and the
 // XDG dirs rolebox itself uses) are redirected into mkdtemp directories, and
@@ -699,7 +699,7 @@ describe("rolebox sync codex", () => {
 
   it("names the missing server entry before Codex is started", async () => {
     const { codexServerEntryWarning } = await import(
-      "../../src/platform/adapters/codex/sync.ts"
+      "../../src/platform/adapters/codex/installation/sync.ts"
     );
     const warning = codexServerEntryWarning({ serverEntry: "/missing/entry.js", serverEntryExists: false });
     expect(warning ?? "").toContain("/missing/entry.js");

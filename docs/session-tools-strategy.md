@@ -637,7 +637,7 @@ None required. All configuration is via tool parameters.
 1. All 10 tools registered as `plugin.tool` hooks in `src/plugin-hooks.ts`
 2. `tsc --noEmit` passes with zero errors
 3. `npm test -- tests/session/` passes all 5 test files (minimum 40+ test cases)
-4. `npm test -- tests/dispatch/` and `npm test -- tests/plugin-hooks.test.ts` pass with no regressions
+4. `npm test -- tests/dispatch/` and `npm test -- tests/entries/opencode/hooks.test.ts` pass with no regressions
 5. All client API calls use correct v2 flat parameter signatures with `directory: context.directory`
 6. All client API calls unwrap the `RequestResult` envelope with error handling
 7. `session_link` tool uses `HookDeps`; all other 9 tools use only `PluginInput["client"]`

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { verifyTeamSmoke, type TeamSmokeEvidence } from "../../scripts/team-smoke/verify.ts";
-import type { DshSessionEventLike } from "../../src/platform/adapters/dsh/session.ts";
+import type { DshSessionEventLike } from "../../src/platform/adapters/dsh/session/session.ts";
 import type { TeamEvent, TeamState } from "../../src/team/types.ts";
 
 function evidence(): TeamSmokeEvidence {

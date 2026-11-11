@@ -1,9 +1,9 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { defineCommand } from "citty";
-import { codexRecord } from "../../../../../platform/adapters/codex/app-server.ts";
+import { codexRecord } from "../../../../../platform/adapters/codex/app-server/app-server.ts";
 import { DEFAULT_DESKTOP_BRIDGE_RESPONSE_BYTES, probeCodexDesktopBridge, type CodexDesktopBinding } from "../../../../../platform/adapters/codex/desktop/bridge.ts";
-import { CodexParentNotifications } from "../../../../../platform/adapters/codex/parent-notifications.ts";
+import { CodexParentNotifications } from "../../../../../platform/adapters/codex/graph/parent-notifications.ts";
 
 export function readCodexDesktopBinding(path: string): CodexDesktopBinding {
   try {

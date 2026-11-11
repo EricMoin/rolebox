@@ -6,11 +6,11 @@ const environment = { ...process.env };
 delete environment.ROLEBOX_BROWSE_LIVE;
 delete environment.ROLEBOX_BROWSE_ENGINE;
 const unitFiles = [
-  "tests/browse/", "tests/recording/", "tests/e2e.test.ts", "tests/dsh-cordis-e2e.test.ts", "tests/dsh-plugin.test.ts",
-  "tests/dsh-browse-registration.test.ts", "tests/platform/codex-mcp.test.ts",
-  "tests/platform/dsh-browse-context.test.ts", "tests/platform/dsh-browse-policy.test.ts",
-  "tests/platform/dsh-browse-presentation.test.ts", "tests/platform/pi-browse-grants.test.ts",
-  "tests/tool-assembly-browse.test.ts", "tests/browse-use-gate.test.ts", "tests/hooks/system-transform.test.ts",
+  "tests/browse/", "tests/recording/", "tests/integration/e2e.test.ts", "tests/integration/dsh/cordis-e2e.test.ts", "tests/entries/dsh/entry.test.ts",
+  "tests/entries/dsh/browse-registration.test.ts", "tests/platform/adapters/codex/mcp/mcp.test.ts",
+  "tests/platform/adapters/dsh/context/browse-context.test.ts", "tests/platform/adapters/dsh/tools/browse-policy.test.ts",
+  "tests/platform/adapters/dsh/tools/browse-presentation.test.ts", "tests/platform/adapters/pi/tools/browse-grants.test.ts",
+  "tests/platform/tool-assembly-browse.test.ts", "tests/loader/browse-use-gate.test.ts", "tests/hooks/system-transform.test.ts",
 ];
 const results: Array<{ name: string; code: number }> = [];
 

@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { codexRecord, type CodexRecord } from "../app-server.ts";
-import { MCP_LATEST_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS } from "../mcp-protocol.ts";
-import type { CodexParentNotificationStatus } from "../parent-notifications.ts";
+import { codexRecord, type CodexRecord } from "../app-server/app-server.ts";
+import { MCP_LATEST_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS } from "../mcp/mcp-protocol.ts";
+import type { CodexParentNotificationStatus } from "../graph/parent-notifications.ts";
 import { JsonLineBuffer, JsonLineLimitError } from "./jsonl-buffer.ts";
 
 export const DEFAULT_DESKTOP_BRIDGE_RESPONSE_BYTES = 16 * 1024 * 1024;

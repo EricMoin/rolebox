@@ -4,9 +4,8 @@
  * This barrel exports all types, interfaces, and utilities needed by
  * consumers building against the rolebox platform abstraction.
  *
- * Import paths:
- *   - Internal (within rolebox):  import { ... } from "../platform/index.ts"
- *   - External (package export):  import { ... } from "rolebox/platform"
+ * Internal consumers import this barrel from "../platform/index.ts".
+ * Published harness entry points live under src/entries.
  */
 
 // ── Port interfaces ──────────────────────────────────────────────────────────

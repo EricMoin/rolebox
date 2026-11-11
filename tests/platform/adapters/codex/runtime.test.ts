@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { startCodexMcpServer, resolveCodexSessionId } from "../../../../src/entries/codex.ts";
-import type { CodexMcpServer } from "../../../../src/platform/adapters/codex/server.ts";
-import type { CodexRecord, CodexRpc } from "../../../../src/platform/adapters/codex/app-server.ts";
+import type { CodexMcpServer } from "../../../../src/platform/adapters/codex/mcp/server.ts";
+import type { CodexRecord, CodexRpc } from "../../../../src/platform/adapters/codex/app-server/app-server.ts";
 
 const environment = ["CODEX_HOME", "ROLEBOX_DATA_DIR", "ROLEBOX_CONFIG_DIR", "ROLEBOX_SESSION_ID"];
 let saved: Array<[string, string | undefined]>;

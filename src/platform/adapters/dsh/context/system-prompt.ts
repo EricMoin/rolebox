@@ -1,0 +1,305 @@
+/**
+ * Registers active-role instructions, available functions, live memory context,
+ * turn-scoped relevant-memory recall and the agent-curated session-focus block
+ * with the DSH prompt service.
+ * Memory uses the caller's session workspace and role identity; its provider
+ * opens and closes a synchronous store per refresh. Contributions: the
+ * `rolebox:role` section (order 50), `rolebox:context` (order 0),
+ * `rolebox:recall` (order 5), `rolebox:memory` (order 10),
+ * `rolebox:focus` (order 15), `rolebox:computer` (order 20) and
+ * `rolebox:browse` (order 30) — each registered only when its provider is
+ * supplied.
+ */
+
+import { buildAvailableFunctionsBlock } from "../../../../prompt/builder.ts";
+import { createSubLogger, formatError } from "../../../../logger.ts";
+import type { ResolvedFunction } from "../../../../types.ts";
+import type { DshAgentRegistrar } from "../roles/agent-registrar.ts";
+import type { ActiveRoleRef } from "../roles/role-switcher.ts";
+
+// ── Structural dsh types (@deepseek-ai/dsh-system-prompt, contract §3.1) ────
+
+/**
+ * Context passed to a system-prompt registry `text` provider.
+ *
+ * Structural subset: the providers read `agent.id` (the model-facing agent —
+ * ALSO the session id on the dsh harness, where the agent is the session:
+ * `@deepseek-ai/dsh-agent`'s typert wiring resolves an agent FROM a
+ * `SessionId`) and the explicit session id, accepted under both the dsh
+ * spelling (`sessionID`) and the rolebox spelling (`sessionId`) — and ignore
+ * everything else. The `agent.id` fallback makes the REAL harness assembly
+ * context (`{ agent, scope }`, built by `assembleContextFor` in
+ * `@deepseek-ai/dsh-agent` — no separate session field) resolve per-session.
+ */
+export type DshSystemPromptContext = {
+  /** The model-facing agent the prompt is being composed for. */
+  agent?: { id?: string } | null;
+  /** Session id, dsh spelling. */
+  sessionID?: string;
+  /** Session id, rolebox spelling. */
+  sessionId?: string;
+  [key: string]: unknown;
+};
+
+/** A named, ordered section of the model-facing system prompt. */
+export type DshSystemPromptSection = {
+  name: string;
+  order: number;
+  /** Render the section body for a context; `''` drops the section. */
+  text: (ctx: DshSystemPromptContext) => string;
+  interpolate?: boolean;
+};
+
+/** A named, ordered context contribution (same shape as a section). */
+export type DshSystemPromptContextEntry = {
+  name: string;
+  order: number;
+  text: (ctx: DshSystemPromptContext) => string;
+  interpolate?: boolean;
+};
+
+/**
+ * The dsh system-prompt registry seam this adapter registers into
+ * (structural subset of the `@deepseek-ai/dsh-system-prompt` service). The
+ * real service keys contributions by `name` and THROWS on a duplicate name
+ * within one layer — `prompt section "<name>" is already registered`
+ * (`@deepseek-ai/dsh-system-prompt/lib/index.js:142-144` — the `NamedEntries`
+ * duplicate guard — plus the `section()`/`context()` inserts at `:188` and
+ * `:198`); it does NOT replace. Both methods return the disposer that
+ * removes the contribution.
+ */
+export type DshSystemPromptRegistry = {
+  section(entry: DshSystemPromptSection): () => void;
+  context(entry: DshSystemPromptContextEntry): () => void;
+};
+
+// ── Adapter implementation ──────────────────────────────────────────────────
+
+/** Options for constructing a DshSystemPromptAdapter. */
+export interface DshSystemPromptAdapterOptions {
+  memoryContext?: (ctx: DshSystemPromptContext) => string;
+  computerContext?: (ctx: DshSystemPromptContext) => string;
+  /** The browse workflow block for the tools this session actually registered. */
+  browseContext?: (ctx: DshSystemPromptContext) => string;
+  /** Memories retrieved from the session's latest user prompt, per turn. */
+  recallContext?: (ctx: DshSystemPromptContext) => string;
+  /** The agent-curated session-focus block for a compacted session. */
+  focusContext?: (ctx: DshSystemPromptContext) => string;
+  /** Graph workers receive their target role through an agent-scoped section. */
+  isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
+  /** Registry holding all resolved agent definitions (roles + subagents). */
+  registrar: DshAgentRegistrar;
+  /**
+   * Shared per-session active-role holder (the {@link DshRoleSwitcher}'s
+   * `activeRole`). Read at render time so a switch reaches the next model
+   * turn.
+   */
+  activeRole: ActiveRoleRef;
+  /** Role id → resolved functions (the module-level `roleFunctionsMap`). */
+  roleFunctionsMap: Map<string, ResolvedFunction[]>;
+  /** Compatibility field; memory resolves its workspace from the live session. */
+  directory: string;
+}
+
+/**
+ * Registers rolebox's session-level system-prompt contributions into the dsh
+ * system-prompt registry, so the model-facing prompt carries the ACTIVE
+ * role's system prompt (the `rolebox:role` section) and its
+ * available-functions block (the `rolebox:context` context entry) — the
+ * session-level counterpart of the registrar's spawn-time injection.
+ */
+export class DshSystemPromptAdapter {
+  private readonly registrar: DshAgentRegistrar;
+  private readonly activeRole: ActiveRoleRef;
+  private readonly roleFunctionsMap: Map<string, ResolvedFunction[]>;
+  private readonly directory: string;
+  private readonly isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
+  private readonly memoryContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly recallContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly computerContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly browseContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly focusContext?: (ctx: DshSystemPromptContext) => string;
+  /** Registry disposers returned by `section()`/`context()` — released by `dispose()`. */
+  private readonly disposers: Array<() => void> = [];
+  private readonly _log;
+
+  /**
+   * @param options - See {@link DshSystemPromptAdapterOptions}.
+   */
+  constructor(options: DshSystemPromptAdapterOptions) {
+    this.registrar = options.registrar;
+    this.activeRole = options.activeRole;
+    this.roleFunctionsMap = options.roleFunctionsMap;
+    this.directory = options.directory;
+    this.isGraphWorker = options.isGraphWorker;
+    this.memoryContext = options.memoryContext;
+    this.recallContext = options.recallContext;
+    this.computerContext = options.computerContext;
+    this.browseContext = options.browseContext;
+    this.focusContext = options.focusContext;
+    this._log = createSubLogger("dsh-system-prompt");
+  }
+
+  /**
+   * Register the `rolebox:role` section and the `rolebox:context` context
+   * entry into the registry.
+   *
+   * Each disposer returned by the registry is collected and released by
+   * {@link dispose}. The real registry keys contributions by name and
+   * THROWS on a duplicate name within one layer — `prompt section "<name>"
+   * is already registered`
+   * (`@deepseek-ai/dsh-system-prompt/lib/index.js:142-144`, `:188`, `:198`);
+   * it does NOT replace. To keep a re-register (reload path) from throwing,
+   * the disposers collected by a previous `register()` are released first,
+   * freeing the names before they are registered again.
+   *
+   * @param registry - The structural dsh system-prompt registry seam.
+   */
+  register(registry: DshSystemPromptRegistry): void {
+    // The real registry throws on a duplicate name in the same layer (it
+    // does not replace), so a second register() must clear its own names
+    // before re-inserting them.
+    this.dispose();
+    this.disposers.push(
+      registry.section({
+        name: "rolebox:role",
+        order: 50,
+        text: (ctx) => this.isGraphWorker?.(ctx) ? "" : resolveActiveRolePrompt(ctx, this.registrar, this.activeRole),
+      }),
+      registry.context({
+        name: "rolebox:context",
+        order: 0,
+        text: (ctx) => this.isGraphWorker?.(ctx) ? "" : buildContextBlock(ctx, this.activeRole, this.roleFunctionsMap),
+      }),
+    );
+    if (this.recallContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:recall",
+        order: 5,
+        interpolate: false,
+        text: this.recallContext,
+      }));
+    }
+    if (this.memoryContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:memory",
+        order: 10,
+        interpolate: false,
+        text: this.memoryContext,
+      }));
+    }
+    if (this.focusContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:focus",
+        order: 15,
+        interpolate: false,
+        text: this.focusContext,
+      }));
+    }
+    if (this.computerContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:computer",
+        order: 20,
+        interpolate: false,
+        text: this.computerContext,
+      }));
+    }
+    if (this.browseContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:browse",
+        order: 30,
+        interpolate: false,
+        text: this.browseContext,
+      }));
+    }
+  }
+
+  /**
+   * Remove every registered contribution from the dsh registry.
+   * Idempotent — safe to call multiple times.
+   */
+  dispose(): void {
+    const disposers = this.disposers.splice(0);
+    for (const disposer of disposers) {
+      try {
+        disposer();
+      } catch (err) {
+        this._log.debug("dsh system-prompt disposer failed", {
+          error: formatError(err),
+        });
+      }
+    }
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the session id from a provider context.
+ *
+ * Acceptance order: the explicit dsh spelling (`sessionID`), the rolebox
+ * spelling (`sessionId`), then — matching the REAL harness assembly context
+ * (`{ agent, scope }` from `@deepseek-ai/dsh-agent`'s `assembleContextFor`,
+ * where the model-facing agent IS the session) — the agent's own `id`.
+ */
+function resolveSessionId(ctx: DshSystemPromptContext): string | undefined {
+  if (typeof ctx.sessionID === "string") return ctx.sessionID;
+  if (typeof ctx.sessionId === "string") return ctx.sessionId;
+  if (typeof ctx.agent?.id === "string") return ctx.agent.id;
+  return undefined;
+}
+
+/**
+ * Resolve the ACTIVE role's full systemPrompt for a provider context.
+ *
+ * Resolution chain — every missing link yields `''`, which the registry's
+ * `renderPrompt` drops:
+ *   1. `ctx.agent?.id` — there IS a model-facing agent on the context
+ *   2. a session id on the context — dsh `sessionID`, rolebox `sessionId`,
+ *      or (the real harness context `{ agent, scope }`, where the agent is
+ *      the session) the agent's own `id`
+ *   3. `activeRole.get(sessionId)` — a role is active for that session
+ *   4. `registrar.getRegisteredAgents()` lookup — the active id resolves to
+ *      a registered definition
+ *
+ * @returns The active role definition's full `systemPrompt`, or `''` when
+ *          no role is active (base-agent behavior).
+ */
+function resolveActiveRolePrompt(
+  ctx: DshSystemPromptContext,
+  registrar: DshAgentRegistrar,
+  activeRole: ActiveRoleRef,
+): string {
+  if (!ctx.agent?.id) return "";
+  const sessionId = resolveSessionId(ctx);
+  if (!sessionId) return "";
+  const activeId = activeRole.get(sessionId);
+  if (!activeId) return "";
+  const definition = registrar
+    .getRegisteredAgents()
+    .find((a) => a.id === activeId);
+  return definition?.systemPrompt ?? "";
+}
+
+/**
+ * Resolve the active role's available-functions block for a provider
+ * context — the session-level analog of the spawn-time contextProvider in
+ * `src/dsh-plugin.ts:386-393`.
+ *
+ * Returns `''` when no role is active for the session or the role has no
+ * resolved functions (the block builder itself returns `''` for an empty
+ * list, so `renderPrompt` drops the contribution either way).
+ */
+function buildContextBlock(
+  ctx: DshSystemPromptContext,
+  activeRole: ActiveRoleRef,
+  roleFunctionsMap: Map<string, ResolvedFunction[]>,
+): string {
+  const sessionId = resolveSessionId(ctx);
+  if (!sessionId) return "";
+  const activeId = activeRole.get(sessionId);
+  if (!activeId) return "";
+  const functions = roleFunctionsMap.get(activeId);
+  if (!functions || functions.length === 0) return "";
+  return buildAvailableFunctionsBlock(functions);
+}

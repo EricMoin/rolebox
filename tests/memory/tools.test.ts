@@ -259,7 +259,7 @@ describe("memory tools", () => {
 
       // execute() is typed with z.infer<...>, i.e. the PARSED argument shape, and
       // the host rejects out-of-enum values before it calls execute()
-      // (src/platform/adapters/codex/tool-factory.ts:227 safeParse -> parsed.data).
+      // (src/platform/adapters/codex/mcp/tool-factory.ts:227 safeParse -> parsed.data).
       // Assert the rejection at the boundary that performs it.
       const updateTool = createMemoryUpdateTool();
       const updateSchema = z.object(updateTool.args);

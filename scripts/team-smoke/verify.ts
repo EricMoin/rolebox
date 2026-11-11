@@ -1,4 +1,4 @@
-import type { DshSessionEventLike } from "../../src/platform/adapters/dsh/session.ts";
+import type { DshSessionEventLike } from "../../src/platform/adapters/dsh/session/session.ts";
 import type { TeamEvent, TeamMember, TeamState } from "../../src/team/types.ts";
 
 export interface TeamSmokeEvidence {

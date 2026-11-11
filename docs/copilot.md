@@ -10,8 +10,8 @@ This replaced the former turn-end decision pipeline (heuristic `rules` and the L
 
 Composer draft suggestions are a **dsh web** feature:
 
-- the **host half** (`src/copilot/draft/`, `src/copilot/config.ts`, `src/copilot/config-sources.ts`, `src/platform/adapters/dsh/copilot-suggest.ts`, `src/platform/adapters/dsh/web-copilot-route.ts`) resolves the acting role, composes the role/project/global config, reads the transcript and makes the one-shot model call;
-- the **browser half** (`src/platform/adapters/dsh/web-ui/suggest-dock.tsx`) is the composer tool-row pill — a sparkle glyph plus a short label — that watches the session and shows the hint card;
+- the **host half** (`src/copilot/draft/`, `src/copilot/config.ts`, `src/copilot/config-sources.ts`, `src/platform/adapters/dsh/web/copilot-suggest.ts`, `src/platform/adapters/dsh/web/routes/web-copilot-route.ts`) resolves the acting role, composes the role/project/global config, reads the transcript and makes the one-shot model call;
+- the **browser half** (`src/platform/adapters/dsh/web/ui/suggest-dock.tsx`) is the composer tool-row pill — a sparkle glyph plus a short label — that watches the session and shows the hint card;
 
 No other host (opencode, Pi, Codex) registers the button or the route. A dsh profile without the host `llm` service still boots; a fully configured suggestion request then answers `disabled` with reason `llm-unavailable`, and the button stops asking for that session.
 

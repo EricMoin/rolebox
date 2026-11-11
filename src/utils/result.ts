@@ -22,7 +22,7 @@
 //   - RecoveryStrategyResult (src/recovery/types.ts) — a 4-state machine
 //     (success | retry | next_strategy | abort), not a 2-arm verdict.
 //   - HotReloadResult (src/core/services/hot-reload-service.ts) and
-//     DshRoleboxReloadResult (src/platform/adapters/dsh/rolebox-reload.ts) —
+//     DshRoleboxReloadResult (src/platform/adapters/dsh/roles/rolebox-reload.ts) —
 //     SEALED multi-outcome unions, not 2-arm verdicts: a `reloaded` arm whose
 //     payload depends on the scope that actually ran (fast = one role's id and
 //     skill count; full = discovered / resolved / skipped counts), plus two
@@ -34,7 +34,7 @@
 //   - Host-facing callbacks keep their "no opinion" form: the dsh
 //     presentCall / presentResult / finalizeContent members are typed
 //     X | undefined BY THE HOST CONTRACT (see the honesty rule at
-//     src/platform/adapters/dsh/tool-factory.ts:742-744) and undefined there
+//     src/platform/adapters/dsh/tools/tool-factory.ts:742-744) and undefined there
 //     means "no opinion / fall back to the host default", never "failed".
 //   - A lookup miss is a query answer, not a failure: Map.get, getService
 //     and the probe* optional-capability seams stay X | undefined.

@@ -498,9 +498,9 @@ does NOT set. The decision is recorded here so a future maintainer does not
   (`presentCall`), and the completed-state result view (`presentResult`)
   (`source:packages/core/tools/src/index.ts`). rolebox emits them
   only for tools whose display data it actually holds — enumerated in
-  `DSH_TOOL_PRESENTATION` (`src/platform/adapters/dsh/tool-factory.ts`)
+  `DSH_TOOL_PRESENTATION` (`src/platform/adapters/dsh/tools/tool-factory.ts`)
   with the field-by-field rationale at
-  `src/platform/adapters/dsh/tool-factory.ts`. For every other tool the
+  `src/platform/adapters/dsh/tools/tool-factory.ts`. For every other tool the
   field is absent, which is the honest dsh generic fallback — never an
   `undefined` placeholder.
   An installed `output.presentationMeta` callback must return lossless JSON on
@@ -619,7 +619,7 @@ but must not extend the harness's event vocabulary. The boundary is:
   `KNOWN_SESSION_EVENT_TYPES` — the event vocabulary generated from the harness's
   own `SessionEventMap`
   (`source:packages/core/session/src/known-event-types.ts`). This is
-  enforced mechanically by `tests/platform/dsh-no-custom-session-events.test.ts`,
+  enforced mechanically by `tests/platform/adapters/dsh/contracts/no-custom-session-events.test.ts`,
   which scans `src/platform/adapters/dsh/**` and `src/entries/dsh.ts`; it resolves
   inline literals, named string constants, and non-interpolated template
   literals, and fails on any non-catalog or statically unresolvable type. The
@@ -633,7 +633,7 @@ This rule closes the defect where a rolebox-owned event made the harness refuse 
 The concrete instance of the §4.1.1 boundary is the per-session **active-role**
 selection. rolebox persists it in a rolebox-owned, workspace-scoped JSON sidecar
 at `.rolebox/state/activerole-<dirHash>.json`
-(`src/platform/adapters/dsh/active-role-store.ts`; schema `version: 1`,
+(`src/platform/adapters/dsh/roles/active-role-store.ts`; schema `version: 1`,
 `{ version, sessions: [{ sessionId, roleId, updatedAt }] }`), never in the
 session log. The store is constructed from the workspace directory
 (`process.cwd()`) and injected into the shared `ActiveRoleRef` at
@@ -712,7 +712,7 @@ in `DshAgentRegistrar`:
   e.g. `openrouter-anthropic/anthropic/claude-opus-4.8` → provider
   `openrouter-anthropic`, model `anthropic/claude-opus-4.8`). Both
   `AgentOptions.provider` and `AgentOptions.model` are set
-  (`src/platform/adapters/dsh/agent-registrar.ts`).
+  (`src/platform/adapters/dsh/roles/agent-registrar.ts`).
 - A bare name, `"default"`, or a malformed value (no slash / leading slash /
   trailing slash) has no split: it overrides `model` only and leaves the base
   `provider` untouched (the pre-split behavior).
@@ -741,7 +741,7 @@ The switch records the active role for the session and the override is applied
 to **subsequent spawns** through the active-role seam; the currently running
 session's model is not mutated. The `model` field on the `GET /rolebox/roles`
 list item (`RoleSwitchRoleDto.model`,
-`src/platform/adapters/dsh/web-role-switch-route.ts`)
+`src/platform/adapters/dsh/web/routes/web-role-switch-route.ts`)
 is **display-only** — it reports the role's configured model for the UI and does
 not participate in switching. The same list item reports the definition's tool
 policy as `tools: { allow: string[], deny: string[] } | null` (both arrays are
@@ -777,7 +777,7 @@ agent ids and **delegates real spawning to one of these host providers by name**
 provider named by its `spawnProviderName` option (default `"spawn"`, wired from
 config in `src/entries/dsh.ts`), refusing recursion when that name
 collides with a rolebox agent id
-(`src/platform/adapters/dsh/agent-registrar.ts`).
+(`src/platform/adapters/dsh/roles/agent-registrar.ts`).
 
 ```ts
 class SubagentRuntime extends Service {
@@ -837,7 +837,7 @@ can be rejected under version drift. rolebox avoids encoding the shape itself:
 it advertises the capabilities its delegated host provider supports and
 delegates at the provider level, forwarding the request to the host provider by
 name (`{...request}`) rather than re-declaring or re-validating the host's
-capability set (`src/platform/adapters/dsh/agent-registrar.ts`).
+capability set (`src/platform/adapters/dsh/roles/agent-registrar.ts`).
 A capability-shape change in a future dsh line therefore needs no rolebox
 change — the host provider and the dsh service that validates it own that
 contract. The `SubagentCapabilities` key set is asserted exactly by
@@ -921,13 +921,13 @@ the fresh-start signal: the continuation manager reads `prepared.seed` at
 present array is persisted through the child's `create.seed`. rolebox's
 `DshAgentRegistrar.buildProvider().prepareContinuable` returns `{}` (an empty
 spec) and touches none of `request`
-(`src/platform/adapters/dsh/agent-registrar.ts`); the erased
+(`src/platform/adapters/dsh/roles/agent-registrar.ts`); the erased
 compile-time guard `_DshContinuableFreshStartGuard`
-(`src/platform/adapters/dsh/agent-registrar.ts`) fails
+(`src/platform/adapters/dsh/roles/agent-registrar.ts`) fails
 `npm run typecheck` if `seed` ever becomes required — which would make the
 fresh-start choice inexpressible. The contract is pinned by
-`tests/dsh-dispatch.test.ts` (continuable provider handling) and
-`tests/platform/agent-registrar.test.ts`.
+`tests/platform/adapters/dsh/execution/dispatch.test.ts` (continuable provider handling) and
+`tests/platform/adapters/dsh/roles/agent-registrar.test.ts`.
 
 ### 4.4 Web-UI extension: host route + browser slot plugin (source)
 
@@ -963,7 +963,7 @@ export interface WebRoute {
 registrations throw (`webserver: duplicate prefix route "…"`,
 `source:packages/host/webserver/src/index.ts`). rolebox consumes this surface
 structurally (duck typing — never imports `@deepseek-ai/*`,
-`src/platform/adapters/dsh/web-role-switch-route.ts`) and registers one
+`src/platform/adapters/dsh/web/routes/web-role-switch-route.ts`) and registers one
 `{ kind: 'prefix', path: '/rolebox', handler }` route
 (`web-role-switch-route.ts`). The service is optional: `apply()` probes
 `ctx.get("webServer")` and skips route registration when absent (headless
@@ -1016,7 +1016,7 @@ export `"./client"` (package.json), and the browser half requires the bundle
 envelope id to EQUAL the boot-graph row id, so the built bundle is wrapped with
 `id: "rolebox"` (scripts/build-dsh-web-client.ts) — dsh's own bundles satisfy
 this trivially because their row name IS their package name. Both sides are
-pinned by `tests/dsh-plugin.test.ts` ("dsh packaging exposes the
+pinned by `tests/entries/dsh/entry.test.ts` ("dsh packaging exposes the
 dsh-client-modules resolution seam").
 
 #### 4.4.3 Slot registry + `ctx.slots.inject` pattern
@@ -1040,7 +1040,7 @@ synchronously when the declaration already exists, otherwise inside the declarin
 unload cancels pending waits and removes active contributions
 (`source:packages/client/ui-renderer/src/client/registry.ts`). The
 canonical registrant posture — the one rolebox's client entry mirrors
-(`src/platform/adapters/dsh/web-ui/client.ts`) — is
+(`src/platform/adapters/dsh/web/ui/client.ts`) — is
 dsh-client-ui-conversation's QueueDock entry: `ctx.slots.inject(key, () =>
 ctx.slots.register({name, id, order, locale}, Component))`
 (`source:packages/client/ui-conversation/src/client/queue/QueueDock.tsx`).
@@ -1104,7 +1104,7 @@ wraps the output in this exact envelope with `id: "rolebox"`.
 The monitoring surface adds two **read-only** endpoints under the existing
 `/rolebox` prefix route (§4.4.1) — no existing endpoint is touched. They are
 dispatched by the same structural host-route module pattern:
-`DshRoleboxMonitorWebRoute` (`src/platform/adapters/dsh/web-rolebox-monitor-route.ts`)
+`DshRoleboxMonitorWebRoute` (`src/platform/adapters/dsh/web/routes/web-rolebox-monitor-route.ts`)
 provides the handler and is composed with the role-switch surface into a single
 `{ kind: 'prefix', path: '/rolebox', handler }` registration in `apply()` (after
 the loop-coordinator block, whose live-loop census the monitor needs — see the
@@ -1133,7 +1133,7 @@ producers to `notifyChanged` and nothing else:
      persists on EVERY loop state transition, so the signal is free;
   2. **`GraphToolSet.subscribeGraphTerminal`** — the same observer registry the
      dispatch adapter uses for nested-graph liveness;
-  3. **`watchRoleboxState`** (`src/platform/adapters/dsh/watch-rolebox-state.ts`)
+  3. **`watchRoleboxState`** (`src/platform/adapters/dsh/web/watch-rolebox-state.ts`)
      — a debounced `fs.watch` over `.rolebox/state` and its `progress` /
      `checkpoints` subdirectories, which covers what the two in-process hooks do
      not see: node-level engine writes, dispatch task files, progress and
@@ -1166,7 +1166,7 @@ sub-path (`/roles*`) to the role-switch handler via its optional `delegate`
 option (`web-rolebox-monitor-route.ts`). Both `webRouteRegistered` and
 `monitorRouteRegistered` are set from this one registration outcome, so the
 monitor endpoints are reachable on a real host. The route tests cover the
-composed handler serving both surfaces, and `tests/dsh-plugin.test.ts` includes
+composed handler serving both surfaces, and `tests/entries/dsh/entry.test.ts` includes
 a duplicate-rejecting registrar double (mirroring the real host) proving exactly
 one `/rolebox` registration happens.
 
@@ -1179,7 +1179,7 @@ one `/rolebox` registration happens.
     `EngineGraphSnapshot[]`: native persisted graph records, filtered by durable
     invocation origin when a session is supplied);
   - **sessions** — count + most recent ids from `DshSessionStoreLike.list()`;
-  - **per-session active role** — `DshRoleSwitcher.getActive(sessionId)` (`src/platform/adapters/dsh/role-switcher.ts`,
+  - **per-session active role** — `DshRoleSwitcher.getActive(sessionId)` (`src/platform/adapters/dsh/roles/role-switcher.ts`,
     the session's active role id or `null` for the base agent).
 - **`GET /rolebox/metrics`** — the in-process dispatch metrics snapshot
   `metrics.snapshot()` (`src/dispatch/persistence/metrics.ts`):
@@ -1215,7 +1215,7 @@ filter does not narrow the workspace session census or dispatch metrics.
 
 **The log view route (`GET /rolebox/logs`).** A third read-only surface, built
 on the same structural host-route pattern:
-`DshRoleboxLogsWebRoute` (`src/platform/adapters/dsh/web-rolebox-logs-route.ts`)
+`DshRoleboxLogsWebRoute` (`src/platform/adapters/dsh/web/routes/web-rolebox-logs-route.ts`)
 registers its OWN `{ kind: 'prefix', path: '/rolebox/logs' }` route. That is a
 different `(kind, path)` pair from the composed `/rolebox` registration, so the
 host's duplicate check does not fire and the run console's route keeps every
@@ -1245,9 +1245,9 @@ never prevents the log route's attempt), so a web surface can never fail the
 entry's boot. In a live host the request routing follows the longest-prefix rule
 above: `/rolebox/logs` is served by this route, every other `/rolebox/*`
 request by the composed one (see `docs/logging.md`, "The live view").
-`tests/dsh-plugin.test.ts` asserts the registration against the registrar and
+`tests/entries/dsh/entry.test.ts` asserts the registration against the registrar and
 drives the mounted handler (`GET` = `200` view JSON, `POST` = `405`);
-`tests/dsh-cordis-e2e.test.ts` pins the two-route table on a real cordis boot.
+`tests/integration/dsh/cordis-e2e.test.ts` pins the two-route table on a real cordis boot.
 
 #### 4.4.7 Client entries: Rolebox settings and session Conversation views
 
@@ -1262,7 +1262,7 @@ right-Sidebar services are not used.
 
 **(a) The `settings.section` page — "Rolebox" (what roles are loaded)**
 
-`src/platform/adapters/dsh/web-ui/client.ts` adds, alongside the role chip,
+`src/platform/adapters/dsh/web/ui/client.ts` adds, alongside the role chip,
 the canonical QueueDock registrant posture (§4.4.3):
 
 ```ts
@@ -1302,7 +1302,7 @@ shell owns the open state.
   inject factory resolves `(sessionId) => ({ sessionId })`).
 - **Navigation** — the default settings page points to the Rolebox view beside
   Chat and Trajectory. No Sidebar-opening callback is injected.
-- **The page** (`src/platform/adapters/dsh/web-ui/rolebox-roles-panel.tsx` +
+- **The page** (`src/platform/adapters/dsh/web/ui/rolebox-roles-panel.tsx` +
   `rolebox-roles-panel.css.ts`) fetches the loaded-role list from
   `GET /rolebox/roles` (the bare array served by the §4.4.1 prefix route)
   same-origin on mount and on manual Refresh, and renders one card per role in
@@ -1350,7 +1350,7 @@ current-session graph while retaining the original attention, ledger, session,
 loop and metrics sections. Refreshes retain a manual graph selection; changing
 sessions clears the displayed snapshot and discards late responses.
 
-- **The body** (`src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx` +
+- **The body** (`src/platform/adapters/dsh/web/ui/rolebox-monitor-panel.tsx` +
   `rolebox-monitor-panel.css.ts`) fetches `GET /rolebox/status?sessionId=<id>` and
   `GET /rolebox/metrics` same-origin (relative paths on the dsh web server)
   and renders the run console with loading/error/empty states. It reads those
@@ -1387,7 +1387,7 @@ sessions clears the displayed snapshot and discards late responses.
   containment. Wide topology figures and expanded native JSON records keep
   horizontal scrolling local while passing vertical wheel input to the
   Conversation. The browser layout regression runs with
-  `ROLEBOX_DSH_WEB_LAYOUT_LIVE=1 npm test -- tests/platform/dsh-web-ui-monitor-layout.test.ts`;
+  `ROLEBOX_DSH_WEB_LAYOUT_LIVE=1 npm test -- tests/platform/adapters/dsh/web/ui/monitor-layout.test.ts`;
   it uses the installed host's active Conversation CSS and checks full, sparse,
   loading, empty and error states, expanded lists, wheel input and keyboard
   scrolling. The body keeps its own `<h2>Rolebox</h2>`
@@ -1486,7 +1486,7 @@ full profile by the `system-prompt` bundle row). Its `SystemPrompt` service is a
 `source:packages/core/system-prompt/src/index.ts`; `section()`,
 `context()`, and `renderPrompt()`. rolebox's session-level
 role injection registers two contributions into it via `DshSystemPromptAdapter`
-(`src/platform/adapters/dsh/system-prompt.ts`, wired by
+(`src/platform/adapters/dsh/context/system-prompt.ts`, wired by
 `src/entries/dsh.ts`):
 
 - **Section `rolebox:role` — `order: 50`** — renders the ACTIVE role's full
@@ -1553,7 +1553,7 @@ result:           已声明图结构     (Declared graph)      ← completed ten
                   build · 2 个节点 · 1 条边
 ```
 
-The catalog lives in `src/platform/adapters/dsh/web-ui/tool-view-descriptors.ts`
+The catalog lives in `src/platform/adapters/dsh/web/ui/tool-view-descriptors.ts`
 (icon + verb + noun + salient-argument projection per tool), the glyphs are
 inline SVG (`tool-view-icons.tsx` — the bundle imports no host UI package), and
 the copy is derived from one table into `en` + `zh` dictionaries
@@ -1576,7 +1576,7 @@ through the `@deepseek-ai/dsh-skill` registry (`ctx.skills`), a layered merge of
 provider catalogs. rolebox registers one LAZY skill provider into it so every
 advertised skill name is resolvable by the `skill` tool. This section records the
 verified `0.1.5-rc.1` source surface that the provider
-(`src/platform/adapters/dsh/skill-provider.ts`) is built against.
+(`src/platform/adapters/dsh/roles/skill-provider.ts`) is built against.
 
 #### 4.6.1 Service shape and the registration seam
 
@@ -1722,9 +1722,9 @@ a duplicate name OUTRIGHT, and rank decides duplicates only WITHIN one layer
   from it — a provider CANNOT see the calling session or agent.
 - rolebox's active-role selection IS per-session: `ActiveRoleStore` persists
   `{ version, sessions: [{ sessionId, roleId, updatedAt }] }`, keyed by
-  `sessionId` (`src/platform/adapters/dsh/active-role-store.ts`),
+  `sessionId` (`src/platform/adapters/dsh/roles/active-role-store.ts`),
   read through the `ActiveRoleRef.snapshot()` seam (`skill-provider.ts`;
-  `src/platform/adapters/dsh/role-switcher.ts`).
+  `src/platform/adapters/dsh/roles/role-switcher.ts`).
 - Because it cannot receive a session id, the provider advertises the
   workspace-wide union: the skills of {roles active in ANY recorded session}
   plus {the promoted default role}, walking each role's own skills and then its
@@ -1987,7 +1987,7 @@ started servers. Unsupported capabilities remain explicit tool results.
 See the packaged [LSP configuration guide](../skills/rolebox-config/references/runtime.md#lsp)
 for binaries, filters, position encoding and example calls.
 
-`tests/dsh-lsp.test.ts` boots real Cordis, system-prompt and tool-runtime services,
+`tests/entries/dsh/lsp.test.ts` boots real Cordis, system-prompt and tool-runtime services,
 then calls all 32 tools. `lsp_servers` only inspects discovery and manager state;
 the other operations exercise a deterministic stdio server. Tests assert each
 tool's success content, RPC methods and file-writing effects, and record server
@@ -2087,10 +2087,10 @@ real packages. Conformance of the structural mirrors is checked by
   the resolved request to the provider named by `spawnProviderName` (default
   `"spawn"`, registered by `@deepseek-ai/dsh-subagent-spawn-in-process`), with a
   recursion guard against an agent-id collision
-  (`src/platform/adapters/dsh/agent-registrar.ts`; config wiring
+  (`src/platform/adapters/dsh/roles/agent-registrar.ts`; config wiring
   `src/entries/dsh.ts`). Covered by unit tests against a fake registry
-  double and by the cordis e2e harness (`tests/dsh-cordis-e2e.test.ts`,
-  `tests/platform/agent-registrar.test.ts`). **Still unverified:** a live
+  double and by the cordis e2e harness (`tests/integration/dsh/cordis-e2e.test.ts`,
+  `tests/platform/adapters/dsh/roles/agent-registrar.test.ts`). **Still unverified:** a live
   end-to-end boot against the deployed dsh profile (`~/.dsh/profiles/...`) that
   proves a real child agent spawns, runs, and returns output through the
   installed `spawn` provider — the provider packages depend on the agent loop

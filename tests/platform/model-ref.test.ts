@@ -1,7 +1,7 @@
 
 /**
  * model-ref tests — the shared, platform-neutral `splitModel` helper extracted
- * from the Pi role switcher (src/platform/adapters/pi/role-switcher.ts).
+ * from the Pi role switcher (src/platform/adapters/pi/roles/role-switcher.ts).
  *
  * Verifies first-slash semantics: the provider is the segment before the first
  * slash and the model id is everything after it, so multi-segment ids survive
@@ -57,12 +57,12 @@ describe("splitModel", () => {
 
 describe("pi role-switcher uses the shared helper", () => {
   const switcherSource = readFileSync(
-    resolve(import.meta.dirname, "../../src/platform/adapters/pi/role-switcher.ts"),
+    resolve(import.meta.dirname, "../../src/platform/adapters/pi/roles/role-switcher.ts"),
     "utf-8",
   );
 
   it("imports splitModel from the shared platform module", () => {
-    expect(switcherSource).toContain('from "../../model-ref.ts"');
+    expect(switcherSource).toContain('from "../../../model-ref.ts"');
   });
 
   it("no longer declares a local splitModel function", () => {

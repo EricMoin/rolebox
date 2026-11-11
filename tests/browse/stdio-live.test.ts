@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { BROWSE_TOOL_NAMES } from "../../src/loader/browse-grants.ts";
 import { parseSnapshotRefs } from "../../src/browse/snapshot.ts";
 import { hasPngSignature } from "../../src/computer/png.ts";
-import type { McpToolCallResult } from "../../src/platform/adapters/codex/tool-factory.ts";
+import type { McpToolCallResult } from "../../src/platform/adapters/codex/mcp/tool-factory.ts";
 import { FIXTURE_DOWNLOAD_BODY, startFixtureSite, type FixtureSite } from "./fixtures/fixture-site.ts";
 import { startStdioClient } from "./helpers/stdio-client.ts";
 

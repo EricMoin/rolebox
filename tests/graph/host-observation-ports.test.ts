@@ -1,7 +1,7 @@
 /**
  * P2 part 2 — the OBSERVATION path at the shipped host assembly.
  *
- * The platform ports are pinned in `tests/platform/outcome-observation.test.ts`;
+ * The platform ports are pinned in `tests/integration/platform/outcome-observation.test.ts`;
  * THIS file pins what the host does with them:
  *
  *   - F2 / W4: a create whose confirmation never arrived (the execution row stays

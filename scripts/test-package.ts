@@ -175,7 +175,21 @@ try {
     process.stdout.write(command(process.execPath, [desktopProbe], consumer, 60_000));
   }
   const typeProbe = join(consumer, "probe.ts");
-  await writeFile(typeProbe, 'import tui from "rolebox/tui"; import { startCodexMcpServer } from "rolebox/codex"; import opencode from "rolebox"; import server from "rolebox/server"; import pi from "rolebox/pi"; import dsh from "rolebox/dsh"; const id: string | undefined = tui.id; void [id, startCodexMcpServer, opencode, server, pi, dsh];');
+  await writeFile(typeProbe, `
+    import tui from "rolebox/tui";
+    import { startCodexMcpServer } from "rolebox/codex";
+    import opencode from "rolebox";
+    import server from "rolebox/server";
+    import pi from "rolebox/pi";
+    import dsh from "rolebox/dsh";
+    import { name as clientName } from "rolebox/client";
+    import type { RoleSwitchDockProps, SuggestDockProps, RoleboxRolesPanelProps } from "rolebox/client";
+    const id: string | undefined = tui.id;
+    const name: string = clientName;
+    type ClientProps = RoleSwitchDockProps | SuggestDockProps | RoleboxRolesPanelProps;
+    const props: ClientProps | undefined = undefined;
+    void [id, name, props, startCodexMcpServer, opencode, server, pi, dsh];
+  `);
   command(process.execPath, [join(repository, "node_modules/typescript/bin/tsc"), "--noEmit", "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022", "--strict", "--skipLibCheck", typeProbe], consumer);
   console.log("packed consumer declarations: PASS");
   const tuiProbe = join(consumer, "tui-probe.mjs");

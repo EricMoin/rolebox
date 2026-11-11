@@ -8,7 +8,7 @@ import {
   type CodexLaunchAuthority,
   type CodexRecord,
   type CodexRpc,
-} from "../../../../src/platform/adapters/codex/app-server.ts";
+} from "../../../../src/platform/adapters/codex/app-server/app-server.ts";
 import { CodexSessionAdapter } from "../../../../src/platform/adapters/codex/session.ts";
 
 const WORKSPACE = resolve("/path/to/project");

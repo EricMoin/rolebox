@@ -17,7 +17,7 @@
  * - `src/cli/commands/renderer/table-helpers.ts` and
  *   `src/cli/commands/renderer/layout.ts` — UTF-16 code-unit widths composed
  *   with the monitor helpers' column truncation.
- * - `src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx` — an
+ * - `src/platform/adapters/dsh/web/ui/rolebox-monitor-panel.tsx` — an
  *   ambient-locale `toLocaleTimeString` timestamp.
  * - `src/loop/loop-tools.ts`, `src/loop/worker-dispatch.ts` and
  *   `src/loop/coordinator.ts` — seconds-only `toFixed(1)s` duration

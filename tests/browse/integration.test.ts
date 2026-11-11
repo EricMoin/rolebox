@@ -44,7 +44,7 @@ import {
   type DshToolFamilyPolicyOptions,
   type DshToolGuardExecution,
   type DshToolGuardRegistry,
-} from "../../src/platform/adapters/dsh/role-tool-policy.ts";
+} from "../../src/platform/adapters/dsh/tools/role-tool-policy.ts";
 import { browseError } from "../../src/browse/types.ts";
 import { hasPngSignature } from "../../src/computer/png.ts";
 import type { ResolvedRole } from "../../src/types.ts";

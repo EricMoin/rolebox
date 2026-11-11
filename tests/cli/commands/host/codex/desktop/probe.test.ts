@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ probe: vi.fn(), inspect: vi.fn(), close: vi.fn
 vi.mock("../../../../../../src/platform/adapters/codex/desktop/bridge.ts", () => ({
   DEFAULT_DESKTOP_BRIDGE_RESPONSE_BYTES: 16 * 1024 * 1024, probeCodexDesktopBridge: mocks.probe,
 }));
-vi.mock("../../../../../../src/platform/adapters/codex/parent-notifications.ts", () => ({
+vi.mock("../../../../../../src/platform/adapters/codex/graph/parent-notifications.ts", () => ({
   CodexParentNotifications: mocks.parent,
 }));
 

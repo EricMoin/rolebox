@@ -8,7 +8,7 @@ private children remain scoped rolebox execution targets. The MCP runtime suppli
 session tools and the declared-graph engine. A lazy Codex app-server handles model
 requests; its workers' native tools use a separate sandboxed exec-server.
 
-Parity is enforced by the Codex tests: `tests/platform/codex-mcp.test.ts` (the protocol
+Parity is enforced by the Codex tests: `tests/platform/adapters/codex/mcp/mcp.test.ts` (the protocol
 and the canonical tool surface), `tests/platform/codex-platform.test.ts` (path resolution,
 the registry descriptor, capabilities and registration detection), and
 `tests/cli/codex-sync.test.ts` (the generated bundle and `config.toml` registration).
@@ -775,7 +775,7 @@ leaving the existing graph notification channel configured as before.
   `removeCodexPluginBundle(codexHome)` (removes `{codexHome}/rolebox-marketplace`) and
   `unregisterCodexPlugin(configPath)` (removes every managed block — a hand-edited
   duplicate included — restoring the surrounding bytes). Both are exported from
-  `src/platform/adapters/codex/plugin-bundle.ts` and the Codex adapter barrel, but **no CLI
+  `src/platform/adapters/codex/installation/plugin-bundle.ts` and the Codex adapter barrel, but **no CLI
   command currently calls them** — today the removal is manual: delete
   `{codexHome}/rolebox-marketplace` and the block between the two `rolebox (managed)`
   marker comments in `{codexHome}/config.toml`. Neither function touches

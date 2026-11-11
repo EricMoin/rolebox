@@ -125,12 +125,12 @@ export const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org"
  *
  * Every path must name an EXISTING test file: The test command must reject a path it
  * cannot find, so a stale entry silently shrinks the guard to whatever still
- * exists. Pinned by the existence test in tests/host-versions.test.ts.
+ * exists. Pinned by the existence test in tests/scripts/host-versions.test.ts.
  */
 export const VOCABULARY_GUARD_SLICES: readonly string[] = [
-  "tests/platform/dsh-event-vocabulary.test.ts",
-  "tests/platform/pi-event-vocabulary.test.ts",
-  "tests/platform/opencode2-event-bridge.test.ts",
+  "tests/platform/adapters/dsh/hooks/event-vocabulary.test.ts",
+  "tests/platform/adapters/pi/hooks/event-vocabulary.test.ts",
+  "tests/platform/adapters/opencode2/event-bridge.test.ts",
 ]
 
 // ── Version logic (pure) ───────────────────────────────────────────────────

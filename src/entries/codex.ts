@@ -29,11 +29,11 @@ import { graphStoreRoot } from "../graph/store/schema.ts";
 import {
   createCodexMcpServer,
   type CodexMcpServer,
-} from "../platform/adapters/codex/server.ts";
-import { installProtocolStdoutGuard } from "../platform/adapters/codex/stdout-guard.ts";
+} from "../platform/adapters/codex/mcp/server.ts";
+import { installProtocolStdoutGuard } from "../platform/adapters/codex/mcp/stdout-guard.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import { createCodexRuntime } from "../platform/adapters/codex/runtime.ts";
-import { syncCodexAgents } from "../platform/adapters/codex/agents.ts";
+import { syncCodexAgents } from "../platform/adapters/codex/installation/agents.ts";
 import type { CodexSessionOptions } from "../platform/adapters/codex/session.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import { resolveBrowseUseGate } from "../loader/browse-use-gate.ts";

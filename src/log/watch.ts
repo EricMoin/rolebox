@@ -25,7 +25,7 @@
  * attached to.
  *
  * FAILURE IS NEVER FATAL, exactly as in the state-directory watcher
- * (`src/platform/adapters/dsh/watch-rolebox-state.ts`): an absent directory, a
+ * (`src/platform/adapters/dsh/web/watch-rolebox-state.ts`): an absent directory, a
  * platform without `fs.watch`, an exhausted watch budget or a permission error
  * all degrade to a NO-OP disposer. The directory is never created — creating one
  * in order to watch it would be a side effect of merely looking. A throwing
@@ -45,7 +45,7 @@
  * appears, which is the follower's listing all over again.
  *
  * NODE-ONLY. This module imports `node:fs` and `node:path`, so browser-bundle
- * code must never reach it: `tests/platform/dsh-web-ui-logs-bundle.test.ts`
+ * code must never reach it: `tests/platform/adapters/dsh/web/ui/logs-bundle.test.ts`
  * fails the build if `node:*` or `src/log/` appears in the client bundle.
  *
  * @module

@@ -7,9 +7,9 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GraphApplication } from "../src/graph/application/graph-application.ts";
 import type { OutcomeDispatchRequest, OutcomeDispatchEffectKey } from "../src/graph/outcome/dispatch-effects.ts";
-import { codexRecord, CodexAppServerClient } from "../src/platform/adapters/codex/app-server.ts";
+import { codexRecord, CodexAppServerClient } from "../src/platform/adapters/codex/app-server/app-server.ts";
 import { parseCodexDesktopLauncherConfig, prepareCodexDesktopLauncher } from "../src/platform/adapters/codex/desktop/launcher.ts";
-import { CodexParentNotifications, CodexParentSocketClient } from "../src/platform/adapters/codex/parent-notifications.ts";
+import { CodexParentNotifications, CodexParentSocketClient } from "../src/platform/adapters/codex/graph/parent-notifications.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
 import { configureLogDirectory } from "../src/logger.ts";
 

@@ -51,8 +51,8 @@ const rolebox: typeof DshPlugin = await import(new URL(process.env.ROLEBOX_SMOKE
   ? "../../dist/entries/dsh.js" : "../../src/entries/dsh.ts", import.meta.url).href);
 import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import { graphStoreRoot } from "../../src/graph/store/schema.ts";
-import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
-import { readDshExecutionEvents } from "../../src/platform/adapters/dsh/graph-observation.ts";
+import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/execution/outcome-dispatch.ts";
+import { readDshExecutionEvents } from "../../src/platform/adapters/dsh/execution/graph-observation.ts";
 import { dispatchEffectKeyOf, dispatchIdempotencyKeyOf } from "../../src/graph/outcome/dispatch-effects.ts";
 
 const original = process.cwd();

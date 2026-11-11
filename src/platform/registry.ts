@@ -40,7 +40,7 @@ import {
   type PlatformCapabilities,
 } from "./capabilities.ts";
 import { createSubLogger } from "../logger.ts";
-import { syncCodexTarget } from "./adapters/codex/sync.ts";
+import { syncCodexTarget } from "./adapters/codex/installation/sync.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

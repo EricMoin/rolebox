@@ -6,12 +6,12 @@ export {
   CodexMcpServer,
   createCodexMcpServer,
   DEFAULT_MCP_SERVER_NAME,
-} from "./server.ts";
-export type { CodexMcpServerOptions } from "./server.ts";
-export { installProtocolStdoutGuard } from "./stdout-guard.ts";
-export type { ProtocolStdoutGuard } from "./stdout-guard.ts";
-export { CodexMcpToolFactory } from "./tool-factory.ts";
-export type { McpContentBlock, McpToolDescriptor, McpToolCallResult } from "./tool-factory.ts";
+} from "./mcp/server.ts";
+export type { CodexMcpServerOptions } from "./mcp/server.ts";
+export { installProtocolStdoutGuard } from "./mcp/stdout-guard.ts";
+export type { ProtocolStdoutGuard } from "./mcp/stdout-guard.ts";
+export { CodexMcpToolFactory } from "./mcp/tool-factory.ts";
+export type { McpContentBlock, McpToolDescriptor, McpToolCallResult } from "./mcp/tool-factory.ts";
 export {
   MCP_PROTOCOL_VERSIONS,
   MCP_LATEST_PROTOCOL_VERSION,
@@ -20,7 +20,7 @@ export {
   negotiateProtocolVersion,
   serializeMessage,
   parseMessageLine,
-} from "./mcp-protocol.ts";
+} from "./mcp/mcp-protocol.ts";
 export type {
   McpProtocolVersion,
   JsonRpcId,
@@ -32,28 +32,28 @@ export type {
   JsonRpcMessage,
   ParsedMessage,
   ParseResult,
-} from "./mcp-protocol.ts";
+} from "./mcp/mcp-protocol.ts";
 export {
   writeCodexPluginBundle,
   removeCodexPluginBundle,
   registerCodexPlugin,
   unregisterCodexPlugin,
   resolveRoleboxPackageRoot,
-} from "./plugin-bundle.ts";
+} from "./installation/plugin-bundle.ts";
 export type {
   CodexPluginBundleOptions,
   CodexPluginBundlePaths,
-} from "./plugin-bundle.ts";
+} from "./installation/plugin-bundle.ts";
 export {
   codexAgentName,
   collectCodexAgentDescriptors,
   renderCodexAgent,
   syncCodexAgents,
-} from "./agents.ts";
+} from "./installation/agents.ts";
 export type {
   CodexAgentDescriptor,
   CodexAgentMappingOptions,
   CodexAgentMappings,
   SyncCodexAgentsOptions,
   SyncCodexAgentsResult,
-} from "./agents.ts";
+} from "./installation/agents.ts";

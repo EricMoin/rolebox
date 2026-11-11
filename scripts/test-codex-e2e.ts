@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { dump } from "js-yaml";
-import { CodexAppServerClient, codexRecord, type CodexRecord } from "../src/platform/adapters/codex/app-server.ts";
+import { CodexAppServerClient, codexRecord, type CodexRecord } from "../src/platform/adapters/codex/app-server/app-server.ts";
 import { GraphStore } from "../src/graph/store/graph-store.ts";
 import { graphStoreRoot } from "../src/graph/store/schema.ts";
 import { decodeStoredDefinition, readStoredRunStateOf } from "../src/graph/persistence/declared-record.ts";

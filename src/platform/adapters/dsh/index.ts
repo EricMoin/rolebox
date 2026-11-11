@@ -2,37 +2,37 @@
  * dsh (DeepSeek Harness) platform adapters — barrel export.
  */
 
-export { DshAgentRegistrar, DshSpawnNotWiredError } from "./agent-registrar.ts";
-export { DSH_IMAGE_MEDIA_TYPES, isDshImageMediaType } from "./attachment.ts";
+export { DshAgentRegistrar, DshSpawnNotWiredError } from "./roles/agent-registrar.ts";
+export { DSH_IMAGE_MEDIA_TYPES, isDshImageMediaType } from "./tools/attachment.ts";
 export type {
   DshAttachmentService,
   DshImageAttachmentRef,
   DshImageMediaType,
-} from "./attachment.ts";
-export type { DshToolFactoryOptions } from "./tool-factory.ts";
-export { DshEventBridge, mapDshEventType } from "./event-bridge.ts";
-export { DshDispatchAdapter } from "./dispatch.ts";
-export { DshRoleSwitcher } from "./role-switcher.ts";
-export type { DshRoleSwitcherOptions } from "./role-switcher.ts";
-export { createActiveRoleRef } from "./role-switcher.ts";
+} from "./tools/attachment.ts";
+export type { DshToolFactoryOptions } from "./tools/tool-factory.ts";
+export { DshEventBridge, mapDshEventType } from "./hooks/event-bridge.ts";
+export { DshDispatchAdapter } from "./execution/dispatch.ts";
+export { DshRoleSwitcher } from "./roles/role-switcher.ts";
+export type { DshRoleSwitcherOptions } from "./roles/role-switcher.ts";
+export { createActiveRoleRef } from "./roles/role-switcher.ts";
 export type {
   ActiveRolePersistence,
   ActiveRoleRef,
-} from "./role-switcher.ts";
+} from "./roles/role-switcher.ts";
 export {
   DshRoleSwitchWebRoute,
   ROLE_SWITCH_ROUTE_PREFIX,
-} from "./web-role-switch-route.ts";
+} from "./web/routes/web-role-switch-route.ts";
 export type {
   DshRoleSwitchRouteOptions,
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
-} from "./web-role-switch-route.ts";
+} from "./web/routes/web-role-switch-route.ts";
 export type {
   DshDispatchAdapterOptions,
   DshSubagentDispatchRuntime,
   DshSubagentResult,
-} from "./dispatch.ts";
+} from "./execution/dispatch.ts";
 export type {
   DshAgentRegistrarOptions,
   DshActiveRoleLookup,
@@ -49,15 +49,15 @@ export type {
   DshSubagentRuntime,
   DshSubagentStartRequest,
   DshToolRestriction,
-} from "./agent-registrar.ts";
-export type { DshCordisContext } from "./event-bridge.ts";
+} from "./roles/agent-registrar.ts";
+export type { DshCordisContext } from "./hooks/event-bridge.ts";
 export {
   DshSkillProvider,
   createDshSkillProviderFactory,
   ROLEBOX_SKILL_PROVIDER,
   ROLEBOX_SKILL_SOURCE,
   ROLEBOX_SKILL_RANK,
-} from "./skill-provider.ts";
+} from "./roles/skill-provider.ts";
 export type {
   DshActiveRoleSnapshot,
   DshSkillCandidate,
@@ -68,4 +68,4 @@ export type {
   DshSkillProviderDeps,
   DshSkillProviderLike,
   DshSkillResourceBaseDirectory,
-} from "./skill-provider.ts";
+} from "./roles/skill-provider.ts";

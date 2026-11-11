@@ -87,7 +87,7 @@ native discovery mechanism:
 |---|---|---|
 | opencode | Symlink sync into the global skills dir (`~/.config/opencode/skills/`), discovered by oh-my-openagent | `syncSkillSymlinks` (`src/sync/skill-symlinks.ts`), invoked from `src/entries/opencode.ts` |
 | Pi | `registrar.registerSkillPath(agentId, dirname(skill.filePath))`, reported through `resources_discover` | `src/entries/pi.ts` |
-| dsh | A lazy `ctx.skills` `SkillProvider` registered on dsh's skill registry | `src/platform/adapters/dsh/skill-provider.ts`; registered at `src/entries/dsh.ts` |
+| dsh | A lazy `ctx.skills` `SkillProvider` registered on dsh's skill registry | `src/platform/adapters/dsh/roles/skill-provider.ts`; registered at `src/entries/dsh.ts` |
 
 *From `src/sync/skill-symlinks.ts` — `syncSkillSymlinks` and its oh-my-openagent discovery contract:*
 
@@ -117,7 +117,7 @@ export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir
     };
 ```
 
-*From `src/platform/adapters/dsh/skill-provider.ts` — the structural `SkillLookupOptions` (`{ cwd?, signal? }`) a dsh provider's `list()` receives:*
+*From `src/platform/adapters/dsh/roles/skill-provider.ts` — the structural `SkillLookupOptions` (`{ cwd?, signal? }`) a dsh provider's `list()` receives:*
 
 ```ts
 /** Structural dsh `SkillLookupOptions` (`index.d.ts:88-93`) — `{cwd?, signal?}`. */
@@ -155,12 +155,12 @@ The dsh provider registry exposes no session or agent to a provider: a
 `SkillProvider.list()` receives only `SkillLookupOptions` — `{ cwd?, signal? }`
 (`@deepseek-ai/dsh-skill` `lib/types/index.d.ts`). rolebox's active-role
 selection is per-session — `ActiveRoleStore` is keyed by `sessionId`
-(`src/platform/adapters/dsh/active-role-store.ts`) — so the dsh provider
+(`src/platform/adapters/dsh/roles/active-role-store.ts`) — so the dsh provider
 cannot scope its catalog to the calling session. It advertises the
 workspace-wide union of the skills of every role active in any recorded session,
-plus the promoted default role (`src/platform/adapters/dsh/skill-provider.ts`).
+plus the promoted default role (`src/platform/adapters/dsh/roles/skill-provider.ts`).
 
-*From `src/platform/adapters/dsh/active-role-store.ts` — `ActiveRoleEntry`, keyed by `sessionId`:*
+*From `src/platform/adapters/dsh/roles/active-role-store.ts` — `ActiveRoleEntry`, keyed by `sessionId`:*
 
 ```ts
 /**

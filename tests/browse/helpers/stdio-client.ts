@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { McpToolCallResult } from "../../../src/platform/adapters/codex/tool-factory.ts";
+import type { McpToolCallResult } from "../../../src/platform/adapters/codex/mcp/tool-factory.ts";
 
 export function startStdioClient(worktree: string, browseUse = true) {
   const repository = new URL("../../../", import.meta.url);

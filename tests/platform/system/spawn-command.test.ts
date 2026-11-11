@@ -6,7 +6,7 @@
  * spawn path applies, so the byte-identical POSIX vector and the win32 shell
  * vector are both checkable on any host through the platform seam. The runtime
  * end of it (a real `.cmd` stand-in really running) is
- * `tests/platform/pi-worker-sandbox.test.ts`, which executes on the platform
+ * `tests/platform/adapters/pi/session/worker-sandbox.test.ts`, which executes on the platform
  * that has cmd.exe.
  */
 import { afterEach, describe, expect, it } from "vitest";

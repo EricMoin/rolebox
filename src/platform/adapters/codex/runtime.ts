@@ -3,10 +3,10 @@ import { createLoadRoleSkillTool } from "../../../asset/skill-tool.ts";
 import { buildCanonicalTools } from "../../tool-assembly.ts";
 import { codexCapabilities } from "../../capabilities.ts";
 import type { CanonicalToolDef } from "../../types.ts";
-import { CodexGraphHost } from "./graph-host.ts";
+import { CodexGraphHost } from "./graph/graph-host.ts";
 import { CodexSessionAdapter, type CodexSessionOptions } from "./session.ts";
 import { codexRoleToolAllowed } from "./tool-policy.ts";
-import { CodexParentNotifications } from "./parent-notifications.ts";
+import { CodexParentNotifications } from "./graph/parent-notifications.ts";
 
 export interface CodexRuntimeOptions {
   directory: string;

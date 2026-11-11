@@ -15,7 +15,7 @@
  * A test that demanded one particular write be delivered would assert a
  * guarantee the module deliberately does not make, and under load the assertion
  * — not the watcher — is what fails. The retry is the pattern the house watcher
- * suite already uses (tests/platform/dsh-rolebox-state-watch.test.ts).
+ * suite already uses (tests/platform/adapters/dsh/web/rolebox-state-watch.test.ts).
  *
  * The claims, in the order the design states them: a burst of appends is ONE
  * signal; nothing signals after the disposer; an absent directory degrades to a
@@ -61,7 +61,7 @@ async function waitUntil(check: () => boolean, ms = 2_000): Promise<boolean> {
 /**
  * Wait for `check`, and when the bounded wait MISSES, make ONE more change (via
  * `onMiss`) and wait again — the house pattern from
- * tests/platform/dsh-rolebox-state-watch.test.ts.
+ * tests/platform/adapters/dsh/web/rolebox-state-watch.test.ts.
  *
  * WHY A MISS IS NOT A FAILURE. A raw `fs.watch` event can be dropped or delayed
  * — the first one after arming is the one a platform most often loses — and the

@@ -1,12 +1,12 @@
-import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
+import { registerPiGraphWorker } from "../platform/adapters/pi/execution/graph-worker.ts";
 import { buildGraphWorkerRolePrompt, findGraphWorkerRole } from "../prompt/graph-worker.ts";
 import { buildPublicAgentsBlock } from "../prompt/builder.ts";
 import { renderInjectBlock } from "../prompt/blocks.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
-import { piWorkerToolConfig, piWorkerToolAllowed, type PiWorkerToolConfig } from "../platform/adapters/pi/worker-tools.ts";
+import { piWorkerToolConfig, piWorkerToolAllowed, type PiWorkerToolConfig } from "../platform/adapters/pi/tools/worker-tools.ts";
 import type { CanonicalToolDef } from "../platform/types.ts";
-import { interceptToolBefore } from "../platform/adapters/pi/tool-interceptor.ts";
+import { interceptToolBefore } from "../platform/adapters/pi/tools/tool-interceptor.ts";
 import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
 /**
  * Pi Extension Entry Point — `src/pi-extension.ts`
@@ -27,21 +27,21 @@ import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { PiLightweightServiceStack } from "../platform/adapters/pi/service-stack.ts";
-import { PiEventBridge } from "../platform/adapters/pi/event-bridge.ts";
-import type { PiEventType } from "../platform/adapters/pi/event-bridge.ts";
-import { PiAgentRegistrar } from "../platform/adapters/pi/agent-registrar.ts";
-import { createPiHookPipeline } from "../platform/adapters/pi/hook-pipeline.ts";
+import { PiEventBridge } from "../platform/adapters/pi/hooks/event-bridge.ts";
+import type { PiEventType } from "../platform/adapters/pi/hooks/event-bridge.ts";
+import { PiAgentRegistrar } from "../platform/adapters/pi/roles/agent-registrar.ts";
+import { createPiHookPipeline } from "../platform/adapters/pi/hooks/hook-pipeline.ts";
 import {
   runPiSystemTransform
-} from "../platform/adapters/pi/system-transform.ts";
-import { wirePiChatActivation } from "../platform/adapters/pi/chat-activation.ts";
+} from "../platform/adapters/pi/hooks/system-transform.ts";
+import { wirePiChatActivation } from "../platform/adapters/pi/hooks/chat-activation.ts";
 import {
   isPiChildProcess,
   resolveChildDispatchStoreDir,
-} from "../platform/adapters/pi/child-mode.ts";
-import { wireRoleSwitcher } from "../platform/adapters/pi/role-switcher.ts";
-import { createActiveAgentRef } from "../platform/adapters/pi/active-agent.ts";
-import type { ToolInterceptorHooks } from "../platform/adapters/pi/tool-interceptor.ts";
+} from "../platform/adapters/pi/execution/child-mode.ts";
+import { wireRoleSwitcher } from "../platform/adapters/pi/roles/role-switcher.ts";
+import { createActiveAgentRef } from "../platform/adapters/pi/roles/active-agent.ts";
+import type { ToolInterceptorHooks } from "../platform/adapters/pi/tools/tool-interceptor.ts";
 import { createComputerTools } from "../computer/index.ts";
 import { createBrowseTools } from "../browse/tools.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
@@ -62,8 +62,8 @@ import {
   resolveEnvVarsInConfig,
 } from "../notifications/config.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
-import { PiProcessSessionAdapter } from "../platform/adapters/pi/process-session.ts";
-import { PiNotificationSessionClient } from "../platform/adapters/pi/notification-session.ts";
+import { PiProcessSessionAdapter } from "../platform/adapters/pi/session/process-session.ts";
+import { PiNotificationSessionClient } from "../platform/adapters/pi/session/notification-session.ts";
 import { DispatchAdapter } from "../loop/dispatch-adapter.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
@@ -79,7 +79,7 @@ import {
 import {
   loadNotifyDedup,
   persistNotifyDedupSync,
-} from "../platform/adapters/pi/sidecar-persister.ts";
+} from "../platform/adapters/pi/session/sidecar-persister.ts";
 import {
   seedSentFinalNotifies,
   getSentFinalNotifies
@@ -91,7 +91,7 @@ import {
 } from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
-import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
+import { PiOutcomeDelivery } from "../platform/adapters/pi/execution/outcome-dispatch.ts";
 import { GraphApplication } from "../graph/application/graph-application.ts";
 import {
   COMPLETION_POLICY_AUTHORIZATION_ENV,

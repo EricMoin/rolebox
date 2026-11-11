@@ -171,7 +171,7 @@ The Logs view, the second conversation tab, polls the workspace's `.rolebox/logs
 
 ## Install
 
-Rolebox's CLI and development tools require Node.js 26.4+ and npm. For a source checkout, run `npm ci`, `npm run build`, and module-scoped tests with `npm test -- tests/<module>/`. See [Node runtime and development](docs/node-runtime.md). The TUI additionally needs Node's `--experimental-ffi` flag; the test command supplies it.
+Rolebox's CLI and development tools require Node.js 26.4+ and npm. For a source checkout, run `npm ci`, `npm run build`, and module-scoped tests with `npm test -- tests/<module>/`. See [Node runtime and development](docs/node-runtime.md) and [Repository structure](docs/project-structure.md). The TUI additionally needs Node's `--experimental-ffi` flag; the test command supplies it.
 
 rolebox runs on four harnesses. A `rolebox/` directory in the **current working directory** takes precedence over the global roles directory; registry roles install with `rolebox install <name>` and deploy with `rolebox sync <opencode|pi|dsh|codex>`. Each harness has a minimum version — [Harness versions](docs/compatibility.md#harness-versions) lists them and why.
 

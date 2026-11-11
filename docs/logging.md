@@ -516,8 +516,8 @@ routeDisposers.push(logsRoute.register(webServer));
 > path with another method, `500` for an unexpected failure, and `200` with an
 > empty set when the log directory does not exist yet. The **Logs** view (a
 > session Conversation view, id `rolebox-logs`) polls this route, so it paints
-> records instead of its error state. `tests/dsh-plugin.test.ts` proves the
-> registration against the registrar itself, and `tests/dsh-cordis-e2e.test.ts`
+> records instead of its error state. `tests/entries/dsh/entry.test.ts` proves the
+> registration against the registrar itself, and `tests/integration/dsh/cordis-e2e.test.ts`
 > pins the two-route table on a real cordis boot.
 
 (As a delegate of the composed `/rolebox` registration the same handler works
@@ -559,7 +559,7 @@ sink subscribed in the host process would not help: the browser is a different
 process, and the records may come from several host processes.
 
 So the panel reads `GET /rolebox/logs` and holds one string between requests —
-the cursor. `tests/platform/dsh-web-ui-logs-bundle.test.ts` is the guard: it
+the cursor. `tests/platform/adapters/dsh/web/ui/logs-bundle.test.ts` is the guard: it
 builds the real client entry with the build script's own options, scans the
 bundle for node and kernel markers, evaluates it the way the dsh module loader
 does (refusing any external other than react) and asserts both session

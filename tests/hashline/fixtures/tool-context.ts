@@ -33,7 +33,7 @@ export function makeToolContext(directory: string): CanonicalToolContext {
  * The element shape the hashline edit tool's `files[].edits` array actually
  * requires, DERIVED from the tool definition rather than hand-written: the
  * platform adapters validate raw args with `z.object(def.args)` and hand the
- * PARSED data to `execute` (src/platform/adapters/dsh/tool-factory.ts), so
+ * PARSED data to `execute` (src/platform/adapters/dsh/tools/tool-factory.ts), so
  * `op` is always present at the tool boundary even though the schema declares
  * `.default("replace")`. Deriving it keeps a test fixture from drifting back
  * out of sync with the schema the platform enforces.

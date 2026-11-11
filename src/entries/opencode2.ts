@@ -34,7 +34,7 @@
  * `@opencode-ai/plugin` at runtime — an opencode v2 user does not install it.
  * Everything v1-shaped here (handler signatures, canonical events) is typed
  * structurally instead. See the grep proof in
- * tests/platform/opencode2-entry.test.ts.
+ * tests/entries/opencode2/entry.test.ts.
  */
 
 import { Plugin } from "@opencode/plugin";

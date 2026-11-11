@@ -1,5 +1,5 @@
 import { build } from "esbuild"
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 // Project root = scripts/.. (this script lives in scripts/)
@@ -11,7 +11,7 @@ await build({
   jsx: "automatic",
   jsxImportSource: "react",
   define: { "process.env.NODE_ENV": '"production"' },
-  entryPoints: ["src/platform/adapters/dsh/web-ui/client.ts"],
+  entryPoints: ["src/platform/adapters/dsh/web/ui/client.ts"],
   outdir: "dist",
   entryNames: "dsh-web-client",
   platform: "browser",
@@ -62,25 +62,12 @@ const wrapped = [
 writeFileSync(bundlePath, wrapped)
 console.log(`build:dsh-web-client — dist/dsh-web-client.js wrapped (${wrapped.length} bytes)`)
 
-// Step 3: Publish type declarations for the "./client" export's types
-// condition. The main build's `tsc` (runs before this script in
-// `scripts.build`) emits the entry + dock declarations under
-// dist/platform/adapters/dsh/web-ui/ (rootDir = src); copy the entry to
-// dist/dsh-web-client.d.ts and its dock sibling to dist/role-switch-dock.d.ts
-// so the emitted `./role-switch-dock.tsx` import keeps resolving, and fix the
-// sourceMappingURL reference (same rename dance build-tui.ts does).
-const entryDts = resolve(projectRoot, "dist/platform/adapters/dsh/web-ui/client.d.ts")
-const dockDts = resolve(projectRoot, "dist/platform/adapters/dsh/web-ui/role-switch-dock.d.ts")
-const entryDtsMap = resolve(projectRoot, "dist/platform/adapters/dsh/web-ui/client.d.ts.map")
+// Keep declaration imports relative to their emitted component tree.
+const entryDts = resolve(projectRoot, "dist/platform/adapters/dsh/web/ui/client.d.ts")
 const targetDts = resolve(projectRoot, "dist/dsh-web-client.d.ts")
-const targetDockDts = resolve(projectRoot, "dist/role-switch-dock.d.ts")
-const targetDtsMap = resolve(projectRoot, "dist/dsh-web-client.d.ts.map")
 
-if (existsSync(entryDts) && existsSync(dockDts)) {
-  const fixed = readFileSync(entryDts, "utf8").replace("client.d.ts.map", "dsh-web-client.d.ts.map")
-  writeFileSync(targetDts, fixed)
-  copyFileSync(dockDts, targetDockDts)
-  if (existsSync(entryDtsMap)) copyFileSync(entryDtsMap, targetDtsMap)
+if (existsSync(entryDts)) {
+  writeFileSync(targetDts, 'export * from "./platform/adapters/dsh/web/ui/client.js";\n')
   console.log("build:dsh-web-client — dist/dsh-web-client.d.ts emitted")
 } else {
   console.warn(

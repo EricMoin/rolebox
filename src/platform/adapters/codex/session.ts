@@ -3,12 +3,12 @@ import { isAbsolute, resolve } from "node:path";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type { FileDiff, Message, SessionInfo, SessionStatus, Todo, CanonicalToolDef } from "../../types.ts";
 import type { ResolvedRole } from "../../../types.ts";
-import { collectCodexAgentDescriptors, type CodexAgentDescriptor } from "./agents.ts";
+import { collectCodexAgentDescriptors, type CodexAgentDescriptor } from "./installation/agents.ts";
 import {
   CodexAppServerClient, codexAppServerOptions, codexLaunchAuthority, codexRecord,
   type CodexLaunchAuthority, type CodexRecord, type CodexRpc,
-} from "./app-server.ts";
-import { CodexMcpToolFactory } from "./tool-factory.ts";
+} from "./app-server/app-server.ts";
+import { CodexMcpToolFactory } from "./mcp/tool-factory.ts";
 import { codexRoleToolAllowed } from "./tool-policy.ts";
 
 const RESOURCE_TOOLS = new Set([

@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GraphApplication } from "../src/graph/application/graph-application.ts";
 import type { OutcomeDispatchRequest, OutcomeDispatchEffectKey } from "../src/graph/outcome/dispatch-effects.ts";
-import { codexRecord } from "../src/platform/adapters/codex/app-server.ts";
-import { CodexParentNotifications, CodexParentSocketClient } from "../src/platform/adapters/codex/parent-notifications.ts";
+import { codexRecord } from "../src/platform/adapters/codex/app-server/app-server.ts";
+import { CodexParentNotifications, CodexParentSocketClient } from "../src/platform/adapters/codex/graph/parent-notifications.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
 import { configureLogDirectory } from "../src/logger.ts";
 

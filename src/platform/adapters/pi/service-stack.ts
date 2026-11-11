@@ -21,9 +21,9 @@
 
 import { defineTool } from "../../ports/tool-factory.ts";
 import type { IHookProvider } from "../../ports/hook-provider.ts";
-import { PiToolFactory } from "./tool-factory.ts";
-import type { ToolInterceptorHooks } from "./tool-interceptor.ts";
-import { PiSessionAdapter } from "./session.ts";
+import { PiToolFactory } from "./tools/tool-factory.ts";
+import type { ToolInterceptorHooks } from "./tools/tool-interceptor.ts";
+import { PiSessionAdapter } from "./session/session.ts";
 import { z } from "zod";
 import { registerToolSchema, registerDeprecatedTool } from "../../../hooks/tool-before.ts";
 import type { DispatchManager } from "../../../dispatch/core/manager.ts";

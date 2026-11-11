@@ -860,6 +860,6 @@ The eviction mechanism keeps the database bounded and relevant:
 7. **FTS5 search** returns ranked results ordered by relevance
 8. **`rolebox memory`** CLI subcommands work: list, show, search, delete, export, clean, stats
 9. **Memory config** parsed from `role.yaml` with correct defaults (`inject: true`, `max_inject: 10`, `min_relevance: medium`, `scope: both`)
-10. **No regression** in existing tests: `npm test -- tests/dispatch/`, `npm test -- tests/session/`, `npm test -- tests/plugin-hooks.test.ts` all pass
+10. **No regression** in existing tests: `npm test -- tests/dispatch/`, `npm test -- tests/session/`, `npm test -- tests/entries/opencode/hooks.test.ts` all pass
 11. **MemoryStore** uses the same logging pattern: `import { createSubLogger } from "../logger.ts"; const log = createSubLogger("memory:store");`
 12. **`memoryDbPath(dir)`** function added to `src/state-paths.ts` for single-source-of-truth path derivation

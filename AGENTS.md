@@ -59,45 +59,31 @@ Vitest runs on Node with isolated fork workers. TUI tests use the same isolation
 
 ## Module → test path mapping
 
-New tests mirror the `src/` module path under `tests/`. Root-level `tests/*.test.ts` hold **cross-cutting unit tests** for modules that have no dedicated directory (and integration/e2e coverage).
+Tests mirror their owning source module. Keep root-level tests only for root-level
+source files, such as `src/logger.ts` and `src/project-config.ts`. Put tests that
+span host adapters or complete plugin lifecycles under `tests/integration/`.
+See [Repository structure](docs/project-structure.md) for the full layout.
 
-| `src/` path | Test path |
+| Source path | Test path |
 | --- | --- |
-| `src/asset/**` | `tests/asset/` |
-| `src/cli/**` | `tests/cli/` |
-| `src/core/**` | `tests/core/` |
-| `src/dispatch/**` | `tests/dispatch/` |
-| `src/extensions/**` | `tests/extensions/` |
-| `src/graph/**` | `tests/graph/` |
-| `src/hashline/**` | `tests/hashline/` |
-| `src/hooks/**` | `tests/hooks/` |
-| `src/loop/**` | `tests/loop/` |
-| `src/lsp/**` | `tests/lsp/` |
-| `src/memory/**` | `tests/memory/` |
-| `src/notifications/**` | `tests/notifications/` |
-| `src/platform/**` | `tests/platform/` |
-| `src/prompt/**` | `tests/prompt/` |
-| `src/recovery/**` | `tests/recovery/` |
-| `src/session/**` | `tests/session/` |
-| `src/signal/**` | `tests/signal/` |
-| `src/tui/**` | `tests/tui/` |
-| `src/utils/**` | `tests/utils/` |
-| `src/web/**` | `tests/web/` |
+| `src/<module>/**` | `tests/<module>/**` |
+| `src/platform/adapters/<host>/<area>/**` | `tests/platform/adapters/<host>/<area>/**` |
+| `src/platform/ports/**`, `system/**`, `model-catalog/**`, `worker-tools/**` | Matching directories under `tests/platform/` |
+| `src/entries/<host>.ts` | `tests/entries/<host>/` |
+| `src/function/**` | `tests/function/` |
+| `src/copilot/**` | `tests/copilot/` |
+| `src/loader/**` | `tests/loader/` |
+| `src/resolver/**` | `tests/resolver/` |
+| `src/sync/**` | `tests/sync/` |
+| `src/terminal/**` | `tests/terminal/` |
+| `scripts/**` | `tests/scripts/` |
+| Cross-module and cross-host acceptance | `tests/integration/` |
 
-**Cross-cutting / no dedicated test directory** — tests live at the `tests/` root:
-
-| `src/` path | Test path |
-| --- | --- |
-| `src/function/**` | `tests/function-*.test.ts`, `tests/handlers.test.ts`, `tests/conditions.test.ts`, `tests/observe.test.ts`, `tests/continuation.test.ts` |
-| `src/copilot/**` | `tests/copilot-*.test.ts` |
-| `src/loader/**` | `tests/role-loader*.test.ts`, `tests/open-roles.test.ts` |
-| `src/resolver/**` | `tests/*-resolver.test.ts`, `tests/resolver-recursive.test.ts` |
-| `src/sync/**` | `tests/agent-registry.test.ts` |
-| `src/terminal/**` | `tests/interactive-terminal.test.ts` |
-| `src/logger.ts` | `tests/logger.test.ts` |
-| `src/entries/opencode.ts`, `src/entries/pi.ts`, `src/entries/dsh.ts` | `tests/index.test.ts`, `tests/pi-*.test.ts`, `tests/dsh-*.test.ts`, `tests/e2e.test.ts` |
-
-Support directories (helpers, not modules): `tests/helpers/`, `tests/integration/`, `tests/monitor/`.
+Within an adapter, keep shared entry/facade tests at the adapter root and
+feature-specific tests beside the matching source area. Do not recreate flat
+`dsh-*`, `pi-*` or `function-*` collections at the `tests/` or `tests/platform/`
+root. Shared test helpers belong in `tests/helpers/`; feature fixtures stay with
+their owning tests.
 
 ---
 

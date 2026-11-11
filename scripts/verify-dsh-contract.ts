@@ -333,14 +333,14 @@ function checkMembersSeam(seam: MembersSeam, dshRoot: string): void {
 
 // Local relative paths (mirror root = rolebox repo root).
 const MIRROR = {
-  toolFactory: "src/platform/adapters/dsh/tool-factory.ts",
-  skillProvider: "src/platform/adapters/dsh/skill-provider.ts",
-  agentRegistrar: "src/platform/adapters/dsh/agent-registrar.ts",
-  session: "src/platform/adapters/dsh/session.ts",
+  toolFactory: "src/platform/adapters/dsh/tools/tool-factory.ts",
+  skillProvider: "src/platform/adapters/dsh/roles/skill-provider.ts",
+  agentRegistrar: "src/platform/adapters/dsh/roles/agent-registrar.ts",
+  session: "src/platform/adapters/dsh/session/session.ts",
   plugin: "src/entries/dsh.ts",
-  client: "src/platform/adapters/dsh/web-ui/client.ts",
-  toolViewContract: "src/platform/adapters/dsh/web-ui/tool-view-contract.ts",
-  workerExecutor: "src/platform/adapters/dsh/worker-executor.ts",
+  client: "src/platform/adapters/dsh/web/ui/client.ts",
+  toolViewContract: "src/platform/adapters/dsh/web/ui/tool-view-contract.ts",
+  workerExecutor: "src/platform/adapters/dsh/execution/worker-executor.ts",
 } as const
 
 // dsh-checkout relative paths (source root = $DSH_SOURCE_DIR).
@@ -667,10 +667,10 @@ function extractSlotMapKeys(absolutePath: string, interfaceName: string): Set<st
 
 /** Every client slot key rolebox contributes into must stay declared by dsh. */
 function checkSlots(dshRoot: string): void {
-  const clientPath = resolve(projectRoot, "src/platform/adapters/dsh/web-ui/client.ts")
+  const clientPath = resolve(projectRoot, "src/platform/adapters/dsh/web/ui/client.ts")
   if (!existsSync(clientPath)) {
     seamCount += 1
-    report("slot.conversation.input.dock", `rolebox client source not found: src/platform/adapters/dsh/web-ui/client.ts`)
+    report("slot.conversation.input.dock", `rolebox client source not found: src/platform/adapters/dsh/web/ui/client.ts`)
     return
   }
   const clientSource = createSourceFile(clientPath)
@@ -689,7 +689,7 @@ function checkSlots(dshRoot: string): void {
   for (const seam of seams) {
     seamCount += 1
     if (seam.roleboxKey === undefined) {
-      report(seam.id, `rolebox constant not found in src/platform/adapters/dsh/web-ui/client.ts`)
+      report(seam.id, `rolebox constant not found in src/platform/adapters/dsh/web/ui/client.ts`)
       continue
     }
     const absolutePath = resolve(dshRoot, seam.sourceFile)

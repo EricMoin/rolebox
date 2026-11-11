@@ -34,7 +34,7 @@
 | 宿主能力声明 | `src/platform/capabilities.ts` | 作为预检输入；增加评测专属能力探测及实际合约测试 |
 | graph 的执行、结算、预算与恢复 | `src/graph/host/`、`src/graph/outcome/`、`src/graph/store/` | team case 内部继续使用真实 graph runtime；外部 suite 不包装成一个 graph |
 | message/tool/token/cost 类型 | `src/session/types.ts` | 作为观测来源之一；未上报字段保留 unknown，单独标记完整性 |
-| role 热加载 | `src/platform/adapters/dsh/rolebox-reload.ts`、`src/core/services/hot-reload-service.ts` | dsh reloader 会原地更新共享角色状态；bench watch 独立冻结版本，不在运行中替换 role |
+| role 热加载 | `src/platform/adapters/dsh/roles/rolebox-reload.ts`、`src/core/services/hot-reload-service.ts` | dsh reloader 会原地更新共享角色状态；bench watch 独立冻结版本，不在运行中替换 role |
 | CLI、monitor、日志 | `src/cli/main.ts`、`src/cli/commands/monitor/` | 增加 bench 命令和独立读模型，不从日志文本推导正式成绩 |
 | memory 存储 | `src/memory/store.ts`、`src/utils/state-paths.ts` | 每个 trial 使用独立 workspace/state root，禁止隐式读写开发者日常 memory |
 
@@ -564,7 +564,7 @@ examples/benchmarks/
 
 P1–P2 是面向 dsh 用户“改 role 后可可靠评测”的首个完整产品闭环。P3 扩展任务种类并接入 dsh 内嵌交互，P4 再扩展宿主。每阶段可验收后独立发布，不把全部工作推迟到一个大版本。
 
-验证策略：新增 `tests/benchmark/` 模块切片；具体 dsh seam 改动再选择对应测试，例如 `tests/dsh-plugin.test.ts`、`tests/dsh-dispatch.test.ts`、`tests/platform/dsh-role-switcher.test.ts`、`tests/platform/dsh-system-prompt.test.ts`、`tests/platform/dsh-graph-observation.test.ts`。按仓库政策执行 scoped tests 和 `npm run typecheck`，不在开发阶段跑完整套件。
+验证策略：新增 `tests/benchmark/` 模块切片；具体 dsh seam 改动再选择对应测试，例如 `tests/entries/dsh/entry.test.ts`、`tests/platform/adapters/dsh/execution/dispatch.test.ts`、`tests/platform/adapters/dsh/roles/role-switcher.test.ts`、`tests/platform/adapters/dsh/context/system-prompt.test.ts`、`tests/platform/adapters/dsh/execution/graph-observation.test.ts`。按仓库政策执行 scoped tests 和 `npm run typecheck`，不在开发阶段跑完整套件。
 
 需要的关键测试是：已知好坏产物的 grader 自测；缺失 usage 不变成 0；agent 无法读取 oracle；用户真实目录零写入；memory/case 顺序无污染；重复/乱序事件不重复结算；崩溃恢复与取消不遗留 worker；snapshot 在热编辑期间不漂移；基线不兼容时拒绝 gate；一组已知统计分布上的聚合/区间/分母测试。模型在线 smoke 独立显式运行，不纳入默认离线测试，也不依赖“模型这次刚好回答对”。
 

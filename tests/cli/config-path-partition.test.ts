@@ -42,7 +42,7 @@ vi.doMock("../../src/cli/role-models", () => ({
 }));
 
 // Import AFTER mock.module registration (same pattern as
-// tests/platform/rc-c-sidecar-reread.test.ts:62-64).
+// tests/platform/adapters/pi/session/rc-c-sidecar-reread.test.ts:62-64).
 const { partitionRoleEntries, runNonInteractive } = await import(
   "../../src/cli/commands/config.ts"
 );

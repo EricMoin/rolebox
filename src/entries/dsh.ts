@@ -1,9 +1,9 @@
-import { createDshGraphWorkerGrantHost } from "../platform/adapters/dsh/graph-worker-host.ts";
-import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
-import { loadDshWorkerExecutorFactory, type DshWorkerExecutorContext } from "../platform/adapters/dsh/worker-executor.ts";
+import { createDshGraphWorkerGrantHost } from "../platform/adapters/dsh/execution/graph-worker-host.ts";
+import { readDshExecutionEvents } from "../platform/adapters/dsh/execution/graph-observation.ts";
+import { loadDshWorkerExecutorFactory, type DshWorkerExecutorContext } from "../platform/adapters/dsh/execution/worker-executor.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
-import { installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
-import { prepareDshGraphWorkerExecutionPrompt, prepareDshGraphWorkerRolePrompt } from "../platform/adapters/dsh/worker-prompt.ts";
+import { installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/execution/graph-worker.ts";
+import { prepareDshGraphWorkerExecutionPrompt, prepareDshGraphWorkerRolePrompt } from "../platform/adapters/dsh/execution/worker-prompt.ts";
 import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
@@ -20,7 +20,7 @@ import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
  *                 roster: `DshAgentRegistrar` manages the *catalog* of
  *                 spawnable definitions through `ctx.subagents` and explicitly
  *                 keeps the `ctx.agents` AgentRegistry side out of the catalog
- *                 seam (see `src/platform/adapters/dsh/agent-registrar.ts`
+ *                 seam (see `src/platform/adapters/dsh/roles/agent-registrar.ts`
  *                 module docstring). It is instead probed OPTIONALLY
  *                 ({@link probeAgentRegistry}) as the graph-notify injection
  *                 seam — the dsh host's per-session message-injection surface
@@ -70,20 +70,20 @@ import type {
   RoleboxDirectories,
   InitializeRuntimeOptions,
 } from "../platform/factory.ts";
-import { DshAgentRegistrar } from "../platform/adapters/dsh/agent-registrar.ts";
+import { DshAgentRegistrar } from "../platform/adapters/dsh/roles/agent-registrar.ts";
 import type {
   DshProviderRouteProbe,
   DshSpawnContextProvider,
   DshSpawnDelegate,
   DshSubagentProvider,
-} from "../platform/adapters/dsh/agent-registrar.ts";
-import { DshDispatchAdapter } from "../platform/adapters/dsh/dispatch.ts";
-import { DshToolFactory } from "../platform/adapters/dsh/tool-factory.ts";
-import { DshLspService } from "../platform/adapters/dsh/lsp.ts";
-import type { DshToolDefinition } from "../platform/adapters/dsh/tool-factory.ts";
-import { DshSessionAdapter } from "../platform/adapters/dsh/session.ts";
-import { createDshSessionTools } from "../platform/adapters/dsh/session-visibility.ts";
-import { DshTeamSessionAdapter, type DshTeamSessionAdapterOptions } from "../platform/adapters/dsh/team-session.ts";
+} from "../platform/adapters/dsh/roles/agent-registrar.ts";
+import { DshDispatchAdapter } from "../platform/adapters/dsh/execution/dispatch.ts";
+import { DshToolFactory } from "../platform/adapters/dsh/tools/tool-factory.ts";
+import { DshLspService } from "../platform/adapters/dsh/tools/lsp.ts";
+import type { DshToolDefinition } from "../platform/adapters/dsh/tools/tool-factory.ts";
+import { DshSessionAdapter } from "../platform/adapters/dsh/session/session.ts";
+import { createDshSessionTools } from "../platform/adapters/dsh/session/session-visibility.ts";
+import { DshTeamSessionAdapter, type DshTeamSessionAdapterOptions } from "../platform/adapters/dsh/session/team-session.ts";
 import { TeamRuntime } from "../team/runtime.ts";
 import { createTeamTools } from "../team/tools.ts";
 import { resolveTeamAgentOptions, type TeamAgentOptions } from "../team/agent-options.ts";
@@ -92,48 +92,48 @@ import { bindRoleVisibility } from "../platform/role-visibility.ts";
 import type {
   DshPromptInjector,
   DshSessionStoreLike,
-} from "../platform/adapters/dsh/session.ts";
-import { DshHookProvider } from "../platform/adapters/dsh/hook-provider.ts";
-import { DshRoleSwitcher, createActiveRoleRef } from "../platform/adapters/dsh/role-switcher.ts";
-import { ActiveRoleStore } from "../platform/adapters/dsh/active-role-store.ts";
+} from "../platform/adapters/dsh/session/session.ts";
+import { DshHookProvider } from "../platform/adapters/dsh/hooks/hook-provider.ts";
+import { DshRoleSwitcher, createActiveRoleRef } from "../platform/adapters/dsh/roles/role-switcher.ts";
+import { ActiveRoleStore } from "../platform/adapters/dsh/roles/active-role-store.ts";
 import {
   installDshBrowseUsePolicy,
   installDshComputerUsePolicy,
   isBrowseUseRegistrationAllowed,
   isComputerUseRegistrationAllowed,
-} from "../platform/adapters/dsh/role-tool-policy.ts";
+} from "../platform/adapters/dsh/tools/role-tool-policy.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import { resolveBrowseUseGate } from "../loader/browse-use-gate.ts";
 import { COMPUTER_TOOL_NAMES } from "../loader/computer-grants.ts";
 import { BROWSE_TOOL_NAMES } from "../loader/browse-grants.ts";
-import { createDshComputerContext } from "../platform/adapters/dsh/computer-context.ts";
-import { createDshBrowseContext } from "../platform/adapters/dsh/browse-context.ts";
+import { createDshComputerContext } from "../platform/adapters/dsh/context/computer-context.ts";
+import { createDshBrowseContext } from "../platform/adapters/dsh/context/browse-context.ts";
 import { BrowseSessionManager } from "../browse/session.ts";
 import { BROWSE_DEFAULT_VIEWPORT } from "../browse/tool-helpers.ts";
-import { resolveDshSessionContext, type DshContextOptions } from "../platform/adapters/dsh/session-context.ts";
-import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
-import { createDshMemoryContext, DSH_MEMORY_WORKFLOW_TOOLS, type DshMemoryAgent } from "../platform/adapters/dsh/memory-context.ts";
-import { createDshSessionFocus } from "../platform/adapters/dsh/session-focus.ts";
-import { createDshMemoryRecall } from "../platform/adapters/dsh/memory-recall.ts";
-import { installDshMemoryScout, type DshMemoryScoutLlm } from "../platform/adapters/dsh/memory-scout.ts";
-import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/system-prompt.ts";
+import { resolveDshSessionContext, type DshContextOptions } from "../platform/adapters/dsh/context/session-context.ts";
+import { DshSystemPromptAdapter } from "../platform/adapters/dsh/context/system-prompt.ts";
+import { createDshMemoryContext, DSH_MEMORY_WORKFLOW_TOOLS, type DshMemoryAgent } from "../platform/adapters/dsh/memory/memory-context.ts";
+import { createDshSessionFocus } from "../platform/adapters/dsh/session/session-focus.ts";
+import { createDshMemoryRecall } from "../platform/adapters/dsh/memory/memory-recall.ts";
+import { installDshMemoryScout, type DshMemoryScoutLlm } from "../platform/adapters/dsh/memory/memory-scout.ts";
+import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/context/system-prompt.ts";
 import {
   createDshSkillProviderFactory,
   ROLEBOX_SKILL_PROVIDER,
-} from "../platform/adapters/dsh/skill-provider.ts";
+} from "../platform/adapters/dsh/roles/skill-provider.ts";
 import type {
   DshSkillProvider,
   DshSkillProviderControl,
   DshSkillProviderLike,
-} from "../platform/adapters/dsh/skill-provider.ts";
+} from "../platform/adapters/dsh/roles/skill-provider.ts";
 import {
   DshRoleSwitchWebRoute,
   ROLE_SWITCH_ROUTE_PREFIX,
-} from "../platform/adapters/dsh/web-role-switch-route.ts";
-import type { DshWebServerRouteRegistrar } from "../platform/adapters/dsh/web-role-switch-route.ts";
-import { DshRoleboxMonitorWebRoute } from "../platform/adapters/dsh/web-rolebox-monitor-route.ts";
-import { DshCopilotSuggestWebRoute } from "../platform/adapters/dsh/web-copilot-route.ts";
-import { createCopilotSuggester } from "../platform/adapters/dsh/copilot-suggest.ts";
+} from "../platform/adapters/dsh/web/routes/web-role-switch-route.ts";
+import type { DshWebServerRouteRegistrar } from "../platform/adapters/dsh/web/routes/web-role-switch-route.ts";
+import { DshRoleboxMonitorWebRoute } from "../platform/adapters/dsh/web/routes/web-rolebox-monitor-route.ts";
+import { DshCopilotSuggestWebRoute } from "../platform/adapters/dsh/web/routes/web-copilot-route.ts";
+import { createCopilotSuggester } from "../platform/adapters/dsh/web/copilot-suggest.ts";
 import {
   globalCopilotConfigPath,
   projectCopilotConfigPath,
@@ -144,9 +144,9 @@ import type { DraftLlm } from "../copilot/draft/suggest.ts";
 import {
   DshRoleboxLogsWebRoute,
   ROLEBOX_LOGS_ROUTE_PREFIX,
-} from "../platform/adapters/dsh/web-rolebox-logs-route.ts";
-import { watchRoleboxState } from "../platform/adapters/dsh/watch-rolebox-state.ts";
-import { DshRoleboxReloader } from "../platform/adapters/dsh/rolebox-reload.ts";
+} from "../platform/adapters/dsh/web/routes/web-rolebox-logs-route.ts";
+import { watchRoleboxState } from "../platform/adapters/dsh/web/watch-rolebox-state.ts";
+import { DshRoleboxReloader } from "../platform/adapters/dsh/roles/rolebox-reload.ts";
 import {
   buildCanonicalTools,
   buildRoleSnapshotTools,
@@ -161,7 +161,7 @@ import { getDataDir } from "../cli/paths.ts";
 import {
   DshOutcomeDelivery,
   type DshOutcomeSubagentRuntime,
-} from "../platform/adapters/dsh/outcome-dispatch.ts";
+} from "../platform/adapters/dsh/execution/outcome-dispatch.ts";
 import type { OutcomeDispatchRequest } from "../graph/outcome/dispatch-effects.ts";
 import { GraphApplication } from "../graph/application/graph-application.ts";
 import {
@@ -1218,7 +1218,7 @@ function probeSkillRegistry(
 /**
  * Structural mirror of the host's image-attachment service.
  *
- * THE OWNING MODULE IS `src/platform/adapters/dsh/attachment.ts` (the
+ * THE OWNING MODULE IS `src/platform/adapters/dsh/tools/attachment.ts` (the
  * media-transport node). This LOCAL declaration is deliberate: the entry
  * declares the seam it consumes so this file compiles and is reviewable on its
  * own, instead of depending on a module another node writes in parallel. The
@@ -2156,8 +2156,8 @@ export async function apply(
     let outcomeHost: OutcomeHost | undefined;
     const outcomeDelivery = new DshOutcomeDelivery({
       subscribeExecutionEvents: (id, listener) => ctx.on("session/event", (...args: unknown[]) => {
-        const session = args[0] as { id: string; events?: readonly import("../platform/adapters/dsh/session.ts").DshSessionEventLike[];
-          snapshotEvents?(): readonly import("../platform/adapters/dsh/session.ts").DshSessionEventLike[] };
+        const session = args[0] as { id: string; events?: readonly import("../platform/adapters/dsh/session/session.ts").DshSessionEventLike[];
+          snapshotEvents?(): readonly import("../platform/adapters/dsh/session/session.ts").DshSessionEventLike[] };
         const event = args[1] as { type: string };
         if (session.id === id && event.type === "turn/end") listener(session.snapshotEvents?.() ?? session.events ?? []);
       }) ?? (() => { }),

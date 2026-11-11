@@ -27,7 +27,7 @@ jobs:
       - run: npm ci
       - name: Windows process lifecycle acceptance
         if: matrix.os == 'windows-latest'
-        run: npm test -- tests/platform/pi-worker-sandbox.test.ts
+        run: npm test -- tests/platform/adapters/pi/session/worker-sandbox.test.ts
       - name: Install Chromium for worker acceptance
         if: matrix.os == 'macos-latest'
         run: npx playwright install chromium

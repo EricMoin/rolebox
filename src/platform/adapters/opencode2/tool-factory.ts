@@ -53,7 +53,7 @@ export interface Opencode2ToolFactoryOptions {
  * "reply">` (node_modules/@opencode/plugin/dist/promise/permission.d.ts:19-21):
  * it can answer a permission request but cannot create one. `ask` therefore
  * resolves without prompting (DEGRADATION — same shape as the Pi adapter when
- * its host callback is absent, src/platform/adapters/pi/tool-factory.ts:120-140).
+ * its host callback is absent, src/platform/adapters/pi/tools/tool-factory.ts:120-140).
  */
 function toCanonicalContext(
   context: Opencode2ToolContext,

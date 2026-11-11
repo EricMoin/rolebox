@@ -62,8 +62,8 @@ import type { CanonicalToolContext } from "../../src/platform/types.ts";
 import {
   DSH_GRAPH_WORKER_GRANT,
   DSH_GRAPH_WORKER_TOOLS,
-} from "../../src/platform/adapters/dsh/graph-worker.ts";
-import { registerPiGraphWorker } from "../../src/platform/adapters/pi/graph-worker.ts";
+} from "../../src/platform/adapters/dsh/execution/graph-worker.ts";
+import { registerPiGraphWorker } from "../../src/platform/adapters/pi/execution/graph-worker.ts";
 import {
   __resetLoggingForTest,
   configureLogging,

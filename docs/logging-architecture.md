@@ -543,7 +543,7 @@ through the pipeline? Two rules:
      pipeline at all. The entry carries the **reason**, the guard's test fails an
      entry without one (or with a path that does not exist), and the reason is
      published in the guard's JSON report so an exemption can never be silent.
-     Today there is exactly one: `src/platform/adapters/dsh/web-ui/client.ts`,
+     Today there is exactly one: `src/platform/adapters/dsh/web/ui/client.ts`,
      the dsh web client bundle, where the kernel cannot load
      (`src/log/context.ts` requires the Node-only `node:async_hooks` module).
 

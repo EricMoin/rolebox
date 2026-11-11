@@ -155,11 +155,11 @@ How the split is consumed per platform:
 - **opencode** writes the string verbatim as the agent's `model:` field
   (`src/platform/adapters/opencode/agent-registrar.ts`).
 - **pi** splits on the first slash and resolves the pair against pi's model
-  registry (`src/platform/adapters/pi/role-switcher.ts`,
+  registry (`src/platform/adapters/pi/roles/role-switcher.ts`,
   `src/entries/pi.ts`).
 - **dsh** splits on the first slash into `agentOptions.provider` +
   `agentOptions.model` at spawn
-  (`src/platform/adapters/dsh/agent-registrar.ts`; see the
+  (`src/platform/adapters/dsh/roles/agent-registrar.ts`; see the
   [dsh plugin contract](dsh-plugin-contract.md) §4.2).
 
 *From `src/platform/adapters/opencode/agent-registrar.ts` — `serializeAgentFile` writes the agent's `model:` field verbatim:*
@@ -179,7 +179,7 @@ function serializeAgentFile(agent: AgentDefinition): string {
 }
 ```
 
-*From `src/platform/adapters/pi/role-switcher.ts` — `applyModel` splits on the first slash via `splitModel` and resolves against pi's model registry:*
+*From `src/platform/adapters/pi/roles/role-switcher.ts` — `applyModel` splits on the first slash via `splitModel` and resolves against pi's model registry:*
 
 ```ts
   /** Attempt to switch the active model to the role's model. */
@@ -195,7 +195,7 @@ function serializeAgentFile(agent: AgentDefinition): string {
         }
 ```
 
-*From `src/platform/adapters/dsh/agent-registrar.ts` — `mergeAgentOptions`, the actual first-slash split into `agentOptions.provider` + `agentOptions.model`:*
+*From `src/platform/adapters/dsh/roles/agent-registrar.ts` — `mergeAgentOptions`, the actual first-slash split into `agentOptions.provider` + `agentOptions.model`:*
 
 ```ts
   const ref = splitModel(definition.model);

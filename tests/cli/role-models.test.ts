@@ -4,7 +4,7 @@
  *
  * These read rolebox's own `role.yaml` files and classify models as
  * placeholders; per-harness catalog readers live in
- * tests/platform/model-catalog.test.ts.
+ * tests/platform/model-catalog/index.test.ts.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";

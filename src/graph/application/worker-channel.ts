@@ -23,7 +23,7 @@ export interface WorkerChannelGrant {
  *
  * The list is the channel's own access decision (`allowedTools` below), the set
  * the Pi worker process registers as model-facing tools
- * (`src/platform/adapters/pi/graph-worker.ts`) AND the host's own per-call
+ * (`src/platform/adapters/pi/execution/graph-worker.ts`) AND the host's own per-call
  * worker boundary ({@link WORKER_GRANTED_GRAPH_TOOLS},
  * `src/graph/host/tool-binding.ts`), so the face a worker process is HANDED, the
  * face the channel SERVES and the face the host ENFORCES are one and the same

@@ -75,7 +75,7 @@ export interface ConsoleWhitelistEntry {
  */
 export const CONSOLE_WHITELIST: readonly ConsoleWhitelistEntry[] = [
   {
-    path: "src/platform/adapters/dsh/web-ui/client.ts",
+    path: "src/platform/adapters/dsh/web/ui/client.ts",
     reason:
       "Browser code: the dsh web client cannot import the platform kernel because src/log/context.ts requires node:async_hooks. console.warn reports failed slot registration without pulling Node-only modules into the browser bundle.",
   },

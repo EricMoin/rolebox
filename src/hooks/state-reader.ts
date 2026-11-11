@@ -36,7 +36,7 @@ export interface RoleboxRuntimeState {
 // ── Reader ──────────────────────────────────────────────────────────────────
 
 // Deliberate exclusion: `activerole-<dirHash>.json` (the dsh adapter's
-// per-session active-role sidecar, `src/platform/adapters/dsh/active-role-store.ts`)
+// per-session active-role sidecar, `src/platform/adapters/dsh/roles/active-role-store.ts`)
 // is NOT read here. This reader models platform-agnostic rolebox runtime state
 // (dispatch / function / loop) shared by every host; active-role is a
 // dsh-specific concern whose observability is already served by the dsh routes
