@@ -8,10 +8,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
-import { linuxComputerUse } from "../../src/computer/drivers/linux.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin/index.ts";
+import { linuxComputerUse } from "../../src/computer/drivers/linux/index.ts";
 import { unsupportedComputerUse } from "../../src/computer/drivers/unsupported.ts";
-import { win32ComputerUse } from "../../src/computer/drivers/win32.ts";
+import { win32ComputerUse } from "../../src/computer/drivers/win32/index.ts";
 import type {
   ComputerCaptureRequest,
   ComputerInputRequest,
@@ -80,25 +80,29 @@ describe("darwin computer-use plans", () => {
     const click: ComputerInputRequest = { action: "click", x: 100, y: 200, button: "left", clicks: 1 };
     const left = planOf(darwinComputerUse.inputPlan(click, {}));
     expect(left.argv[0]).toBe("/usr/bin/osascript");
-    expect(left.script).toContain("postMouse($.kCGEventLeftMouseDown, 100, 200, $.kCGMouseButtonLeft, i)");
-    expect(left.script).toContain("postMouse($.kCGEventLeftMouseUp, 100, 200, $.kCGMouseButtonLeft, i)");
+    expect(left.script).toContain("var x = 100, y = 200, clicks = 1;");
+    expect(left.script).toContain("mouseDownType = $.kCGEventLeftMouseDown, mouseUpType = $.kCGEventLeftMouseUp");
+    expect(left.script).toContain("postMouse(mouseDownType, x, y, mouseButton, i)");
+    expect(left.script).toContain("postMouse(mouseUpType, x, y, mouseButton, i)");
     expect(left.driver).toBe("osascript");
 
     const double = planOf(darwinComputerUse.inputPlan({ ...click, clicks: 2 }, {}));
-    expect(double.script).toContain("i <= 2");
+    expect(double.script).toContain("var x = 100, y = 200, clicks = 2;");
+    expect(double.script).toContain("i <= clicks");
     expect(double.script).toContain("kCGMouseEventClickState");
 
     const right = planOf(darwinComputerUse.inputPlan({ ...click, button: "right" }, {}));
-    expect(right.script).toContain("postMouse($.kCGEventRightMouseDown, 100, 200, $.kCGMouseButtonRight, i)");
+    expect(right.script).toContain("var mouseButton = $.kCGMouseButtonRight, mouseDownType = $.kCGEventRightMouseDown, mouseUpType = $.kCGEventRightMouseUp;");
     expect(right.requires).toEqual(["/usr/bin/osascript"]);
     expect(right.cleanupPlan?.script).toContain("kCGEventRightMouseUp");
 
     const middle = planOf(darwinComputerUse.inputPlan({ ...click, button: "middle", clicks: 2 }, {}));
-    expect(middle.script).toContain("postMouse($.kCGEventOtherMouseDown, 100, 200, $.kCGMouseButtonCenter, i)");
-    expect(middle.script).toContain("i <= 2");
+    expect(middle.script).toContain("var mouseButton = $.kCGMouseButtonCenter, mouseDownType = $.kCGEventOtherMouseDown, mouseUpType = $.kCGEventOtherMouseUp;");
+    expect(middle.script).toContain("i <= clicks");
 
     const move = planOf(darwinComputerUse.inputPlan({ action: "move", x: 4, y: 5 }, {}));
-    expect(move.script).toContain("postMouse($.kCGEventMouseMoved, 4, 5)");
+    expect(move.script).toContain("var x = 4, y = 5;");
+    expect(move.script).toContain("postMouse($.kCGEventMouseMoved, x, y)");
     expect(move.requires).toEqual(["/usr/bin/osascript"]);
   });
 
@@ -305,7 +309,8 @@ describe("win32 computer-use plans", () => {
     expect(plan.argv).toContain("-STA");
     expect(plan.requires).toEqual(["powershell"]);
     expect(plan.script).toContain("Where-Object { $_.primary }");
-    expect(plan.script).toContain("$bitmap.Save('C:\\Users\\o''brien\\shot.png'");
+    expect(plan.script).toContain("$capturePath = 'C:\\Users\\o''brien\\shot.png'");
+    expect(plan.script).toContain("$bitmap.Save($capturePath,");
     expect(plan.script).toContain("CopyFromScreen");
   });
 

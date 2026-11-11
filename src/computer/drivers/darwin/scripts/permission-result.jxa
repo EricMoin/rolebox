@@ -1,0 +1,3 @@
+var PRINT_GRANTED = 'granted';
+var PRINT_DENIED = 'not granted';
+console.log(trusted ? PRINT_GRANTED : PRINT_DENIED);

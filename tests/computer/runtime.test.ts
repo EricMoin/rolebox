@@ -6,7 +6,7 @@ import { ComputerOperationQueue } from "../../src/computer/queue.ts";
 import { runComputerPlan } from "../../src/computer/exec.ts";
 import { captureResult, ensureCaptureDirectory } from "../../src/computer/capture.ts";
 import { createComputerTools } from "../../src/computer/tools.ts";
-import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin/index.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";
 import type { ComputerInputRequest, ComputerPlan } from "../../src/platform/system/types.ts";
 import type { CanonicalToolContext } from "../../src/platform/types.ts";

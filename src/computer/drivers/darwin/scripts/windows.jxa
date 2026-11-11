@@ -1,0 +1,27 @@
+ObjC.import('CoreGraphics');
+function value(dict, key) { var o = dict.objectForKey(key); return (o === undefined || o === null) ? undefined : o.js; }
+function run(argv) {
+  var filter = (argv && argv.length > 0) ? String(argv[0]).toLowerCase() : '';
+  var opts = $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements;
+  var list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(opts, $.kCGNullWindowID));
+  if (list === undefined || list === null) {
+    throw new Error('the window server did not return a window list this script can read');
+  }
+  var count = Number(list.count);
+  if (!(count >= 0)) {
+    throw new Error('the window server did not return a window list this script can read');
+  }
+  var out = [];
+  for (var i = 0; i < count; i++) {
+    var d = list.objectAtIndex(i);
+    if (value(d, 'kCGWindowLayer') !== 0) continue;
+    var owner = String(value(d, 'kCGWindowOwnerName') || '');
+    if (filter.length > 0 && owner.toLowerCase().indexOf(filter) === -1) continue;
+    var name = value(d, 'kCGWindowName');
+    out.push(value(d, 'kCGWindowNumber') + '\t' + owner + '\t' + ((name === undefined || name === null) ? '' : String(name)));
+  }
+  if (out.length === 0 && filter.length > 0) {
+    throw new Error('no visible window belongs to a process whose name contains "' + filter + '"');
+  }
+  return out.join('\n');
+}

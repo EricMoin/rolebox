@@ -1,10 +1,10 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { linuxComputerUse } from "../../src/computer/drivers/linux.ts";
+import { linuxComputerUse } from "../../src/computer/drivers/linux/index.ts";
 import type { ComputerCaptureGeometry, ComputerInputRequest, ComputerPlan, ComputerPlanOrRefusal } from "../../src/platform/system/types.ts";
 
 const ENV = { XDG_SESSION_TYPE: "x11", DISPLAY: ":7.0" };
@@ -97,6 +97,18 @@ describe("Linux desktop CUA", () => {
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual(DISPLAYS);
+  });
+
+  it.skipIf(process.platform === "win32")("passes a capture path containing shell syntax as one literal value", () => {
+    const { env, geometryTrace } = fixture();
+    const marker = join(env.CAPTURED, "..", "injected");
+    const path = `/tmp/shot 'quoted' $(touch ${marker}) \`touch ${marker}\`.png`;
+    const built = plan(linuxComputerUse.capturePlan({ path }, ENV));
+    const result = spawnSync(built.argv[0], built.argv.slice(1), { env, encoding: "utf8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(readFileSync(geometryTrace, "utf8")).toContain(`+repage ${path} DISPLAY=:7.0`);
+    expect(existsSync(marker)).toBe(false);
   });
 
   it.skipIf(process.platform === "win32")("does not report an empty successful display list after an X server error", () => {

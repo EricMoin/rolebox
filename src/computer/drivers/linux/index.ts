@@ -20,9 +20,13 @@ import type {
   ComputerPlan,
   ComputerPlanOrRefusal,
   SupportedComputerUse,
-} from "../../platform/system/types.ts";
-import { shellQuote, usableWindowId } from "./shared.ts";
-import { linuxDisplayScript, linuxGeometryJson, linuxGeometryScript, linuxTargetRefusal } from "./linux-geometry.ts";
+} from "../../../platform/system/types.ts";
+import { shellQuote, usableWindowId } from "../shared.ts";
+import { linuxDisplayScript, linuxGeometryJson, linuxGeometryScript, linuxTargetRefusal } from "./geometry.ts";
+import {
+  LINUX_CAPTURE_GUARD_SCRIPT, LINUX_CAPTURE_SCRIPT, LINUX_DRAG_SCRIPT, LINUX_FOCUS_CHECK_SCRIPT,
+  LINUX_LIST_DISPLAYS_SCRIPT, LINUX_PERMISSION_PROBE_SCRIPT, LINUX_WINDOWS_SCRIPT,
+} from "./native-scripts.ts";
 
 const SH = "/bin/sh";
 const XDOTOOL = "xdotool";
@@ -54,24 +58,9 @@ function capturePlan(request: ComputerCaptureRequest, env: NodeJS.ProcessEnv): C
   const script = [
     "set -e",
     linuxGeometryScript(request, env),
-    "if ! read_geometry; then",
-    "  echo 'could not determine the capture geometry on the current X11 screen' >&2",
-    "  exit 3",
-    "fi",
-    'before_geometry=$geometry_json',
-    "if command -v import >/dev/null 2>&1; then",
-    `  import -window root -crop "\${capture_w}x\${capture_h}+\${capture_x}+\${capture_y}" +repage ${path} >/dev/null`,
-    "elif command -v scrot >/dev/null 2>&1; then",
-    `  scrot -o -a "\${capture_x},\${capture_y},\${capture_w},\${capture_h}" ${path} >/dev/null`,
-    "else",
-    `  echo 'no X11 screenshot helper is installed; ${CAPTURE_INSTALL_HINT}' >&2`,
-    "  exit 127",
-    "fi",
-    'if ! read_geometry || [ "$before_geometry" != "$geometry_json" ]; then',
-    "  echo 'screenshot geometry changed; take a fresh screenshot' >&2",
-    "  exit 3",
-    "fi",
-    "printf '%s\\n' \"$geometry_json\"",
+    `rolebox_capture_path=${path}`,
+    `rolebox_capture_install_hint=${shellQuote(CAPTURE_INSTALL_HINT)}`,
+    LINUX_CAPTURE_SCRIPT,
   ].join("\n");
 
   return {
@@ -165,15 +154,9 @@ function keyCombo(keys: readonly string[]): KeyCombo {
 function focusScript(windowId: number): string {
   return [
     "set -e",
+    `rolebox_window_id=${windowId}`,
     `xdotool windowactivate --sync ${windowId}`,
-    "if ! active=$(xdotool getactivewindow); then",
-    "  echo 'could not verify the active X11 window' >&2",
-    "  exit 3",
-    "fi",
-    `if [ \"$active\" != '${windowId}' ]; then`,
-    "  echo 'the window manager refused foreground activation; select the target window manually and retry' >&2",
-    "  exit 3",
-    "fi",
+    LINUX_FOCUS_CHECK_SCRIPT,
   ].join("\n");
 }
 
@@ -183,8 +166,7 @@ function operationPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       const script = [
         "set -e",
         linuxDisplayScript(),
-        "monitors=$(read_monitors)",
-        "printf '%s\\n' \"$monitors\" | display_json",
+        LINUX_LIST_DISPLAYS_SCRIPT,
       ].join("\n");
       return { argv: [SH, "-c", script], script, windowsVerbatimArguments: false, requires: [SH, "xrandr", "awk"], driver: "xdotool" };
     }
@@ -226,11 +208,7 @@ function operationPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       const script = [
         "set -e",
         `xdotool mousemove --sync -- ${fromX} ${fromY}`,
-        "trap 'xdotool mouseup 1' 0",
-        "trap 'exit 129' HUP",
-        "trap 'exit 130' INT",
-        "trap 'exit 143' TERM",
-        "xdotool mousedown 1",
+        LINUX_DRAG_SCRIPT,
         `xdotool ${movement.join(" ")}`,
       ].join("\n");
       return {
@@ -244,10 +222,7 @@ function operationPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       // xdotool search prints ids only; the names come from one call per window.
       const script = [
         `ids=$(xdotool search ${search} 2>/dev/null) || ids=''`,
-        "for id in $ids; do",
-        '  name=$(xdotool getwindowname "$id" 2>/dev/null) || continue',
-        `  printf '%s\\t%s\\n' "$id" "$name"`,
-        "done",
+        LINUX_WINDOWS_SCRIPT,
       ].join("\n");
       return {
         argv: [SH, "-c", script],
@@ -306,10 +281,8 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
     windowId === undefined ? "set -e" : focusScript(windowId),
     ...(guard === undefined ? [] : [
       linuxGeometryScript(guard.target, env),
-      `if ! read_geometry || [ "$geometry_json" != ${shellQuote(linuxGeometryJson(guard.geometry))} ]; then`,
-      "  echo 'ROLEBOX_SCREENSHOT_STALE: screenshot geometry changed; take a fresh screenshot' >&2",
-      "  exit 3",
-      "fi",
+      `rolebox_expected_geometry=${shellQuote(linuxGeometryJson(guard.geometry))}`,
+      LINUX_CAPTURE_GUARD_SCRIPT,
     ]),
     'exec "$@"',
   ].join("\n");
@@ -337,24 +310,8 @@ export const linuxComputerUse: SupportedComputerUse = {
     // A successful exit confirms the X connection, not XTEST or application
     // acceptance. The probe does not inject input while checking access.
     const script = [
-      'case "${XDG_SESSION_TYPE:-}" in [Ww][Aa][Yy][Ll][Aa][Nn][Dd]) wayland=1 ;; *) wayland=0 ;; esac',
-      'if [ "$wayland" = 1 ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then',
-      "  echo 'Wayland session: rolebox drives X11 only, so input cannot be injected here.' >&2",
-      "  exit 3",
-      "fi",
-      "if ! command -v xdotool >/dev/null 2>&1; then",
-      `  echo '${XDOTOOL_INSTALL_HINT}' >&2`,
-      "  exit 4",
-      "fi",
-      'if [ -z "${DISPLAY:-}" ]; then',
-      "  echo 'DISPLAY is not set; run rolebox inside the target X11 desktop session.' >&2",
-      "  exit 5",
-      "fi",
-      "if ! xdotool getmouselocation >/dev/null; then",
-      "  echo 'cannot access the X server; check DISPLAY and XAUTHORITY for the target desktop session.' >&2",
-      "  exit 6",
-      "fi",
-      "echo 'X11 session: xdotool can access the X server. Input still requires the XTEST extension and target application support.'",
+      `rolebox_xdotool_install_hint=${shellQuote(XDOTOOL_INSTALL_HINT)}`,
+      LINUX_PERMISSION_PROBE_SCRIPT,
     ].join("\n");
     return {
       argv: [SH, "-c", script],

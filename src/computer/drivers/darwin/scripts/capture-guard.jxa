@@ -1,0 +1,3 @@
+var currentGeometry;
+try { currentGeometry = computerCaptureGeometry(guard.target); } catch (_) { throw new Error('ROLEBOX_SCREENSHOT_STALE: screenshot geometry changed; take a fresh screenshot'); }
+if (!computerSameGeometry(guard.geometry, currentGeometry)) throw new Error('ROLEBOX_SCREENSHOT_STALE: screenshot geometry changed; take a fresh screenshot');

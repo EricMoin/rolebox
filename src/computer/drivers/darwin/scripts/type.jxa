@@ -1,0 +1,25 @@
+ObjC.import('CoreGraphics');
+ObjC.import('ApplicationServices');
+ObjC.import('Foundation');
+if (!$.AXIsProcessTrusted()) throw new Error('Accessibility permission is not granted');
+// NSData.bytes is a void pointer; JXA's UniChar pointer metadata rejects it.
+ObjC.bindFunction('CGEventKeyboardSetUnicodeString', ['void', ['void *', 'unsigned long', 'void *']]);
+for (var i = 0; i < segments.length; i++) {
+  var segment = segments[i];
+  var isText = typeof segment === 'string';
+  var key = isText ? 0 : segment;
+  var down = $.CGEventCreateKeyboardEvent(null, key, true);
+  var up = $.CGEventCreateKeyboardEvent(null, key, false);
+  if (!down || !up) throw new Error('macOS could not create a keyboard event');
+  $.CGEventSetFlags(down, 0);
+  $.CGEventSetFlags(up, 0);
+  if (isText) {
+    var data = $(segment).dataUsingEncoding($.NSUTF16LittleEndianStringEncoding);
+    if (!data || Number(data.length) !== segment.length * 2) throw new Error('macOS could not encode the input text');
+    $.CGEventKeyboardSetUnicodeString(down, segment.length, data.bytes);
+    $.CGEventKeyboardSetUnicodeString(up, segment.length, data.bytes);
+  }
+  try { $.CGEventPost($.kCGHIDEventTap, down); }
+  finally { $.CGEventPost($.kCGHIDEventTap, up); }
+  $.NSThread.sleepForTimeInterval(0.005);
+}

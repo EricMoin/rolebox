@@ -1,0 +1,47 @@
+ObjC.import('Foundation');
+ObjC.import('ImageIO');
+ObjC.bindFunction('umask', ['unsigned int', ['unsigned int']]);
+$.umask(63);
+var before = computerCaptureGeometry(target);
+function computerIsNil(value) { return value === null || value === undefined || (typeof value.isNil === 'function' && value.isNil()); }
+function computerReadCapture(args) {
+  var files = $.NSFileManager.defaultManager;
+  if (!files.createFileAtPathContentsAttributes(path, $.NSData.data, {NSFilePosixPermissions: 384})) throw new Error('could not create the private screenshot file');
+  try {
+    var task = $.NSTask.alloc.init;
+    task.launchPath = '/usr/sbin/screencapture';
+    task.arguments = ['-x', '-t', 'png'].concat(args, [path]);
+    task.launch;
+    task.waitUntilExit;
+    if (Number(task.terminationStatus) !== 0) throw new Error('screencapture failed with status ' + Number(task.terminationStatus));
+    var data = $.NSData.dataWithContentsOfFile(path);
+    if (computerIsNil(data) || Number(data.length) === 0) throw new Error('screencapture did not produce an image');
+    var source = $.CGImageSourceCreateWithData(data, null);
+    if (computerIsNil(ObjC.castRefToObject(source))) throw new Error('screencapture did not produce a readable image');
+    var image;
+    try { image = $.CGImageSourceCreateImageAtIndex(source, 0, null); }
+    finally { $.CFRelease(ObjC.castRefToObject(source)); }
+    if (computerIsNil(ObjC.castRefToObject(image)) || !(Number($.CGImageGetWidth(image)) > 0 && Number($.CGImageGetHeight(image)) > 0)) {
+      if (!computerIsNil(ObjC.castRefToObject(image))) $.CGImageRelease(image);
+      throw new Error('screencapture returned an empty screenshot image');
+    }
+    return image;
+  } finally { files.removeItemAtPathError(path, null); }
+}
+var image = target.windowId !== undefined
+  ? computerReadCapture(['-o', '-l', String(target.windowId)])
+  : computerCompositeCapture(before.bounds, before.displays, function (bounds) {
+      return computerReadCapture(['-R', [bounds.x, bounds.y, bounds.w, bounds.h].join(',')]);
+    });
+try {
+  var after = computerCaptureGeometry(target);
+  if (!computerSameGeometry(before, after)) throw new Error('screenshot geometry changed; take a fresh screenshot');
+  if (!$.NSFileManager.defaultManager.createFileAtPathContentsAttributes(path, $.NSData.data, {NSFilePosixPermissions: 384})) throw new Error('could not create the private screenshot file');
+  var destination = $.CGImageDestinationCreateWithURL($.NSURL.fileURLWithPath(path), $('public.png'), 1, null);
+  if (computerIsNil(ObjC.castRefToObject(destination))) throw new Error('could not open the screenshot PNG destination');
+  try {
+    $.CGImageDestinationAddImage(destination, image, null);
+    if (!$.CGImageDestinationFinalize(destination)) throw new Error('could not write the screenshot PNG');
+  } finally { $.CFRelease(ObjC.castRefToObject(destination)); }
+} finally { $.CGImageRelease(image); }
+JSON.stringify(before);

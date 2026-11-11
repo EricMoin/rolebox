@@ -1,6 +1,6 @@
 
 import { describe, expect, it } from "vitest";
-import { win32ComputerUse } from "../../src/computer/drivers/win32.ts";
+import { win32ComputerUse } from "../../src/computer/drivers/win32/index.ts";
 import { parseCaptureGeometry } from "../../src/computer/geometry.ts";
 import type { ComputerCaptureGuard, ComputerCaptureRequest, ComputerInputRequest, ComputerPlan, ComputerPlanOrRefusal } from "../../src/platform/system/types.ts";
 
@@ -238,7 +238,9 @@ describe("Windows desktop CUA", () => {
     const release = script.indexOf("[RoleboxMouse]::mouse_event(0x0004");
     expect(script.lastIndexOf("try {", down)).toBeGreaterThan(script.indexOf("SetCursorPos(-10, 20)"));
     expect(script.indexOf("} finally {", down)).toBeLessThan(release);
-    expect(script).toContain("$step -le 50");
+    expect(script).toContain("$dragFromX = -10; $dragFromY = 20; $dragToX = 200; $dragToY = 300");
+    expect(script).toContain("$dragSteps = 50; $dragDelay = 20");
+    expect(script).toContain("$step -le $dragSteps");
     expect(script).toContain("SetCursorPos($x, $y)");
     expect(script).toContain("throw 'could not move the pointer during drag'");
     expect(built.cleanupPlan?.script).toContain("[RoleboxMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)");

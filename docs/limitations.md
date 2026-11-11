@@ -101,7 +101,7 @@ Operating-system permissions and these platform limits still apply.
 - **Permissions belong to the application that launched the host.** On macOS,
   Screen Recording, Accessibility and Automation for System Events are granted
   to the terminal or agent process — not to rolebox — and installing the package
-  grants none of them (`src/computer/drivers/darwin.ts:59-63`).
+  grants none of them (`src/computer/drivers/darwin/index.ts`).
   `computer_permissions` reads this process's own TCC Accessibility trust
   (`AXIsProcessTrusted` through JXA), never the global `UI elements enabled`
   preference, which is a System Events UI-scripting setting and can answer `true`
@@ -127,9 +127,9 @@ Operating-system permissions and these platform limits still apply.
   outside the current X root screen. See [computer-use.md](computer-use.md#screenshots-and-coordinates).
 - **Linux is X11 only.** A Wayland session is an explicit refusal — `scrot`,
   `import` and `xdotool` cannot inject through a Wayland compositor, and
-  rolebox declares no Wayland driver (`src/computer/drivers/linux.ts:36-43`) —
+  rolebox declares no Wayland driver (`src/computer/drivers/linux/index.ts`) —
   and a missing `import`/`scrot`/`xdotool` is an explicit refusal naming the
-  install (`src/computer/drivers/linux.ts:30-34`,
+  install (`src/computer/drivers/linux/index.ts`,
   `src/computer/exec.ts:112-119`).
 - **Codex MCP has no permission-dialog callback.** The global `computerUse` gate
   controls registration; attributed native roles additionally apply their tool
@@ -149,7 +149,7 @@ Operating-system permissions and these platform limits still apply.
   tool shows none to any role, whatever that role's `tools:` map says.
 - **Windows needs PowerShell and an interactive session**, and an unlisted
   platform is refused outright
-  (`src/computer/drivers/win32.ts:14-17`, `src/computer/drivers/unsupported.ts:13-17`).
+  (`src/computer/drivers/win32/index.ts`, `src/computer/drivers/unsupported.ts:13-17`).
 - **The Linux and Windows drivers require live desktop validation.** Tests
   cover command plans, fake-helper execution, permission verdicts, cancellation,
   and host transport. They do not establish live behavior on every operating

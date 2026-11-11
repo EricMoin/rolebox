@@ -1,0 +1,21 @@
+import { loadNativeScript } from "../native-script.ts";
+
+export const DARWIN_GEOMETRY_SCRIPT = loadNativeScript(new URL("./scripts/geometry.jxa", import.meta.url));
+export const DARWIN_COMPOSITE_SCRIPT = loadNativeScript(new URL("./scripts/composite.jxa", import.meta.url));
+export const DARWIN_CAPTURE_SCRIPT = loadNativeScript(new URL("./scripts/capture.jxa", import.meta.url));
+export const DARWIN_CAPTURE_GUARD_SCRIPT = loadNativeScript(new URL("./scripts/capture-guard.jxa", import.meta.url));
+export const DARWIN_FOCUS_SCRIPT = loadNativeScript(new URL("./scripts/focus.jxa", import.meta.url));
+export const DARWIN_QUARTZ_INPUT_SCRIPT = loadNativeScript(new URL("./scripts/quartz-input.jxa", import.meta.url));
+export const DARWIN_MOUSE_RELEASE_SCRIPT = loadNativeScript(new URL("./scripts/mouse-release.jxa", import.meta.url));
+export const DARWIN_CLICK_SCRIPT = loadNativeScript(new URL("./scripts/click.jxa", import.meta.url));
+export const DARWIN_MOVE_SCRIPT = loadNativeScript(new URL("./scripts/move.jxa", import.meta.url));
+export const DARWIN_SCROLL_SCRIPT = loadNativeScript(new URL("./scripts/scroll.jxa", import.meta.url));
+export const DARWIN_DRAG_SCRIPT = loadNativeScript(new URL("./scripts/drag.jxa", import.meta.url));
+export const DARWIN_TYPE_SCRIPT = loadNativeScript(new URL("./scripts/type.jxa", import.meta.url));
+export const DARWIN_WINDOWS_SCRIPT = loadNativeScript(new URL("./scripts/windows.jxa", import.meta.url));
+export const DARWIN_ACCESSIBILITY_PROBE_SCRIPT = loadNativeScript(new URL("./scripts/accessibility-probe.jxa", import.meta.url));
+export const DARWIN_ACCESSIBILITY_PROMPT_SCRIPT = loadNativeScript(new URL("./scripts/accessibility-prompt.jxa", import.meta.url));
+export const DARWIN_CAPTURE_PERMISSION_PROBE_SCRIPT = loadNativeScript(new URL("./scripts/capture-permission-probe.jxa", import.meta.url));
+export const DARWIN_CAPTURE_PERMISSION_PROMPT_SCRIPT = loadNativeScript(new URL("./scripts/capture-permission-prompt.jxa", import.meta.url));
+export const DARWIN_PERMISSION_RESULT_SCRIPT = loadNativeScript(new URL("./scripts/permission-result.jxa", import.meta.url));
+export const DARWIN_DISPLAYS_SCRIPT = loadNativeScript(new URL("./scripts/displays.jxa", import.meta.url));

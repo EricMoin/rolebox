@@ -13,7 +13,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeF
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureDirectory, captureFilePath, captureResult, ensureCaptureDirectory, readPixelScale } from "../../src/computer/capture.ts";
-import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin/index.ts";
 import { helperAvailable, spawnVectorFor } from "../../src/computer/exec.ts";
 import { PNG_SIGNATURE, hasPngSignature, readPngResolution, readPngSize } from "../../src/computer/png.ts";
 import {
@@ -179,12 +179,15 @@ describe("computer tools — dry runs", () => {
       await createComputerClickTool().execute({ x: 10, y: 20, button: "left", clicks: 2, dry_run: true }, context),
     );
     expect(click.argv[0]).toBe("/usr/bin/osascript");
-    expect(click.script).toContain("postMouse($.kCGEventLeftMouseDown, 10, 20, $.kCGMouseButtonLeft, i)");
-    expect(click.script).toContain("i <= 2");
+    expect(click.script).toContain("var x = 10, y = 20, clicks = 2;");
+    expect(click.script).toContain("mouseDownType = $.kCGEventLeftMouseDown");
+    expect(click.script).toContain("postMouse(mouseDownType, x, y, mouseButton, i)");
+    expect(click.script).toContain("i <= clicks");
 
     const move = parseReport(await createComputerMoveTool().execute({ x: 1, y: 2, dry_run: true }, context));
     expect(move.argv[0]).toBe("/usr/bin/osascript");
-    expect(move.script).toContain("postMouse($.kCGEventMouseMoved, 1, 2)");
+    expect(move.script).toContain("var x = 1, y = 2;");
+    expect(move.script).toContain("postMouse($.kCGEventMouseMoved, x, y)");
 
     const typed = parseReport(await createComputerTypeTool().execute({ text: "hello", dry_run: true }, context));
     expect(typed.script).toContain('var segments = ["hello"];');

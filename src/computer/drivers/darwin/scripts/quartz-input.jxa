@@ -1,0 +1,11 @@
+ObjC.import('CoreGraphics');
+ObjC.import('ApplicationServices');
+ObjC.import('Foundation');
+if (!$.AXIsProcessTrusted()) throw new Error('Accessibility permission is not granted');
+function postMouse(type, x, y, button, clickCount) {
+  if (button === undefined) button = $.kCGMouseButtonLeft;
+  var event = $.CGEventCreateMouseEvent(null, type, $.CGPointMake(x, y), button);
+  if (!event) throw new Error('macOS could not create a mouse event');
+  if (clickCount !== undefined) $.CGEventSetIntegerValueField(event, $.kCGMouseEventClickState, clickCount);
+  $.CGEventPost($.kCGHIDEventTap, event);
+}

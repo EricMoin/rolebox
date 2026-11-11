@@ -37,9 +37,16 @@ import type {
   ComputerPlan,
   ComputerPlanOrRefusal,
   SupportedComputerUse,
-} from "../../platform/system/types.ts";
-import { REGION_REFUSAL, usableWindowId, wholeRegion } from "./shared.ts";
-import { DARWIN_GEOMETRY_SCRIPT, darwinCaptureGuardScript, darwinCaptureScript } from "./darwin-geometry.ts";
+} from "../../../platform/system/types.ts";
+import { REGION_REFUSAL, usableWindowId, wholeRegion } from "../shared.ts";
+import { DARWIN_GEOMETRY_SCRIPT, darwinCaptureGuardScript, darwinCaptureScript } from "./geometry.ts";
+
+import {
+  DARWIN_DISPLAYS_SCRIPT, DARWIN_FOCUS_SCRIPT, DARWIN_QUARTZ_INPUT_SCRIPT as QUARTZ_INPUT_SCRIPT, DARWIN_MOUSE_RELEASE_SCRIPT,
+  DARWIN_CLICK_SCRIPT, DARWIN_MOVE_SCRIPT, DARWIN_SCROLL_SCRIPT, DARWIN_DRAG_SCRIPT, DARWIN_TYPE_SCRIPT,
+  DARWIN_WINDOWS_SCRIPT, DARWIN_ACCESSIBILITY_PROBE_SCRIPT, DARWIN_ACCESSIBILITY_PROMPT_SCRIPT,
+  DARWIN_CAPTURE_PERMISSION_PROBE_SCRIPT, DARWIN_CAPTURE_PERMISSION_PROMPT_SCRIPT, DARWIN_PERMISSION_RESULT_SCRIPT,
+} from "./native-scripts.ts";
 
 const OSASCRIPT = "/usr/bin/osascript";
 
@@ -183,85 +190,23 @@ function javaScriptPlan(script: string, permissionHint?: string): ComputerPlan {
 function displayListingPlan(): ComputerPlan {
   return javaScriptPlan([
     DARWIN_GEOMETRY_SCRIPT,
-    "JSON.stringify(computerDisplays());",
+    DARWIN_DISPLAYS_SCRIPT,
   ].join("\n"));
 }
 
 function focusPlan(windowId: number): ComputerPlanOrRefusal {
   if (!usableWindowId(windowId)) return "a window id must be a positive whole number (macOS window numbers come from computer_windows).";
   return javaScriptPlan([
-    "ObjC.import('CoreGraphics');",
-    "ObjC.import('ApplicationServices');",
-    "if (!$.AXIsProcessTrusted()) throw new Error('Accessibility permission is not granted');",
     `var targetId = ${windowId};`,
-    "function value(dict, key) { var o = dict.objectForKey(key); return (o === undefined || o === null) ? undefined : o.js; }",
-    "function geometry(dict) { return ObjC.deepUnwrap(dict.objectForKey('kCGWindowBounds')); }",
-    "function sameBounds(a, b) { return a.X === b.X && a.Y === b.Y && a.Width === b.Width && a.Height === b.Height; }",
-    "var list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID));",
-    "var target;",
-    "for (var i = 0; i < Number(list.count); i++) {",
-    "  var item = list.objectAtIndex(i);",
-    "  if (Number(value(item, 'kCGWindowNumber')) === targetId && Number(value(item, 'kCGWindowLayer')) === 0) target = item;",
-    "}",
-    "if (!target) throw new Error('the requested window is not visible; refresh computer_windows');",
-    "var pid = Number(value(target, 'kCGWindowOwnerPID'));",
-    "var bounds = geometry(target);",
-    "var title = value(target, 'kCGWindowName');",
-    "var sameIdentity = 0;",
-    "for (var i = 0; i < Number(list.count); i++) {",
-    "  var item = list.objectAtIndex(i);",
-    "  if (Number(value(item, 'kCGWindowOwnerPID')) !== pid || Number(value(item, 'kCGWindowLayer')) !== 0) continue;",
-    "  if (sameBounds(geometry(item), bounds) && (title === undefined || title === null || title === '' || value(item, 'kCGWindowName') === title)) sameIdentity++;",
-    "}",
-    "if (sameIdentity !== 1) throw new Error('the window id cannot be matched unambiguously to an Accessibility window');",
-    "var system = Application('System Events');",
-    "var processes = system.processes.whose({unixId: pid})();",
-    "if (processes.length !== 1) throw new Error('the window owner is no longer available');",
-    "var process = processes[0];",
-    "function matches(window) {",
-    "  var position = window.position();",
-    "  var size = window.size();",
-    "  return position[0] === bounds.X && position[1] === bounds.Y && size[0] === bounds.Width && size[1] === bounds.Height && (title === undefined || title === null || title === '' || window.name() === title);",
-    "}",
-    "var windows = process.windows();",
-    "var matchesFound = [];",
-    "for (var i = 0; i < windows.length; i++) { if (matches(windows[i])) matchesFound.push(windows[i]); }",
-    "if (matchesFound.length !== 1) throw new Error('the requested window has no unique Accessibility match; focus it manually');",
-    "var window = matchesFound[0];",
-    "process.frontmost = true;",
-    "window.attributes.byName('AXMain').value = true;",
-    "window.actions.byName('AXRaise').perform();",
-    "var focused = false;",
-    "for (var attempt = 0; attempt < 10; attempt++) {",
-    "  delay(0.05);",
-    "  var current = process.attributes.byName('AXFocusedWindow').value();",
-    "  if (process.frontmost() && matches(current)) { focused = true; break; }",
-    "}",
-    "if (!focused) throw new Error('macOS did not focus the requested window');",
+    DARWIN_FOCUS_SCRIPT,
   ].join("\n"), INPUT_PERMISSION_HINT);
 }
-
-const QUARTZ_INPUT_SCRIPT = [
-  "ObjC.import('CoreGraphics');",
-  "ObjC.import('ApplicationServices');",
-  "ObjC.import('Foundation');",
-  "if (!$.AXIsProcessTrusted()) throw new Error('Accessibility permission is not granted');",
-  "function postMouse(type, x, y, button, clickCount) {",
-  "  if (button === undefined) button = $.kCGMouseButtonLeft;",
-  "  var event = $.CGEventCreateMouseEvent(null, type, $.CGPointMake(x, y), button);",
-  "  if (!event) throw new Error('macOS could not create a mouse event');",
-  "  if (clickCount !== undefined) $.CGEventSetIntegerValueField(event, $.kCGMouseEventClickState, clickCount);",
-  "  $.CGEventPost($.kCGHIDEventTap, event);",
-  "}",
-].join("\n");
 
 function mouseReleasePlan(button: string, up: string): ComputerPlan {
   return javaScriptPlan([
     QUARTZ_INPUT_SCRIPT,
-    "var current = $.CGEventCreate(null);",
-    "if (!current) throw new Error('macOS could not read the pointer position');",
-    "var point = $.CGEventGetLocation(current);",
-    `postMouse($.${up}, point.x, point.y, $.${button});`,
+    `var mouseUpType = $.${up}, mouseButton = $.${button};`,
+    DARWIN_MOUSE_RELEASE_SCRIPT,
   ].join("\n"), QUARTZ_PERMISSION_HINT);
 }
 
@@ -280,17 +225,9 @@ function clickPlan(request: Extract<ComputerInputRequest, { action: "click" }>):
   const [button, down, up] = events;
   const click = javaScriptPlan([
     QUARTZ_INPUT_SCRIPT,
-    `postMouse($.kCGEventMouseMoved, ${x}, ${y});`,
-    "$.NSThread.sleepForTimeInterval(0.02);",
-    `for (var i = 1; i <= ${request.clicks}; i++) {`,
-    "  try {",
-    `    postMouse($.${down}, ${x}, ${y}, $.${button}, i);`,
-    "    $.NSThread.sleepForTimeInterval(0.02);",
-    "  } finally {",
-    `    postMouse($.${up}, ${x}, ${y}, $.${button}, i);`,
-    "  }",
-    `  if (i < ${request.clicks}) $.NSThread.sleepForTimeInterval(0.05);`,
-    "}",
+    `var x = ${x}, y = ${y}, clicks = ${request.clicks};`,
+    `var mouseButton = $.${button}, mouseDownType = $.${down}, mouseUpType = $.${up};`,
+    DARWIN_CLICK_SCRIPT,
   ].join("\n"), QUARTZ_PERMISSION_HINT);
   return { ...click, cleanupPlan: mouseReleasePlan(button, up) };
 }
@@ -301,7 +238,8 @@ function movePlan(request: Extract<ComputerInputRequest, { action: "move" }>): C
   if (!Number.isFinite(x) || !Number.isFinite(y)) return "pointer coordinates must be finite numbers.";
   return javaScriptPlan([
     QUARTZ_INPUT_SCRIPT,
-    `postMouse($.kCGEventMouseMoved, ${x}, ${y});`,
+    `var x = ${x}, y = ${y};`,
+    DARWIN_MOVE_SCRIPT,
   ].join("\n"), QUARTZ_PERMISSION_HINT);
 }
 
@@ -309,20 +247,19 @@ function scrollPlan(request: Extract<ComputerInputRequest, { action: "scroll" }>
   if (!["up", "down", "left", "right"].includes(request.direction)) return "scroll direction must be up, down, left or right.";
   if (!Number.isInteger(request.amount) || request.amount < 1 || request.amount > 100) return "scroll amount must be a whole number from 1 to 100 wheel ticks.";
   if ((request.x === undefined) !== (request.y === undefined)) return "scroll coordinates must include both x and y.";
-  const statements = [QUARTZ_INPUT_SCRIPT];
+  let point: { x: number; y: number } | null = null;
   if (request.x !== undefined && request.y !== undefined) {
     if (!Number.isFinite(request.x) || !Number.isFinite(request.y)) return "scroll coordinates must be finite numbers.";
-    statements.push(`postMouse($.kCGEventMouseMoved, ${Math.round(request.x)}, ${Math.round(request.y)});`);
-    statements.push("$.NSThread.sleepForTimeInterval(0.05);");
+    point = { x: Math.round(request.x), y: Math.round(request.y) };
   }
   const vertical = request.direction === "up" ? request.amount : request.direction === "down" ? -request.amount : 0;
   const horizontal = request.direction === "left" ? request.amount : request.direction === "right" ? -request.amount : 0;
-  statements.push(
-    `var event = $.CGEventCreateScrollWheelEvent2(null, $.kCGScrollEventUnitLine, 2, ${vertical}, ${horizontal}, 0);`,
-    "if (!event) throw new Error('macOS could not create a scroll event');",
-    "$.CGEventPost($.kCGHIDEventTap, event);",
-  );
-  return javaScriptPlan(statements.join("\n"), QUARTZ_PERMISSION_HINT);
+  return javaScriptPlan([
+    QUARTZ_INPUT_SCRIPT,
+    `var scrollPoint = ${JSON.stringify(point)};`,
+    `var vertical = ${vertical}, horizontal = ${horizontal};`,
+    DARWIN_SCROLL_SCRIPT,
+  ].join("\n"), QUARTZ_PERMISSION_HINT);
 }
 
 function dragPlan(request: Extract<ComputerInputRequest, { action: "drag" }>): ComputerPlanOrRefusal {
@@ -335,19 +272,7 @@ function dragPlan(request: Extract<ComputerInputRequest, { action: "drag" }>): C
     `var fromX = ${fromX}, fromY = ${fromY}, toX = ${toX}, toY = ${toY};`,
     `var steps = ${Math.ceil(request.durationMs / 16)};`,
     `var interval = ${request.durationMs / 1000} / steps;`,
-    "var x = fromX, y = fromY;",
-    "postMouse($.kCGEventMouseMoved, x, y);",
-    "try {",
-    "  postMouse($.kCGEventLeftMouseDown, x, y);",
-    "  for (var i = 1; i <= steps; i++) {",
-    "    $.NSThread.sleepForTimeInterval(interval);",
-    "    x = fromX + (toX - fromX) * i / steps;",
-    "    y = fromY + (toY - fromY) * i / steps;",
-    "    postMouse($.kCGEventLeftMouseDragged, x, y);",
-    "  }",
-    "} finally {",
-    "  postMouse($.kCGEventLeftMouseUp, x, y);",
-    "}",
+    DARWIN_DRAG_SCRIPT,
   ].join("\n"), QUARTZ_PERMISSION_HINT);
   return {
     ...drag,
@@ -380,32 +305,8 @@ function typePlan(text: string): ComputerPlanOrRefusal {
     if (chunk.length > 0) segments.push(chunk);
   }
   return javaScriptPlan([
-    "ObjC.import('CoreGraphics');",
-    "ObjC.import('ApplicationServices');",
-    "ObjC.import('Foundation');",
-    "if (!$.AXIsProcessTrusted()) throw new Error('Accessibility permission is not granted');",
-    // NSData.bytes is a void pointer; JXA's UniChar pointer metadata rejects it.
-    "ObjC.bindFunction('CGEventKeyboardSetUnicodeString', ['void', ['void *', 'unsigned long', 'void *']]);",
     `var segments = ${JSON.stringify(segments)};`,
-    "for (var i = 0; i < segments.length; i++) {",
-    "  var segment = segments[i];",
-    "  var isText = typeof segment === 'string';",
-    "  var key = isText ? 0 : segment;",
-    "  var down = $.CGEventCreateKeyboardEvent(null, key, true);",
-    "  var up = $.CGEventCreateKeyboardEvent(null, key, false);",
-    "  if (!down || !up) throw new Error('macOS could not create a keyboard event');",
-    "  $.CGEventSetFlags(down, 0);",
-    "  $.CGEventSetFlags(up, 0);",
-    "  if (isText) {",
-    "    var data = $(segment).dataUsingEncoding($.NSUTF16LittleEndianStringEncoding);",
-    "    if (!data || Number(data.length) !== segment.length * 2) throw new Error('macOS could not encode the input text');",
-    "    $.CGEventKeyboardSetUnicodeString(down, segment.length, data.bytes);",
-    "    $.CGEventKeyboardSetUnicodeString(up, segment.length, data.bytes);",
-    "  }",
-    "  try { $.CGEventPost($.kCGHIDEventTap, down); }",
-    "  finally { $.CGEventPost($.kCGHIDEventTap, up); }",
-    "  $.NSThread.sleepForTimeInterval(0.005);",
-    "}",
+    DARWIN_TYPE_SCRIPT,
   ].join("\n"), QUARTZ_PERMISSION_HINT);
 }
 
@@ -481,35 +382,7 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
  * list, because an empty list is indistinguishable from a broken listing.
  */
 function windowListingScript(): string {
-  return [
-    "ObjC.import('CoreGraphics');",
-    "function value(dict, key) { var o = dict.objectForKey(key); return (o === undefined || o === null) ? undefined : o.js; }",
-    "function run(argv) {",
-    "  var filter = (argv && argv.length > 0) ? String(argv[0]).toLowerCase() : '';",
-    "  var opts = $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements;",
-    "  var list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(opts, $.kCGNullWindowID));",
-    "  if (list === undefined || list === null) {",
-    "    throw new Error('the window server did not return a window list this script can read');",
-    "  }",
-    "  var count = Number(list.count);",
-    "  if (!(count >= 0)) {",
-    "    throw new Error('the window server did not return a window list this script can read');",
-    "  }",
-    "  var out = [];",
-    "  for (var i = 0; i < count; i++) {",
-    "    var d = list.objectAtIndex(i);",
-    "    if (value(d, 'kCGWindowLayer') !== 0) continue;",
-    "    var owner = String(value(d, 'kCGWindowOwnerName') || '');",
-    "    if (filter.length > 0 && owner.toLowerCase().indexOf(filter) === -1) continue;",
-    "    var name = value(d, 'kCGWindowName');",
-    "    out.push(value(d, 'kCGWindowNumber') + '\\t' + owner + '\\t' + ((name === undefined || name === null) ? '' : String(name)));",
-    "  }",
-    "  if (out.length === 0 && filter.length > 0) {",
-    "    throw new Error('no visible window belongs to a process whose name contains \"' + filter + '\"');",
-    "  }",
-    "  return out.join('\\n');",
-    "}",
-  ].join("\n");
+  return DARWIN_WINDOWS_SCRIPT;
 }
 
 /**
@@ -561,11 +434,6 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
 // is `AXIsProcessTrusted` / `AXIsProcessTrustedWithOptions`, which JXA binds once
 // `ObjC.import('ApplicationServices')` has run.
 
-/** The one token the probe prints when this process is trusted for input. */
-const DARWIN_PROBE_GRANTED = "granted";
-/** The one token the probe prints when this process is NOT trusted for input. */
-const DARWIN_PROBE_DENIED = "not granted";
-
 /**
  * The JXA body that reads one TCC Accessibility answer and prints exactly one
  * token: `granted` or `not granted`, and nothing else.
@@ -577,13 +445,10 @@ const DARWIN_PROBE_DENIED = "not granted";
  * (`2026-10-13 13:55:42.315 osascript[31311:60752701] granted`), which an
  * exact-token verdict could not read as a grant.
  */
-function tccScript(trustCall: string): string {
+function tccScript(script: string): string {
   return [
-    "ObjC.import('ApplicationServices');",
-    "ObjC.import('Foundation');",
-    `var PRINT_GRANTED = '${DARWIN_PROBE_GRANTED}';`,
-    `var PRINT_DENIED = '${DARWIN_PROBE_DENIED}';`,
-    `console.log(${trustCall} ? PRINT_GRANTED : PRINT_DENIED);`,
+    script,
+    DARWIN_PERMISSION_RESULT_SCRIPT,
   ].join("\n");
 }
 
@@ -606,29 +471,15 @@ function tccPlan(script: string): ComputerPlan {
 
 /** The probe: read THIS process's own TCC Accessibility trust. */
 function permissionProbePlan(): ComputerPlan {
-  return tccPlan(tccScript("$.AXIsProcessTrusted()"));
+  return tccPlan(tccScript(DARWIN_ACCESSIBILITY_PROBE_SCRIPT));
 }
 
 function capturePermissionProbePlan(): ComputerPlan {
-  return javaScriptPlan([
-    "ObjC.import('CoreGraphics');",
-    "try { ObjC.bindFunction('CGPreflightScreenCaptureAccess', ['bool', []]); } catch (_) { throw new Error('this macOS version has no Screen Recording permission probe'); }",
-    "var probe;",
-    "try { probe = $.CGPreflightScreenCaptureAccess; } catch (_) { throw new Error('this macOS version has no Screen Recording permission probe'); }",
-    "if (typeof probe !== 'function') throw new Error('this macOS version has no Screen Recording permission probe');",
-    `console.log(probe() ? '${DARWIN_PROBE_GRANTED}' : '${DARWIN_PROBE_DENIED}');`,
-  ].join("\n"), SCREEN_RECORDING_HINT);
+  return javaScriptPlan(tccScript(DARWIN_CAPTURE_PERMISSION_PROBE_SCRIPT), SCREEN_RECORDING_HINT);
 }
 
 function capturePermissionPromptPlan(): ComputerPlan {
-  return javaScriptPlan([
-    "ObjC.import('CoreGraphics');",
-    "try { ObjC.bindFunction('CGRequestScreenCaptureAccess', ['bool', []]); } catch (_) { throw new Error('this macOS version has no Screen Recording permission request API'); }",
-    "var request;",
-    "try { request = $.CGRequestScreenCaptureAccess; } catch (_) { throw new Error('this macOS version has no Screen Recording permission request API'); }",
-    "if (typeof request !== 'function') throw new Error('this macOS version has no Screen Recording permission request API');",
-    `console.log(request() ? '${DARWIN_PROBE_GRANTED}' : '${DARWIN_PROBE_DENIED}');`,
-  ].join("\n"), SCREEN_RECORDING_HINT);
+  return javaScriptPlan(tccScript(DARWIN_CAPTURE_PERMISSION_PROMPT_SCRIPT), SCREEN_RECORDING_HINT);
 }
 
 /**
@@ -643,11 +494,7 @@ function capturePermissionPromptPlan(): ComputerPlan {
  * be used.
  */
 function permissionPromptPlan(): ComputerPlan {
-  return tccPlan(
-    tccScript(
-      "$.AXIsProcessTrustedWithOptions($.NSDictionary.dictionaryWithObjectForKey(true, ObjC.castRefToObject($.kAXTrustedCheckOptionPrompt)))",
-    ),
-  );
+  return tccPlan(tccScript(DARWIN_ACCESSIBILITY_PROMPT_SCRIPT));
 }
 
 /** The macOS computer-use facts, declared once for the darwin descriptor. */

@@ -1,0 +1,11 @@
+postMouse($.kCGEventMouseMoved, x, y);
+$.NSThread.sleepForTimeInterval(0.02);
+for (var i = 1; i <= clicks; i++) {
+  try {
+    postMouse(mouseDownType, x, y, mouseButton, i);
+    $.NSThread.sleepForTimeInterval(0.02);
+  } finally {
+    postMouse(mouseUpType, x, y, mouseButton, i);
+  }
+  if (i < clicks) $.NSThread.sleepForTimeInterval(0.05);
+}

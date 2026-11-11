@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin/index.ts";
 import { runComputerPlan } from "../../src/computer/exec.ts";
 import { createComputerTools } from "../../src/computer/tools.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";

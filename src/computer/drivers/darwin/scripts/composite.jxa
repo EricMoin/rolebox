@@ -1,0 +1,33 @@
+function computerCompositeCapture(bounds, displays, capture) {
+  var width = Math.ceil(bounds.w), height = Math.ceil(bounds.h);
+  var colorSpace = $.CGColorSpaceCreateDeviceRGB();
+  if (!colorSpace) throw new Error('could not create the screenshot color space');
+  var canvas;
+  try { canvas = $.CGBitmapContextCreate(null, width, height, 8, width * 4, colorSpace, $.kCGImageAlphaPremultipliedLast); }
+  finally { $.CGColorSpaceRelease(colorSpace); }
+  if (!canvas) throw new Error('could not allocate the screenshot bitmap');
+  try {
+    $.CGContextClearRect(canvas, $.CGRectMake(0, 0, width, height));
+    $.CGContextSetInterpolationQuality(canvas, $.kCGInterpolationHigh);
+    var count = 0;
+    for (var i = 0; i < displays.length; i++) {
+      var display = displays[i];
+      var x = Math.max(bounds.x, display.x), y = Math.max(bounds.y, display.y);
+      var right = Math.min(bounds.x + bounds.w, display.x + display.width);
+      var bottom = Math.min(bounds.y + bounds.h, display.y + display.height);
+      if (right <= x || bottom <= y) continue;
+      var tile = capture({x: x, y: y, w: right - x, h: bottom - y});
+      try {
+        if (!(Number($.CGImageGetWidth(tile)) > 0 && Number($.CGImageGetHeight(tile)) > 0)) throw new Error('screencapture returned an empty screenshot image');
+        var scaleX = width / bounds.w, scaleY = height / bounds.h;
+        var destination = $.CGRectMake((x - bounds.x) * scaleX, height - (bottom - bounds.y) * scaleY, (right - x) * scaleX, (bottom - y) * scaleY);
+        $.CGContextDrawImage(canvas, destination, tile);
+        count++;
+      } finally { $.CGImageRelease(tile); }
+    }
+    if (count === 0) throw new Error('the capture region does not intersect an available display');
+    var image = $.CGBitmapContextCreateImage(canvas);
+    if (!image) throw new Error('could not create the composed screenshot image');
+    return image;
+  } finally { $.CGContextRelease(canvas); }
+}

@@ -26,137 +26,22 @@ import type {
   ComputerPlan,
   ComputerPlanOrRefusal,
   SupportedComputerUse,
-} from "../../platform/system/types.ts";
-import { REGION_REFUSAL, powerShellQuote, usableWindowId, wholeRegion } from "./shared.ts";
+} from "../../../platform/system/types.ts";
+import { REGION_REFUSAL, powerShellQuote, usableWindowId, wholeRegion } from "../shared.ts";
+import {
+  WIN32_DPI_SCRIPT as DPI_API,
+  WIN32_MOUSE_SCRIPT as MOUSE_API,
+  WIN32_WINDOW_SCRIPT as WINDOW_API,
+  WIN32_WINDOW_LIST_API_SCRIPT as WINDOW_LIST_API,
+  WIN32_DISPLAY_SCRIPT as DISPLAY_API,
+  WIN32_ASSERT_GEOMETRY_SCRIPT, WIN32_CAPTURE_GUARD_SCRIPT, WIN32_CAPTURE_SCRIPT, WIN32_FOCUS_SCRIPT,
+  WIN32_DRAG_SCRIPT, WIN32_WINDOWS_SCRIPT, WIN32_PERMISSION_SCRIPT,
+} from "./native-scripts.ts";
 
 const POWERSHELL = "powershell";
 
 const INSTALL_HINT =
   "Windows PowerShell (powershell.exe) ships with Windows; if it was removed, install it from Microsoft, or run rolebox on a host that has it.";
-
-const DPI_API = [
-  "Add-Type @'",
-  "using System;",
-  "using System.Runtime.InteropServices;",
-  "public class RoleboxDpi {",
-  '  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);',
-  '  [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int awareness);',
-  '  [DllImport("user32.dll")] static extern bool SetProcessDPIAware();',
-  '  [DllImport("user32.dll")] static extern bool IsProcessDPIAware();',
-  "  public static void Enable() {",
-  "    try {",
-  "      if (SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero) return;",
-  "      if (SetThreadDpiAwarenessContext(new IntPtr(-3)) != IntPtr.Zero) return;",
-  '      throw new InvalidOperationException("could not enable per-monitor DPI awareness");',
-  "    } catch (EntryPointNotFoundException) { }",
-  "    try {",
-  "      if (SetProcessDpiAwareness(2) == 0) return;",
-  '      throw new InvalidOperationException("could not enable per-monitor DPI awareness");',
-  "    } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }",
-  '    if (!SetProcessDPIAware() && !IsProcessDPIAware()) throw new InvalidOperationException("could not enable DPI awareness");',
-  "  }",
-  "}",
-  "'@",
-  "[RoleboxDpi]::Enable()",
-].join("\n");
-
-/** The P/Invoke block the mouse plans compile once per run. */
-const MOUSE_API = [
-  "Add-Type @'",
-  "using System;",
-  "using System.Runtime.InteropServices;",
-  "public class RoleboxMouse {",
-  '  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);',
-  '  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extraInfo);',
-  "}",
-  "'@",
-].join("\n");
-
-/** The P/Invoke block the single-window capture compiles once per run. */
-const WINDOW_API = [
-  "Add-Type @'",
-  "using System;",
-  "using System.Runtime.InteropServices;",
-  "public struct RoleboxRect { public int Left; public int Top; public int Right; public int Bottom; }",
-  "public class RoleboxWindowApi {",
-  '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out RoleboxRect rect);',
-  '  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr handle);',
-  '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr handle);',
-  '  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr handle, int command);',
-  '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);',
-  '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
-  "}",
-  "'@",
-].join("\n");
-
-const WINDOW_LIST_API = [
-  "Add-Type @'",
-  "using System;",
-  "using System.Collections.Generic;",
-  "using System.Runtime.InteropServices;",
-  "using System.Text;",
-  "public class RoleboxWindowList {",
-  "  private delegate bool EnumWindowsProc(IntPtr handle, IntPtr data);",
-  '  [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr data);',
-  '  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);',
-  '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr handle, StringBuilder text, int capacity);',
-  '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);',
-  "  public static IntPtr[] VisibleWindows() {",
-  "    var windows = new List<IntPtr>();",
-  "    if (!EnumWindows(delegate(IntPtr handle, IntPtr data) {",
-  "      if (IsWindowVisible(handle)) windows.Add(handle);",
-  "      return true;",
-  '    }, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "could not enumerate desktop windows");',
-  "    return windows.ToArray();",
-  "  }",
-  "}",
-  "'@",
-].join("\n");
-
-// Use AllScreens' enumeration order without its cache when checking topology twice.
-const DISPLAY_API = [
-  "Add-Type @'",
-  "using System;",
-  "using System.Collections.Generic;",
-  "using System.Runtime.InteropServices;",
-  "public struct RoleboxMonitorRect { public int Left; public int Top; public int Right; public int Bottom; }",
-  "[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]",
-  "public struct RoleboxMonitorInfo {",
-  "  public int Size; public RoleboxMonitorRect Monitor; public RoleboxMonitorRect Work; public uint Flags;",
-  "  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Device;",
-  "}",
-  "public class RoleboxDisplay {",
-  "  public int id; public int x; public int y; public int width; public int height;",
-  "  public double scale; public bool primary; public string name;",
-  "}",
-  "public class RoleboxDisplayApi {",
-  "  private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data);",
-  '  [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorEnumProc callback, IntPtr data);',
-  '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref RoleboxMonitorInfo info);',
-  '  [DllImport("shcore.dll")] private static extern int GetScaleFactorForMonitor(IntPtr monitor, out int scale);',
-  "  public static RoleboxDisplay[] Snapshot() {",
-  "    var monitors = new List<IntPtr>();",
-  "    if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data) {",
-  "      monitors.Add(monitor); return true;",
-  '    }, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "could not enumerate displays");',
-  "    var displays = new List<RoleboxDisplay>();",
-  "    foreach (var monitor in monitors) {",
-  "      var info = new RoleboxMonitorInfo(); info.Size = Marshal.SizeOf(typeof(RoleboxMonitorInfo));",
-  '      if (!GetMonitorInfo(monitor, ref info)) throw new InvalidOperationException("could not read monitor bounds");',
-  "      int scale;",
-  '      if (GetScaleFactorForMonitor(monitor, out scale) != 0 || scale <= 0) throw new InvalidOperationException("could not read monitor scale");',
-  "      var bounds = info.Monitor;",
-  '      if (bounds.Right <= bounds.Left || bounds.Bottom <= bounds.Top) throw new InvalidOperationException("display has empty bounds");',
-  "      displays.Add(new RoleboxDisplay { id = displays.Count, x = bounds.Left, y = bounds.Top,",
-  "        width = bounds.Right - bounds.Left, height = bounds.Bottom - bounds.Top,",
-  "        scale = scale / 100.0, primary = (info.Flags & 1) != 0, name = info.Device });",
-  "    }",
-  '    if (displays.Count == 0) throw new InvalidOperationException("no displays are available");',
-  "    return displays.ToArray();",
-  "  }",
-  "}",
-  "'@",
-].join("\n");
 
 /** mouse_event flag pairs: left, right, middle down/up. */
 const BUTTON_FLAGS: Record<string, { down: string; up: string }> = {
@@ -299,7 +184,6 @@ function powerShellPlan(script: string): ComputerPlan {
   };
 }
 
-const GEOMETRY_CHANGED = "screenshot geometry changed; take a fresh screenshot";
 const INPUT_GUARD_FAILURE_MARKER = "ROLEBOX_SCREENSHOT_STALE";
 
 function pointerPlan(script: string, guard: ComputerCaptureGuard | undefined): ComputerPlan {
@@ -352,17 +236,7 @@ function geometryStatements(target: CaptureTarget, windowApiInstalled = false): 
     "  if ($bounds.w -le 0 -or $bounds.h -le 0) { throw 'capture target has empty bounds' }",
     "  return [PSCustomObject]@{ bounds = [PSCustomObject]$bounds; displays = $displays }",
     "}",
-    "function Assert-RoleboxGeometry($expected, $actual) {",
-    "  foreach ($field in @('x', 'y', 'w', 'h')) {",
-    `    if ($expected.bounds.$field -ne $actual.bounds.$field) { throw '${GEOMETRY_CHANGED}' }`,
-    "  }",
-    `  if ($expected.displays.Count -ne $actual.displays.Count) { throw '${GEOMETRY_CHANGED}' }`,
-    "  for ($index = 0; $index -lt $expected.displays.Count; $index++) {",
-    "    foreach ($field in @('id', 'x', 'y', 'width', 'height', 'scale', 'primary', 'name')) {",
-    `      if ($expected.displays[$index].$field -cne $actual.displays[$index].$field) { throw '${GEOMETRY_CHANGED}' }`,
-    "    }",
-    "  }",
-    "}",
+    WIN32_ASSERT_GEOMETRY_SCRIPT,
   ];
 }
 
@@ -371,10 +245,7 @@ function captureGuardStatements(guard: ComputerCaptureGuard | undefined, windowA
   return [
     ...geometryStatements(guard.target, windowApiInstalled),
     `$expectedGeometry = ConvertFrom-Json -InputObject ${powerShellQuote(JSON.stringify(guard.geometry))}`,
-    "try {",
-    "  $currentGeometry = Get-RoleboxGeometry",
-    "  Assert-RoleboxGeometry $expectedGeometry $currentGeometry",
-    `} catch { throw '${INPUT_GUARD_FAILURE_MARKER}: ${GEOMETRY_CHANGED}' }`,
+    WIN32_CAPTURE_GUARD_SCRIPT,
   ];
 }
 
@@ -387,24 +258,8 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
     DPI_API,
     "Add-Type -AssemblyName System.Drawing",
     ...geometryStatements(request),
-    "$beforeGeometry = Get-RoleboxGeometry",
-    "$sourceX = $beforeGeometry.bounds.x",
-    "$sourceY = $beforeGeometry.bounds.y",
-    "$width = $beforeGeometry.bounds.w",
-    "$height = $beforeGeometry.bounds.h",
-    "$bitmap = New-Object System.Drawing.Bitmap($width, $height)",
-    "try {",
-    "  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
-    "  try {",
-    "    $graphics.CopyFromScreen($sourceX, $sourceY, 0, 0, $bitmap.Size)",
-    `    $bitmap.Save(${path}, [System.Drawing.Imaging.ImageFormat]::Png)`,
-    "  } finally { $graphics.Dispose() }",
-    "} finally { $bitmap.Dispose() }",
-    "try {",
-    "  $afterGeometry = Get-RoleboxGeometry",
-    "  Assert-RoleboxGeometry $beforeGeometry $afterGeometry",
-    `} catch { throw '${GEOMETRY_CHANGED}' }`,
-    "ConvertTo-Json -InputObject $beforeGeometry -Depth 6 -Compress",
+    `$capturePath = ${path}`,
+    WIN32_CAPTURE_SCRIPT,
   ].join("\n"));
 }
 
@@ -413,11 +268,7 @@ function focusStatements(windowId: number | undefined): string[] {
   return [
     WINDOW_API,
     `$handle = [IntPtr]${windowId}`,
-    "if (-not [RoleboxWindowApi]::IsWindow($handle)) { throw 'window does not exist' }",
-    "if ([RoleboxWindowApi]::IsIconic($handle)) { [void][RoleboxWindowApi]::ShowWindowAsync($handle, 9) }",
-    "[void][RoleboxWindowApi]::SetForegroundWindow($handle)",
-    "for ($attempt = 0; $attempt -lt 20 -and [RoleboxWindowApi]::GetForegroundWindow() -ne $handle; $attempt++) { Start-Sleep -Milliseconds 50 }",
-    "if ([RoleboxWindowApi]::GetForegroundWindow() -ne $handle) { throw 'Windows refused foreground activation; select the target window manually and retry' }",
+    WIN32_FOCUS_SCRIPT,
   ];
 }
 
@@ -480,17 +331,9 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
         ...focusStatements(request.windowId),
         ...captureGuardStatements(request.captureGuard, request.windowId !== undefined),
         `if (-not [RoleboxMouse]::SetCursorPos(${fromX}, ${fromY})) { throw 'could not move the pointer to the drag origin' }`,
-        "try {",
-        "  [RoleboxMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)",
-        `  for ($step = 1; $step -le ${steps}; $step++) {`,
-        `    Start-Sleep -Milliseconds ${Math.round(request.durationMs / steps)}`,
-        `    $x = [int][Math]::Round(${fromX} + (${toX} - ${fromX}) * $step / ${steps})`,
-        `    $y = [int][Math]::Round(${fromY} + (${toY} - ${fromY}) * $step / ${steps})`,
-        "    if (-not [RoleboxMouse]::SetCursorPos($x, $y)) { throw 'could not move the pointer during drag' }",
-        "  }",
-        "} finally {",
-        "  [RoleboxMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)",
-        "}",
+        `$dragFromX = ${fromX}; $dragFromY = ${fromY}; $dragToX = ${toX}; $dragToY = ${toY}`,
+        `$dragSteps = ${steps}; $dragDelay = ${Math.round(request.durationMs / steps)}`,
+        WIN32_DRAG_SCRIPT,
       ].join("\n"), request.captureGuard);
       return {
         ...drag,
@@ -510,16 +353,8 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
         [
           "$ErrorActionPreference = 'Stop'",
           WINDOW_LIST_API,
-          "foreach ($handle in [RoleboxWindowList]::VisibleWindows()) {",
-          "  $ownerId = [uint32]0",
-          "  [void][RoleboxWindowList]::GetWindowThreadProcessId($handle, [ref]$ownerId)",
-          "  $owner = Get-Process -Id $ownerId -ErrorAction SilentlyContinue",
-          "  $ownerName = if ($null -eq $owner) { '' } else { $owner.ProcessName }",
-          "  $titleBuffer = New-Object System.Text.StringBuilder(32768)",
-          "  [void][RoleboxWindowList]::GetWindowText($handle, $titleBuffer, $titleBuffer.Capacity)",
-          "  $title = $titleBuffer.ToString()",
-          `  if (${filter}) { @($handle.ToInt64(), $ownerName, $title) -join ([char]9) }`,
-          "}",
+          `$windowFilter = { ${filter} }`,
+          WIN32_WINDOWS_SCRIPT,
         ].join("\n"),
       );
     }
@@ -605,13 +440,6 @@ export const win32ComputerUse: SupportedComputerUse = {
     // There is no requestable per-application grant here: a successful exit IS
     // the grant, so `readsProbeOutput` stays absent and the printed sentence is
     // prose for the caller, never a permission token.
-    return powerShellPlan(
-      [
-        "$ErrorActionPreference = 'Stop'",
-        "Add-Type -AssemblyName System.Windows.Forms",
-        "if (-not [System.Windows.Forms.SystemInformation]::UserInteractive) { Write-Error 'this Windows session is not interactive, so no window can receive input'; exit 3 }",
-        "'Windows input needs no per-application permission grant; this session is interactive and SendKeys is available.'",
-      ].join("\n"),
-    );
+    return powerShellPlan(WIN32_PERMISSION_SCRIPT);
   },
 };

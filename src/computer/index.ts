@@ -17,7 +17,7 @@ export {
   readPixelScale,
 } from "./capture.ts";
 export { hasPngSignature, PNG_SIGNATURE, readPngResolution, readPngSize } from "./png.ts";
-export { darwinComputerUse } from "./drivers/darwin.ts";
-export { linuxComputerUse } from "./drivers/linux.ts";
-export { win32ComputerUse } from "./drivers/win32.ts";
+export { darwinComputerUse } from "./drivers/darwin/index.ts";
+export { linuxComputerUse } from "./drivers/linux/index.ts";
+export { win32ComputerUse } from "./drivers/win32/index.ts";
 export { unsupportedComputerUse } from "./drivers/unsupported.ts";

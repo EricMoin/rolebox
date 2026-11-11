@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
-import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
-import { DARWIN_COMPOSITE_SCRIPT } from "../../src/computer/drivers/darwin-geometry.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin/index.ts";
+import { DARWIN_COMPOSITE_SCRIPT } from "../../src/computer/drivers/darwin/geometry.ts";
 import { readPngSize } from "../../src/computer/png.ts";
 import type { ComputerCaptureGeometry, ComputerCaptureGuard, ComputerCaptureRequest, ComputerInputRequest } from "../../src/platform/system/types.ts";
 

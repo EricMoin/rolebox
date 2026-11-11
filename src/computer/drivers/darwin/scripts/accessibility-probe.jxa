@@ -1,0 +1,3 @@
+ObjC.import('ApplicationServices');
+ObjC.import('Foundation');
+var trusted = $.AXIsProcessTrusted();

@@ -16,10 +16,10 @@
  */
 
 import { posix, win32 } from "node:path";
-import { darwinComputerUse } from "../../computer/drivers/darwin.ts";
-import { linuxComputerUse } from "../../computer/drivers/linux.ts";
+import { darwinComputerUse } from "../../computer/drivers/darwin/index.ts";
+import { linuxComputerUse } from "../../computer/drivers/linux/index.ts";
 import { unsupportedComputerUse } from "../../computer/drivers/unsupported.ts";
-import { win32ComputerUse } from "../../computer/drivers/win32.ts";
+import { win32ComputerUse } from "../../computer/drivers/win32/index.ts";
 import type { SystemDescriptor, SystemId } from "./types.ts";
 
 /**

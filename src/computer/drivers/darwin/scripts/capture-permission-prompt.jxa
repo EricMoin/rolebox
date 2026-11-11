@@ -1,0 +1,6 @@
+ObjC.import('CoreGraphics');
+try { ObjC.bindFunction('CGRequestScreenCaptureAccess', ['bool', []]); } catch (_) { throw new Error('this macOS version has no Screen Recording permission request API'); }
+var request;
+try { request = $.CGRequestScreenCaptureAccess; } catch (_) { throw new Error('this macOS version has no Screen Recording permission request API'); }
+if (typeof request !== 'function') throw new Error('this macOS version has no Screen Recording permission request API');
+var trusted = request();

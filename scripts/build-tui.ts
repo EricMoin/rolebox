@@ -3,13 +3,14 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { solidBuildPlugin } from "./solid-transform.ts";
+import { computerScriptsPlugin } from "./computer-scripts.ts";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 await build({
   absWorkingDir: projectRoot,
   entryPoints: ["src/tui/index.tsx"], outfile: "dist/tui.js", bundle: true,
   platform: "node", target: "node26", format: "esm", packages: "external",
-  plugins: [solidBuildPlugin()],
+  plugins: [solidBuildPlugin(), computerScriptsPlugin()],
 });
 
 const tsc = spawnSync(process.execPath, ["node_modules/typescript/bin/tsc", "-p", "tsconfig.tui.json"], {

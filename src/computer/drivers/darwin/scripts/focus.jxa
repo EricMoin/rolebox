@@ -1,0 +1,47 @@
+ObjC.import('CoreGraphics');
+ObjC.import('ApplicationServices');
+if (!$.AXIsProcessTrusted()) throw new Error('Accessibility permission is not granted');
+function value(dict, key) { var o = dict.objectForKey(key); return (o === undefined || o === null) ? undefined : o.js; }
+function geometry(dict) { return ObjC.deepUnwrap(dict.objectForKey('kCGWindowBounds')); }
+function sameBounds(a, b) { return a.X === b.X && a.Y === b.Y && a.Width === b.Width && a.Height === b.Height; }
+var list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID));
+var target;
+for (var i = 0; i < Number(list.count); i++) {
+  var item = list.objectAtIndex(i);
+  if (Number(value(item, 'kCGWindowNumber')) === targetId && Number(value(item, 'kCGWindowLayer')) === 0) target = item;
+}
+if (!target) throw new Error('the requested window is not visible; refresh computer_windows');
+var pid = Number(value(target, 'kCGWindowOwnerPID'));
+var bounds = geometry(target);
+var title = value(target, 'kCGWindowName');
+var sameIdentity = 0;
+for (var i = 0; i < Number(list.count); i++) {
+  var item = list.objectAtIndex(i);
+  if (Number(value(item, 'kCGWindowOwnerPID')) !== pid || Number(value(item, 'kCGWindowLayer')) !== 0) continue;
+  if (sameBounds(geometry(item), bounds) && (title === undefined || title === null || title === '' || value(item, 'kCGWindowName') === title)) sameIdentity++;
+}
+if (sameIdentity !== 1) throw new Error('the window id cannot be matched unambiguously to an Accessibility window');
+var system = Application('System Events');
+var processes = system.processes.whose({unixId: pid})();
+if (processes.length !== 1) throw new Error('the window owner is no longer available');
+var process = processes[0];
+function matches(window) {
+  var position = window.position();
+  var size = window.size();
+  return position[0] === bounds.X && position[1] === bounds.Y && size[0] === bounds.Width && size[1] === bounds.Height && (title === undefined || title === null || title === '' || window.name() === title);
+}
+var windows = process.windows();
+var matchesFound = [];
+for (var i = 0; i < windows.length; i++) { if (matches(windows[i])) matchesFound.push(windows[i]); }
+if (matchesFound.length !== 1) throw new Error('the requested window has no unique Accessibility match; focus it manually');
+var window = matchesFound[0];
+process.frontmost = true;
+window.attributes.byName('AXMain').value = true;
+window.actions.byName('AXRaise').perform();
+var focused = false;
+for (var attempt = 0; attempt < 10; attempt++) {
+  delay(0.05);
+  var current = process.attributes.byName('AXFocusedWindow').value();
+  if (process.frontmost() && matches(current)) { focused = true; break; }
+}
+if (!focused) throw new Error('macOS did not focus the requested window');

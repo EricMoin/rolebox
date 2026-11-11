@@ -1,0 +1,4 @@
+var current = $.CGEventCreate(null);
+if (!current) throw new Error('macOS could not read the pointer position');
+var point = $.CGEventGetLocation(current);
+postMouse(mouseUpType, point.x, point.y, mouseButton);

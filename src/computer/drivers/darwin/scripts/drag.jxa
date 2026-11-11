@@ -1,0 +1,13 @@
+var x = fromX, y = fromY;
+postMouse($.kCGEventMouseMoved, x, y);
+try {
+  postMouse($.kCGEventLeftMouseDown, x, y);
+  for (var i = 1; i <= steps; i++) {
+    $.NSThread.sleepForTimeInterval(interval);
+    x = fromX + (toX - fromX) * i / steps;
+    y = fromY + (toY - fromY) * i / steps;
+    postMouse($.kCGEventLeftMouseDragged, x, y);
+  }
+} finally {
+  postMouse($.kCGEventLeftMouseUp, x, y);
+}

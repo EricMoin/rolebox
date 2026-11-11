@@ -1,0 +1,7 @@
+if (scrollPoint !== null) {
+  postMouse($.kCGEventMouseMoved, scrollPoint.x, scrollPoint.y);
+  $.NSThread.sleepForTimeInterval(0.05);
+}
+var event = $.CGEventCreateScrollWheelEvent2(null, $.kCGScrollEventUnitLine, 2, vertical, horizontal, 0);
+if (!event) throw new Error('macOS could not create a scroll event');
+$.CGEventPost($.kCGHIDEventTap, event);

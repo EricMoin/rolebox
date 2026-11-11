@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createComputerTools } from "../../src/computer/tools.ts";
-import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin/index.ts";
 import { computerScreenshots } from "../../src/computer/geometry.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";
 import type { ComputerPlan } from "../../src/platform/system/types.ts";

@@ -1,0 +1,6 @@
+ObjC.import('CoreGraphics');
+try { ObjC.bindFunction('CGPreflightScreenCaptureAccess', ['bool', []]); } catch (_) { throw new Error('this macOS version has no Screen Recording permission probe'); }
+var probe;
+try { probe = $.CGPreflightScreenCaptureAccess; } catch (_) { throw new Error('this macOS version has no Screen Recording permission probe'); }
+if (typeof probe !== 'function') throw new Error('this macOS version has no Screen Recording permission probe');
+var trusted = probe();
