@@ -212,6 +212,8 @@ Known `hooks.builtin` keys:
 
 Unknown keys warn and have no effect. Loaded roles' flags are combined by the
 service; do not assume the block is an isolated per-call policy.
+`webfetch_redirect_guard` matches both `webfetch` and DSH's `web_fetch` tool name,
+so enabling it covers either spelling.
 
 Recovery chain options belong under `hooks.recovery`, not a root `recovery` key:
 
@@ -530,7 +532,10 @@ claim a per-role YAML notification override will work in this version.
 
 The extension registry supports custom conditions, graph topologies, recovery
 strategies/patterns, notification channels and observe events. It is additive;
-module failures are logged and skipped. However, the current YAML role loader
+module failures are logged and skipped. A `recovery_patterns` module is validated
+at load: a category outside the built-in vocabulary or a non-callable `match`
+export is skipped with a warning, and a malformed match result is treated as no
+match with one warning per pattern. However, the current YAML role loader
 does not retain `extensions`, so merely adding an `extensions:` block to a role
 file does not register modules. A working programmatic integration is required.
 Do not invent a file configuration workaround or edit rolebox internals as part

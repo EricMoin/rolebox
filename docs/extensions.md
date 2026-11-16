@@ -33,10 +33,19 @@ extensions:
 | `conditions` | Function gate/transition/continue_until conditions | `{ handler: (arg, env) => boolean }` |
 | `graph_topologies` | Graph topology templates | `{ expand: (agents) => FlowEdge[] }` |
 | `recovery_strategies` | Error recovery strategy names (passes YAML validation) | `{ name, execute }` |
-| `recovery_patterns` | Error detection patterns | `{ name, category, match }` |
+| `recovery_patterns` | Error detection patterns | `{ name, category, match }` — `category` from the built-in vocabulary; `match` callable |
 | `notification_channels` | Notification channel kinds | `{ create: (config) => { kind, send, dispose } }` |
 | `notification_events` | Notification event types (open string) | *(no module needed — events are open strings)* |
 | `observe_events` | Function observe trigger events | `{ handle: (ctx, spec) => string[] }` |
+
+A `recovery_patterns` module is untrusted input. Its `category` must name one of the
+built-in recovery categories — `session_error`, `context_window`, `edit_error`,
+`json_error`, `empty_response`, `tool_pair`, `guard_violation` — and its `match`
+export must be callable; otherwise the module is skipped with a warning instead of
+being registered. A matcher result is surfaced only when it is a structurally valid
+`RecoveryError` (valid category, string `errorType`, string `message`, numeric
+`timestamp`); `null`, `undefined` and any malformed value are treated as no match,
+with one warning per adapted pattern rather than per call.
 
 ## Module contract example
 

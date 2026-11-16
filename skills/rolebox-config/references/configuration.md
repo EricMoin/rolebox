@@ -558,7 +558,7 @@ composer draft suggestions: the acting role's `copilot.draft` wins per field,
 then this project block, then the global `config.yaml` block. Only DSH reads it;
 the same JSON file's `defaultRole` is read by OpenCode. The copilot files are read
 once at plugin boot (no watching), and an invalid value is treated as absent so a
-lower source can supply it. See [Runtime](runtime.md#composer-draft-suggestions-copilot).
+lower source can supply it. See [Runtime](runtime.md#copilot-suggestions-and-automatic-continuation).
 
 | Harness | Effective behavior |
 | --- | --- |
@@ -597,6 +597,13 @@ selected graph topology and node ledger, workspace session roster, loops and
 metrics. The graph picker switches among the current session's graphs and
 preserves the selected graph during refresh. Session changes load that session's
 graphs and loops without showing the previous session's snapshot.
+
+The composer tool row carries the role chip in the trailing controls, left of
+the draft-suggestion button and the model selector: it names the session's
+active role (or `Base agent`) with an `Active` marker only while a role is set,
+and its list opens upward above the composer. `Filter roles` narrows the loaded
+list by name and description; choosing a row switches that session, and
+`Return to base agent` clears the selection.
 
 The monitor keeps the existing ledger layout and fills the available Conversation
 width. The Conversation owns vertical scrolling: mouse-wheel and keyboard page

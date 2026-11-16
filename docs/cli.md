@@ -202,6 +202,11 @@ rolebox info software-architect --check   # Verify integrity hash
 
 Note: `--json` requires an explicit role so the output stays machine-readable.
 
+JSON output carries `syncTargets` with one entry per registered target. The
+legacy top-level `sync` field describes the opencode target only; when no
+opencode target is registered it reports unsynced instead of borrowing another
+target's state.
+
 ### `config [role]`
 
 Configure models for a role and its subagents. The role must already be synced (`rolebox sync` first).
@@ -346,7 +351,10 @@ The set of reported platforms is driven by the platform registry
 (`src/platform/registry.ts`); each harness contributes a descriptor declaring
 its paths and how to detect that rolebox is registered with the host tool. The
 JSON output includes a `targets` array (one entry per platform) alongside the
-legacy `opencode` field retained for backward compatibility.
+legacy `opencode` field retained for backward compatibility. Each role's
+top-level `synced` and `symlinkValid` flags are host-neutral: they are true when
+any registered target reports the role as synced or valid, rather than reading
+opencode's copy. Read a specific harness from the `targets` array.
 
 ### `host <harness> <connection> <action>`
 

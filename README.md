@@ -24,11 +24,19 @@
 </p>
 
 <p align="center">
-  <img alt="The role picker opened from the dsh composer: a filter field over the 18 loaded roles, each row a display name and a one-line description, with Base agent as the current selection" src="assets/screenshots/role-picker.png" width="880">
+  <img alt="The dsh composer tool row left of the model selector: a role chip reading TypeScript Engineer with an Active marker, its role list open above it, and a Filter roles field over the 20 loaded roles" src="assets/screenshots/role-picker.png" width="880">
 </p>
 
 <p align="center">
-  <em>The role picker, opened from the composer: <code>Filter roles</code> searches the 18 loaded roles, each row a display name and a one-line description, and the header names the current selection, <code>Base agent</code>.</em>
+  <em>The role switcher in the composer tool row, left of the model selector: the chip names the active role and carries an <code>Active</code> marker; its list opens upward, and <code>Filter roles</code> searches the 20 loaded roles. Here <code>TypeScript Engineer</code> is active and checked.</em>
+</p>
+
+<p align="center">
+  <img alt="An animated role switch: the chip opens its role list upward, Filter roles narrows 20 roles to 3 for typescript, and selecting TypeScript Engineer sets the chip to that name with an Active marker" src="assets/gifs/role-switch.gif" width="880">
+</p>
+
+<p align="center">
+  <em>Switching roles from the composer: the chip opens its list upward, typing <code>typescript</code> narrows the 20 loaded roles to 3, and selecting <code>TypeScript Engineer</code> sets the chip to that name with an <code>Active</code> marker while the model seat collapses to the role-pinned indicator. Playback is 1×; the clip is trimmed to 1.9–14.1 s of a 15 s recording and ends on a 2 s hold.</em>
 </p>
 
 <p align="center">
@@ -56,15 +64,15 @@ On DSH, roles can collaborate through [persistent peer teams](docs/team-work.md)
 - **Runtime** — the graph v3 outcome protocol: declared nodes and edges, accepted outcomes, bounded repair loops.
 - **Memory** — SQLite + FTS5, auto-injected at session start and searchable from the CLI.
 - **Tools** — 32 `lsp_*` language-server tools, `hashline_*` edits anchored to content hashes, skills, references, custom functions and hooks.
-- **Desktop** — a 12-tool `computer_*` family: `computer_screenshot`, `computer_windows`, `computer_displays`, `computer_focus`, `computer_click`, `computer_move`, `computer_scroll`, `computer_drag`, `computer_type`, `computer_key`, `computer_status`, `computer_permissions`.
-- **Browser** — a [23-tool `browse_*` family](docs/browser-use.md) for semantic web-page automation: `browse_status`, `browse_open`, `browse_snapshot`, `browse_read`, `browse_click`, `browse_drag`, `browse_type`, `browse_press`, `browse_select`, `browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`, `browse_screenshot`, `browse_upload`, `browse_downloads`, `browse_dialog`, `browse_tabs`, `browse_history`, `browse_console`, `browse_network`, `browse_cookies`, `browse_close`. Gated by `browseUse`; actions need the optional Playwright peer (`npm install playwright`, then `npx playwright install chromium`).
-- **Visibility** — the dsh Rolebox monitor pane, the `rolebox monitor` TUI, and channel-filtered logs.
+- **Desktop** — a 13-tool `computer_*` family: `computer_screenshot`, `computer_windows`, `computer_displays`, `computer_focus`, `computer_click`, `computer_move`, `computer_scroll`, `computer_drag`, `computer_type`, `computer_key`, `computer_status`, `computer_permissions`, `computer_record`.
+- **Browser** — a [24-tool `browse_*` family](docs/browser-use.md) for semantic web-page automation: `browse_status`, `browse_open`, `browse_snapshot`, `browse_read`, `browse_click`, `browse_drag`, `browse_type`, `browse_press`, `browse_select`, `browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`, `browse_screenshot`, `browse_record`, `browse_upload`, `browse_downloads`, `browse_dialog`, `browse_tabs`, `browse_history`, `browse_console`, `browse_network`, `browse_cookies`, `browse_close`. Gated by `browseUse`; actions need the optional Playwright peer (`npm install playwright`, then `npx playwright install chromium`).
+- **Visibility** — the dsh Rolebox and Logs conversation views, the `rolebox monitor` TUI, and channel-filtered logs.
 
 ---
 
 ## See it work
 
-Every screenshot in this README was captured from a live dsh session on a demo workspace. Each caption states only what that capture shows.
+Every screenshot and the role-switch clip in this README was captured from a live dsh session on a demo workspace. Each caption states only what that capture shows.
 
 ### 1 · Every loaded role, on one page
 
@@ -73,45 +81,45 @@ Every screenshot in this README was captured from a live dsh session on a demo w
 </p>
 
 <p align="center">
-  <em>Settings → Rolebox: the 18 roles that loaded, each with its slug, description and declared tool policy.</em>
+  <em>Settings → Rolebox: the 20 roles that loaded, each with its slug, description and declared tool policy.</em>
 </p>
 
-Each card carries the display name, the slug at the right (`ai-designer`, `apk-reverse-engineer`, `comment-writer` in the capture), a description paragraph, then three label/value rows — **Model**, **Mode**, **Max steps** — and a `Tool policy:` footer. In this capture every visible card reads Model `default`, Mode `primary`, Max steps `not set` and `Tool policy: none declared`; **no card names a source or origin path**. The header carries the `18 roles` badge, the `Refresh`, `Reload roles` and `Open monitor` buttons, and a right-aligned `Loaded 18 roles · <time>` line recording when the load happened.
+Each card carries the display name, the slug at the right (`ai-designer`, `apk-reverse-engineer`, `dart-flutter` in the capture), a description paragraph, then three label/value rows — **Model**, **Mode**, **Max steps** — and a `Tool policy:` footer. In this capture every visible card reads Model `deepseek-official/deepseek-flash-cyber`, Mode `primary`, Max steps `not set` and `Tool policy: none declared`; **no card names a source or origin path**. The header carries the `20 roles` badge, the `Refresh` and `Reload roles` buttons, and a `Loaded 20 roles · <time>` line recording when the load happened; the page points readers to the Rolebox conversation tab for monitoring, because monitoring is a conversation view, not a settings page.
 
 ### 2 · Work is declared as a graph, not prompted node by node
 
 <p align="center">
-  <img alt="A TypeScript Engineer session loading its skill, reading the protocol reference and declaring a version-3 graph with graph_declare" src="assets/screenshots/graph-declare.png" width="900">
+  <img alt="A TypeScript Engineer session declaring the taskstore-remove-completed graph: the expanded graph_declare row with its two-node declaration and result JSON" src="assets/screenshots/graph-declare.png" width="900">
 </p>
 
 <p align="center">
-  <em>The TypeScript Engineer loads its own skill, reads the protocol reference, and declares the work with <code>graph_declare</code>.</em>
+  <em>The TypeScript Engineer declares the work with <code>graph_declare</code>; the expanded row shows the two-node declaration and its result.</em>
 </p>
 
-The role does not do the work inline. It inspects the repo and records a baseline before editing — the sample project’s test command → 4 pass / 0 fail, `tsc --noEmit` → exit 0 — then names one real design point: `Task` has no completion state at all, so `removeCompleted()` needs one. It takes the minimal, backward-compatible reading — an optional `completed?: boolean` on `Task` plus `removeCompleted(): number` returning the removed count — and passes that decision to the worker explicitly.
+The role does not do the work inline. It inspects the repo and records a baseline before editing — `bun test` → 4 pass / 0 fail / 8 expect() calls, exit 0; `npx tsc --noEmit` → exit 0 — then names one real design point: `Task` has no completion state at all, so `removeCompleted()` needs one. It takes the minimal, backward-compatible reading — an optional `completed?: boolean` on `Task` plus `removeCompleted(): number` returning the removed count — and passes that decision to the worker explicitly.
 
-It then declares `graph_declare · taskstore-remove-completed` and yields the turn so the engine can schedule it. The plan names exactly two nodes and one bounded repair round:
+It then declares `graph_declare · taskstore-remove-completed` and yields the turn so the engine can schedule it. The declaration records `max_executions: 4` and names exactly two nodes and one bounded repair round:
 
-- **`change`** (`change-applier`) — implement `removeCompleted(): number` in `src/store.ts`, add the optional `completed?: boolean` field to `Task` in `src/task.ts`, add a focused test in `tests/task.test.ts`, and run the sample project’s test command and `tsc --noEmit`.
+- **`change`** (`change-applier`) — implement `removeCompleted(): number` in `src/store.ts`, add the optional `completed?: boolean` field to `Task` in `src/task.ts`, add a focused test in `tests/store.test.ts`, and run the sample project’s test command and `tsc --noEmit`.
 - **`review`** (`verification`, independent) — read the actual files and re-run both checks against the same baseline.
 
-The turn closes on the declaration being started (`start.kind: started`, phase `executing`, node `change` dispatched). The capture states no execution budget.
+The turn closes with the declaration started: `start.kind: "started"`, `persisted: true`, `runnable: true`, and `change#1` dispatched.
 
 ### 3 · Independent verification, then reconciliation
 
 <p align="center">
-  <img alt="The parent session reconciling the accepted results, with a baseline-versus-result checks table and an explicit risk-and-gaps list" src="assets/screenshots/graph-verified.png" width="900">
+  <img alt="The parent session reconciling the accepted results, with a baseline-versus-final Checks table and a Notes list" src="assets/screenshots/graph-verified.png" width="900">
 </p>
 
 <p align="center">
-  <em>Accepted results come back; the parent reconciles them, re-runs the checks itself, and states what was verified and what remains uncertain.</em>
+  <em>Accepted results come back; the parent reconciles them, re-runs both checks itself, and records what changed and what is advisory.</em>
 </p>
 
-Both nodes ran in their own sessions, and the verifying node is not the node that wrote the code. The closing synthesis reports the test coverage — `tests/task.test.ts:35-61`, importing `TaskStore` at line 4 — as two behavior tests: a mixed store that removes exactly the completed entry and returns `1` while non-completed entries and `get`/`count`/`all` stay consistent, and a no-op path that returns `0` with the store deep-equal to a pre-call snapshot.
+Both nodes ran in their own sessions, and the verifying node is not the node that wrote the code. The closing synthesis names three changed files and no manifests, tsconfig or lockfile: `src/task.ts:7-8` adds the optional field, `src/store.ts:35-45` adds `removeCompleted(): number`, and `tests/store.test.ts:34-55` adds two focused tests — a mixed `true`/`false`/unset store (count, retention, order and a second call) and an empty store.
 
-A `Checks` table sets each check against its baseline: the sample project’s test command went from `4 pass / 0 fail` to `6 pass / 0 fail, 17 expect() calls, exit 0`, and `tsc --noEmit` stayed at `exit 0` (TypeScript 6.0.3). Both are the project's own scripts; the reviewer additionally ran an independent scratch probe over empty, all-completed and mixed stores plus `add` / `get` / `remove` / `count`, and the parent re-ran the two required commands after the reviewer settled and got the same output.
+A `Checks` table sets each check against its baseline: `bun test` went from `4 pass / 0 fail / 8 expect() calls, exit 0` to `6 pass / 0 fail / 16 expect() calls, exit 0`, and `npx tsc --noEmit` stayed at `exit 0` with no diagnostics. The review node re-ran both commands itself, confirmed the original four tests were intact, and proved the new tests non-vacuous by catching all 6 mutants (wrong count, removing `false`, removing `undefined`, changed survivor order, a non-zero second call and a non-zero empty-store result); it also compile-checked that a legacy `Task` literal without `completed` still typechecks. The parent re-ran both required commands after the reviewers settled.
 
-The `Risk and gaps` list keeps three things open on purpose: the one judgment call still to confirm (whether `completed` should be required, or the return a `Task[]`); the fact that no git repository exists in the workspace, so scope was confirmed from the file inventory plus the pre-change baseline rather than a machine diff; and the fact that the evidence belongs to the recorded sample toolchain and does not establish current runtime compatibility; see [Node runtime](docs/node-runtime.md) for current validation commands.
+The closing `Notes` section records two points: completion is set by assigning `.completed = true` on the object returned by `add` / `get`, which is the stored reference and therefore the intended minimal path for a spec that excluded a setter method; and `README.md` does not document `removeCompleted`, which was judged out of scope and required by no acceptance criterion. The declaration also records that the workspace has no git repository, so scope was confirmed from the file inventory plus the pre-change baseline rather than a machine diff.
 
 ### 4 · One brief in, one outcome out
 
@@ -123,19 +131,19 @@ The `Risk and gaps` list keeps three things open on purpose: the one judgment ca
   <em>One brief in, one outcome out: the worker makes the scoped edits, runs both checks, and settles node <code>change</code> with the <code>done</code> outcome.</em>
 </p>
 
-The recording shows a dsh worker completing its assigned brief and using `graph_submit_outcome` to settle its node. Current workers use the host's native command and file tools. Workers inherit the parent’s authorized task tools with native schemas exposed by default. Node tool lists do not restrict them; discovery and code presentation remain optional; see [Worker tools](docs/worker-tools.md). Workers cannot read or steer graph state. Here the worker's whole record is `cat` of its host handoff, the scoped edits, `cat -n` verification of the edited files, the sample project’s test command and `tsc --noEmit`. It notes that this was not a repair round (no revise input was delivered), makes the three scoped edits, reports `6 pass / 0 fail, tsc exit 0`, and closes on `Outcome done accepted (verdict committed, no refusals) — node change is settled`. The banner across the bottom is the one-shot contract: the record does not accept follow-ups.
+The capture shows a dsh worker closing its assigned brief with `graph_submit_outcome`: "All verifications pass. Submitting the outcome.", the `Submitted node outcome · change · done` row, and "Outcome done accepted and committed for node change (attempt change#1)." Current workers use the host's native command and file tools. Workers inherit the parent’s authorized task tools with native schemas exposed by default. Node tool lists do not restrict them; discovery and code presentation remain optional; see [Worker tools](docs/worker-tools.md). Workers cannot read or steer graph state. Under `Changes`, the worker shows the optional `completed?: boolean` field with its doc comment, the `removeCompleted()` implementation, a behavior summary (deletes every task with `completed === true`, retains `false` / `undefined`, preserves survivor insertion order, returns the removed count, returns `0` when nothing is completed or the store is empty, is idempotent and keeps `count()` consistent) and the `tests/store.test.ts` intro line. Its own report records `6 pass / 0 fail / 16 expect() calls` and `npx tsc --noEmit` exit 0 with no diagnostics, plus an extra probe at exit 0.
 
 ### 5 · Watch the engine while it runs
 
 <p align="center">
-  <img alt="The Rolebox monitor pane showing live sessions with their active role, the engine graph with its node agents and durations, the repair counter and the budget expander" src="assets/screenshots/monitor.png" width="900">
+  <img alt="The Rolebox conversation view showing the session's selected graph, its node agents and durations, the repair counter and the budget expander" src="assets/screenshots/monitor.png" width="900">
 </p>
 
 <p align="center">
-  <em>The monitor pane: live sessions and their active role, the engine graph with each node's agent and duration, the repair counter and the run's budget expander.</em>
+  <em>The Rolebox view: the session's selected graph, each node's agent and duration, the repair counter and the budget expander.</em>
 </p>
 
-The Rolebox view is the live engine view; it sits in the dsh conversation as a tab beside Chat and Trajectory, and the capture shows its earlier sidebar placement. In the capture it reports `Sessions 4` with one active role — the session being viewed runs `typescript-engineer`, the other three run `base` — and `Engine graphs 1`: `taskstore-remove-completed`, marked `complete` and `Done`, with an expander for attempts, results, approvals and budget, a progress bar with the run's counters, and `repair 0/2`. Under `Nodes 2`, each node names its agent, worker session and duration: `change` ran `typescript-engineer--change-applier` for 28s, `review` ran `typescript-engineer--verification` for 38s. `Metrics 0` reports `No samples recorded` and says the pane measures anything beyond the core dispatch counters only while `ROLEBOX_METRICS` is set. No loops section appears in this pane.
+The Rolebox view is the session's engine view: it is a conversation view beside Chat, Trajectory and Logs, and it follows the session whose evidence it shows. In the capture it reports `1 complete`, the graph picker selected `taskstore-remove-completed · complete · 2 nodes`, and `Session graphs 1`. The selected graph shows `repair 0/1`, an expander for attempts, results, approvals and budget, and `Nodes 2`: `change` ran `typescript-engineer--change-applier` in 25s and `review` ran `typescript-engineer--verification` in 57s. `Sessions 1 · 1 active role` lists the viewed session as `typescript-engineer · this session`. `Metrics 0` reports `No samples recorded` and says the view measures anything beyond the core dispatch counters only while `ROLEBOX_METRICS` is set.
 
 ### 6 · The same run from a terminal
 
@@ -152,14 +160,14 @@ The Rolebox view is the live engine view; it sits in the dsh conversation as a t
 ### 7 · Logs, filtered by channel and by session
 
 <p align="center">
-  <img alt="The rolebox logs pane showing INFO and WARN records from the dsh plugin, agent registrar, role loader and prompt builder, with channel and session filters" src="assets/screenshots/logs.png" width="900">
+  <img alt="The Logs conversation view showing INFO records from the dsh plugin, LSP server discovery, graph host and role switcher, with channel and session filters" src="assets/screenshots/logs.png" width="900">
 </p>
 
 <p align="center">
-  <em>Plugin startup, role loading and prompt assembly, one record per event, filterable by channel or by session.</em>
+  <em>Plugin startup, LSP discovery, graph-host boot and the role switch, one record per event, filterable by channel or by session.</em>
 </p>
 
-The Logs view, the second conversation tab, polls the workspace's `.rolebox/logs` directory (in the capture `records 125`, `skipped 0`) and renders one line per record: timestamp, level, title, channel and details. The records shown include the `dsh-plugin` startup lines and the computer-use gate verdict, `dsh-agent-registrar` reporting that no `onSpawn` delegate is wired, `role-loader` warnings that a role declares `graph.orchestration: graph_v2` and that the key is recognized but not wired into graph resolution, and a run of `prompt-builder` `Prompt assembled` lines with their character counts. The levels shown are INFO and WARN, and the controls are an `All channels` dropdown, a `This session` filter, `Pause` and `Refresh`. The view and `rolebox logs` read the same log files, so what ran in the UI is debuggable from a shell.
+The Logs view is a conversation view beside Chat, Trajectory and Rolebox, and it polls the workspace's `.rolebox/logs` directory (`records 144`, `skipped 0` in this run), rendering one line per record: timestamp, level, title, channel and details. The records in this capture are all INFO: the computer-use and browse-use gates from `dsh-computer-use-policy` / `dsh-browse-use-policy`; `dsh-plugin` lines for the computer-use and browse-use policies, the system-prompt contribution, the skill provider (`candidateRoles=20`), the route registration (`prefix=/rolebox surfaces=role-switch + monitor + copilot draft`), the logs route and `Plugin initialized — discovered=20 resolved=20 skipped=0 registeredTools=112 registeredAgents=116 computerUse=true browseUse=true`; `lsp-servers` lines detecting the TypeScript, Python, Rust, C, C++ and Kotlin servers; `graph-host` lines for "dsh outcome graph capabilities installed" and the declared-graph boot sweep `resumed=taskstore-remove-completed:complete`; and the `dsh-role-switcher` / `dsh-role-switch-route` pair recording `role=typescript-engineer`. The controls are an `All channels` dropdown, a `This session` filter, `Pause` and `Refresh`. The view and `rolebox logs` read the same log files, so what ran in the UI is debuggable from a shell.
 
 ### Loop mode
 
@@ -291,8 +299,8 @@ A role is a directory: `role.yaml` (name, model, mode, permissions, subagents, s
 | **Autonomy** | Free-form chat | Declared graphs with accepted outcomes and bounded repair loops |
 | **Code navigation** | Text search | 32 `lsp_*` tools — definition, references, rename, diagnostics, call hierarchy |
 | **Editing** | Line numbers that drift | `hashline_*` edits anchored to `LINE#HASH` content hashes |
-| **Observability** | Whatever the host logs | Monitor pane, `rolebox monitor` TUI, channel-filtered logs |
-| **Desktop** | None | [12-tool computer-use family](docs/computer-use.md): screenshot, windows, displays, focus, click, move, scroll, drag, type, key, status, permissions |
+| **Observability** | Whatever the host logs | Rolebox and Logs conversation views, `rolebox monitor` TUI, channel-filtered logs |
+| **Desktop** | None | [13-tool computer-use family](docs/computer-use.md): screenshot, windows, displays, focus, click, move, scroll, drag, type, key, status, permissions, record |
 | **Iterating** | Restart to pick up changes | Edit YAML, hot-reload the asset |
 
 ---
@@ -388,7 +396,7 @@ Unrecognized values pass through unchanged with a warning. Full resolution chain
 
 ---
 
-> **Upgrading from 0.x or 1.x?** rolebox 2.x (`package.json` currently reads `2.4.0`) runs work through the **graph outcome protocol**: `graph_declare` persists a version-3 declaration, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. An existing (legacy) declaration must be rewritten for the version-3 grammar and started as a new run. A persisted legacy state body stays readable but is never advanced, and this protocol has no incremental node or edge construction tool. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
+> **Upgrading from 0.x or 1.x?** rolebox 2.x (`package.json` currently reads `2.5.0`) runs work through the **graph outcome protocol**: `graph_declare` persists a version-3 declaration, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. An existing (legacy) declaration must be rewritten for the version-3 grammar and started as a new run. A persisted legacy state body stays readable but is never advanced, and this protocol has no incremental node or edge construction tool. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
 
 ---
 

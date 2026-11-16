@@ -38,9 +38,9 @@ In `packages/subagent/subagent/src/{types,index,manager}.ts`, everything rolebox
 
 ## Breaking changes
 
-### Copilot turn-end modes removed (upcoming release)
+### Copilot turn-end modes removed
 
-The top-level `copilot.enabled`, `copilot.rules` and `copilot.llm` keys were removed with the turn-end decision pipeline. They are **ignored with one warning per key** (`copilot.<key> was removed; use copilot.draft`); parsing never throws, so an existing role loads without edits.
+The top-level `copilot.enabled`, `copilot.rules` and `copilot.llm` keys were removed in rolebox 2.5.0 with the turn-end decision pipeline. They are **ignored with one warning per key** (`copilot.<key> was removed; use copilot.draft`); parsing never throws, so an existing role loads without edits.
 
 The replacement is `copilot.draft`, which configures the composer draft suggester — a dsh web feature (host `POST /rolebox/copilot/suggest` route plus the composer tool-row button in the dsh web client). It has no effect on other harnesses. **Built-in function auto-continuation is unchanged**: it remains a separate policy driven by active functions and their completion conditions, and is not configured through `copilot`. See [copilot.md](copilot.md) for the new block and behavior.
 
@@ -54,7 +54,7 @@ On Pi, rolebox resolves its directories under the pi config directory (`$PI_CODI
 
 Rolebox's Codex integration (`src/platform/adapters/codex/`, served by `rolebox mcp` /
 `src/entries/codex.ts`) supplies public native-agent files, scoped private-child
-execution, six session tools and five graph tools. It registers 29 base tools, or 64
+execution, six session tools and six graph tools. It registers 30 base tools, or 65
 with both desktop and browser families. Protocol, sync and adapter tests cover native
 mapping, app-server transport, session projection and the shared graph application
 using local fixtures; they do not establish live model or OS sandbox behavior.
@@ -64,8 +64,12 @@ On Codex, roles load from `{cwd}/rolebox` when present, else `$CODEX_HOME/rolebo
 Codex home's `agents/`; MCP boot exports workspace roles into `{cwd}/.codex/agents`.
 Private children are excluded from native global discovery. Restart Codex after sync
 or project-agent generation. Session forks and graph workers require current
-host-supplied sandbox metadata, and graph results are collected with `graph_status`
-rather than an automatic wakeup of a UI-owned chat. See [codex.md](codex.md).
+host-supplied sandbox metadata. After `graph_declare`,
+`parent_notification.available` is true only when an existing shared app-server owns
+the loaded parent thread; that thread is then woken on completion, stop or attention,
+and `graph_wait` is the bounded fallback when the channel is unavailable. An external
+UI-owned chat still cannot be woken without its own shared connection. See
+[codex.md](codex.md).
 
 ## opencode v2
 

@@ -284,7 +284,7 @@ Agent: {agent} | Model: {model.id} | Created: {time.created}
 
 **Execute:** Call `client.session.get({ sessionID: input.session_id, directory: context.directory })`. Conditionally `client.session.todo()` and `client.session.children()`. If `include_messages`: fetch first message.
 
-**Format:** Detailed metadata block with token breakdown, cost, share URL, parent, file changes, todo completion stats, child sessions table.
+**Format:** Detailed metadata block with token breakdown, cost, share URL, parent, file changes, todo completion stats, child sessions table. A `Project` line is printed only when the host reports a project identity; `Directory` still identifies the workspace.
 
 **Exceeds omo:** Token breakdown, cost, share URL, file changes, children table.
 

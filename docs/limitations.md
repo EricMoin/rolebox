@@ -3,7 +3,7 @@
 > Part of the rolebox documentation. See [README](../README.md) for overview.
 
 - No role inheritance
-- No runtime role switching
+- No in-session role switcher on OpenCode or Codex; on DSH the composer tool-row chip switches the session's active role, and Pi selects a role with `/role <role-id>`.
 - Functions persist for the entire session (no per-message deactivation yet)
 - No conditional functions based on project context
 - Recursive file-based subagent nesting is supported (max depth: 3). `--` is reserved as the parent/child separator.
@@ -27,8 +27,8 @@ Pi runs `PiLightweightServiceStack` instead of the full PluginCore service stack
 
 ## Codex (MCP) parity
 
-The Codex MCP runtime registers 29 base tools, including six native session tools and
-five declared-graph tools, plus gated desktop/browser families. Public roles become
+The Codex MCP runtime registers 30 base tools, including six native session tools and
+six declared-graph tools, plus gated desktop/browser families. Public roles become
 native agents; private children stay scoped graph execution targets. See
 [compatibility.md](compatibility.md) and [codex.md](codex.md) for the supported surface.
 
@@ -47,10 +47,14 @@ native agents; private children stay scoped graph execution targets. See
   `code` worker presentation are unsupported.
 - Session forks stop at completed turn boundaries. Live state/todos from an external
   UI process may be unavailable; recorded file patches do not describe current files.
-- Graph results require `graph_status` collection. This integration cannot wake an
-  external UI-owned chat or automatically resume it through a separate app-server.
-  Boot does not redispatch persisted attempts; lost executions remain unknown and
-  uncertain create claims are retained. Attempt credential values are not durable.
+- A loaded parent thread in an existing shared app-server is woken on graph
+  completion, stop or attention through the durable notification outbox; when that
+  channel is unavailable, `graph_wait` is the bounded fallback and keeps the turn
+  open. An external UI-owned chat cannot be woken without its own shared connection,
+  and a new stdio app-server does not acquire the capability merely because another
+  daemon runs. Boot does not redispatch persisted attempts; lost executions remain
+  unknown and uncertain create claims are retained. Attempt credential values are
+  not durable.
   Fatal transport failure or shutdown cleans up app-server and executor process trees but
   does not fabricate a failed, completed or interrupted native turn.
 - Node token/cost ceilings are refused because the adapter has no measured usage feed.
