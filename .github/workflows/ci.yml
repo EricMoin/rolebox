@@ -63,7 +63,10 @@ jobs:
           fi
 
   browser-e2e:
-    runs-on: ubuntu-latest
+    # Pin the proven-green image: the webkit browser acceptance failure is
+    # specific to ubuntu-26.04, which ubuntu-latest now resolves to. Revisit
+    # once webkit launches on 26.04 (see the AppArmor workaround below).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
