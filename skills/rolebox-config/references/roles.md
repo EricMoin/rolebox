@@ -27,6 +27,18 @@ The directory `reviewer` is the ID. Top-level IDs cannot contain the reserved
 either `prompt` or `prompt_file`. `prompt_file` is relative to the role directory;
 use one prompt source to avoid ambiguity.
 
+Rolebox adds a temporary-file instruction to every role and subagent prompt:
+put agent-created temporary files under the current project's `.rolebox/`
+directory, organized into subdirectories by purpose, for example
+`.rolebox/scripts/`, `.rolebox/drafts/` and `.rolebox/outputs/`. Create the
+required subdirectory before writing; do not use `/tmp` or other system temporary
+directories. This is prompt guidance, not filesystem
+enforcement or a change to tools' internal temporary directories. It requires no
+role field. After updating rolebox, reload/restart the host; for Codex, sync and
+refresh the plugin as described in [Configuration and hosts](configuration.md)
+before restarting to refresh generated native-agent instructions. Host
+conversations without a rolebox role do not receive this instruction.
+
 ## Role fields
 
 | Field | Meaning |

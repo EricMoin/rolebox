@@ -2650,7 +2650,7 @@ describe("dsh plugin apply()", () => {
       // shape pinned by tests/platform/adapters/dsh/context/system-prompt.test.ts.
       expect(
         sections[0].text({ agent: { id: sessionId }, sessionID: sessionId }),
-      ).toBe("## Role instructions\n\nYou are a test role.");
+      ).toStartWith("## Role instructions\n\nYou are a test role.");
       const memory = contexts[2].text({ agent: { id: sessionId } });
       expect(memory).toContain("## Memory workflow");
       expect(memory).toContain("memory_read");
@@ -2726,7 +2726,7 @@ describe("dsh plugin apply()", () => {
       // resolves the active role seeded in the workspace sidecar.
       expect(
         sections[0].text({ agent: { id: "s1" }, sessionID: "s1" }),
-      ).toBe("## Role instructions\n\nYou are a test role.");
+      ).toStartWith("## Role instructions\n\nYou are a test role.");
 
       // Write side: a switch through the host route persists to the SAME
       // workspace sidecar. The holder's save is fire-and-forget, so poll

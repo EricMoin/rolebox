@@ -71,6 +71,11 @@ export function buildAgentPrompt(
 
   const parts: string[] = [role.prompt === "" ? "" : `## Role instructions\n\n${role.prompt}`];
 
+  parts.push(renderInjectBlock({
+    title: "Temporary files",
+    instruction: "Store temporary files you create during a task under the current project's `.rolebox/` directory, organized into subdirectories by purpose: for example, `.rolebox/scripts/` for temporary scripts, `.rolebox/drafts/` for drafts and `.rolebox/outputs/` for intermediate outputs. Create the required subdirectory before writing. Do not use `/tmp` or other system temporary directories.",
+  }));
+
   if (references && references.length > 0) {
     parts.push(buildReferenceBlock(references, resourceTool));
   }

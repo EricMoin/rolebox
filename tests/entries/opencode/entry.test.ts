@@ -205,7 +205,7 @@ describe("RoleboxPlugin config hook", () => {
 
     expect(Object.keys(cfg.agent ?? {})).toEqual(["engineer"]);
     const agent = cfg.agent!.engineer!;
-    expect(agent.prompt).toBe("## Role instructions\n\nWrite clean code.");
+    expect(agent.prompt).toStartWith("## Role instructions\n\nWrite clean code.");
     expect(agent.description).toBe("Builds features");
     expect(agent.mode).toBe("primary");
   });
@@ -329,7 +329,7 @@ describe("RoleboxPlugin config hook", () => {
     expect(agent.variant).toBe("pro");
     expect(agent.temperature).toBe(0.2);
     expect(agent.top_p).toBe(0.95);
-    expect(agent.prompt).toBe("## Role instructions\n\nDo it all.");
+    expect(agent.prompt).toStartWith("## Role instructions\n\nDo it all.");
     expect(agent.tools).toEqual({ bash: true, edit: false });
   });
 
@@ -345,7 +345,7 @@ describe("RoleboxPlugin config hook", () => {
     await hooks.config!(cfg);
 
     const agent = cfg.agent!.minimal!;
-    expect(agent.prompt).toBe("## Role instructions\n\nHello.");
+    expect(agent.prompt).toStartWith("## Role instructions\n\nHello.");
     expect(agent.description).toBe("Bare minimum");
     expect(agent.mode).toBe("primary");
 
@@ -446,7 +446,7 @@ describe("RoleboxPlugin subagents", () => {
     const child = cfg.agent!["parent--child-one"]!;
     expect(child.mode).toBe("subagent");
     expect((child as Record<string, unknown>).hidden).toBe(true);
-    expect(child.prompt).toBe("## Role instructions\n\nYou are the child.");
+    expect(child.prompt).toStartWith("## Role instructions\n\nYou are the child.");
     expect(child.description).toBe("A child agent");
   });
 
@@ -686,7 +686,7 @@ describe("RoleboxPlugin subagents", () => {
 
     const agentKeys = Object.keys(cfg.agent ?? {}).sort();
     expect(agentKeys).toEqual(["solo"]);
-    expect(cfg.agent!.solo!.prompt).toBe("## Role instructions\n\nI work alone.");
+    expect(cfg.agent!.solo!.prompt).toStartWith("## Role instructions\n\nI work alone.");
     expect(cfg.agent!.solo!.prompt).not.toContain("## Available sub-agents");
   });
 
@@ -1095,7 +1095,9 @@ describe("RoleboxPlugin declared-graph run notifications", () => {
       } as never);
       await hooks["experimental.chat.system.transform"]!({ sessionID: "ses_worker", model }, workerSystem);
       expect(workerSystem.system).toBe(system);
-      expect(system).toEqual(["## Role instructions\n\nWorker instructions\nHost workspace instructions", "Host policy"]);
+      expect(system[0]).toStartWith("## Role instructions\n\nWorker instructions");
+      expect(system[0]).toEndWith("Host workspace instructions");
+      expect(system[1]).toBe("Host policy");
       expect(workerSystem.system.join("\n")).not.toContain("JSON fallback");
       const parentSystem = { system: [registeredPrompt] };
       await hooks["chat.message"]!({ sessionID: "ses_parent", agent: "agent.worker" }, {

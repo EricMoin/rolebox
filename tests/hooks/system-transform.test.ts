@@ -171,7 +171,9 @@ describe("handleSystemTransform — early exit", () => {
     await handleSystemTransform({ sessionID: "sess-1", agent: "unknown" }, output, makeState(), deps);
     expect(output.system).toEqual(["Host context"]);
     await handleSystemTransform({ sessionID: "sess-1", agent: role.id }, output, makeState(), deps);
-    expect(output.system).toEqual(["Host context", "## Role instructions\n\nWorker responsibilities"]);
+    expect(output.system).toHaveLength(2);
+    expect(output.system[0]).toBe("Host context");
+    expect(output.system[1]).toStartWith("## Role instructions\n\nWorker responsibilities");
     await handleSystemTransform({ sessionID: "sess-1", agent: role.id }, output, makeState(), deps);
     expect(output.system).toHaveLength(2);
   });

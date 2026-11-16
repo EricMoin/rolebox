@@ -134,16 +134,19 @@ describe("buildAgentPrompt", () => {
     expect(result).not.toContain("team_create");
   });
 
-  it("labels the role prompt when no skills are provided (empty array)", () => {
+  it("includes role instructions and temporary-file guidance even without skills", () => {
     const role = makeRole({ prompt: "Be concise." });
     const result = buildAgentPrompt(role, []);
-    expect(result).toBe("## Role instructions\n\nBe concise.");
+    expect(result).toStartWith("## Role instructions\n\nBe concise.");
+    expect(result).toContain("## Temporary files");
+    expect(result).toContain("under the current project's `.rolebox/` directory");
+    expect(result).toContain("organized into subdirectories by purpose");
   });
 
   it("preserves the role prompt text when skills are empty", () => {
     const role = makeRole({ prompt: "Just the prompt." });
     const result = buildAgentPrompt(role, []);
-    expect(result).toBe("## Role instructions\n\nJust the prompt.");
+    expect(result).toStartWith("## Role instructions\n\nJust the prompt.");
   });
 
   it("includes the role prompt text when skills are present", () => {
@@ -289,13 +292,13 @@ describe("buildAgentPrompt", () => {
   it("keeps the role instructions heading when neither skills nor subagents are provided", () => {
     const role = makeRole({ prompt: "Just the prompt." });
     const result = buildAgentPrompt(role, [], { subagents: [] });
-    expect(result).toBe("## Role instructions\n\nJust the prompt.");
+    expect(result).toStartWith("## Role instructions\n\nJust the prompt.");
   });
 
   it("keeps the role instructions heading when skills are empty and subagents undefined", () => {
     const role = makeRole({ prompt: "Just the prompt." });
     const result = buildAgentPrompt(role, []);
-    expect(result).toBe("## Role instructions\n\nJust the prompt.");
+    expect(result).toStartWith("## Role instructions\n\nJust the prompt.");
   });
 
   it("appends the `## Available sub-agents` section when subagents are present but skills are empty", () => {
@@ -403,9 +406,9 @@ describe("roles without open-role fields", () => {
 
     const result = buildAgentPrompt(role, skills, { subagents });
 
-    expect(result).toBe(
-      "## Role instructions\n\nYou are a plain role.\n\n" +
-        buildSkillBlock(skills) +
+    expect(result).toStartWith("## Role instructions\n\nYou are a plain role.");
+    expect(result).toEndWith(
+      buildSkillBlock(skills) +
         "\n\n" +
         buildSubagentBlock(subagents),
     );
@@ -427,9 +430,9 @@ describe("roles without open-role fields", () => {
     ];
     const result = buildAgentPrompt(role, skills, { subagents, references });
 
-    expect(result).toBe(
-      "## Role instructions\n\nRaw prompt text.\n\n" +
-        buildReferenceBlock(references) +
+    expect(result).toStartWith("## Role instructions\n\nRaw prompt text.");
+    expect(result).toEndWith(
+      buildReferenceBlock(references) +
         "\n\n" +
         buildSkillBlock(skills) +
         "\n\n" +
